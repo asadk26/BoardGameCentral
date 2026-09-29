@@ -187,15 +187,16 @@ export function slotOffset(index: number, count: number, isEntrance: boolean): V
  * behind the others. This is presentation only; the logical space is the same.
  */
 export function playerSlot(state: GameState, player: number, frontYaw: number | null = null): V3 {
-  const node = state.players[player].node;
-  let here = state.players.map((p, i) => ({ p, i })).filter(({ p }) => p.node === node).map(({ i }) => i);
+  const node = state.pieces[player].node;
+  let here = state.pieces.map((p, i) => ({ p, i })).filter(({ p }) => p.node === node).map(({ i }) => i);
   const [x, y, z] = nodePos(node);
   const entrance = node === ENTRANCE;
-  if (frontYaw === null || here.length < 2 || !here.includes(state.turn)) {
+  const acting = state.schedule[state.slot] ?? -1;
+  if (frontYaw === null || here.length < 2 || !here.includes(acting)) {
     const [ox, oz] = slotOffset(here.indexOf(player), here.length, entrance);
     return [x + ox, y, z + oz];
   }
-  here = [state.turn, ...here.filter((i) => i !== state.turn)];
+  here = [acting, ...here.filter((i) => i !== acting)];
   const k = here.indexOf(player);
   const r = entrance ? 0.62 : here.length === 2 ? 0.26 : 0.32;
   let yaw = frontYaw;
@@ -216,7 +217,7 @@ export function headingBetween(from: V2, to: V2): number {
 
 /** Heading of travel for a player (defaults to facing into the mansion). */
 export function playerHeading(state: GameState, player: number): number {
-  const p = state.players[player];
+  const p = state.pieces[player];
   if (p.facingFrom === null || p.facingFrom === p.node) return Math.PI; // facing north (−z)
   return headingBetween(nodeXZ(p.facingFrom), nodeXZ(p.node));
 }

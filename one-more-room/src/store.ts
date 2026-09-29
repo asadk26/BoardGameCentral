@@ -4,11 +4,11 @@
 // starts the matching animation, and saves on this device.
 
 import { useSyncExternalStore } from 'react';
-import { CHARACTERS, DEFAULT_PLAYER_NAMES, TEXT_LIMITS, type CharacterId } from './engine/config';
-import { createGame, dispatch, newSession, undo as undoSession, type Session } from './engine/engine';
-import type { Action, GameState } from './engine/types';
+import { CHARACTERS, DEFAULT_PLAYER_NAMES, MAX_PIECES, MIN_PIECES, ROUNDS, TEXT_LIMITS, type CharacterId } from './engine/config';
+import { actingPiece, createGame, dispatch, newSession, undo as undoSession, type Session } from './engine/engine';
+import type { Action, GameState, LogEntry } from './engine/types';
 import { botAction, defaultBotProfile, newBotMemory, reflexOf, type BotMemory, type BotProfile } from './engine/bots';
-import { botChallengeInputs } from './engine/challenges';
+import { botRopeInputs, type ChallengeInput } from './engine/challenges';
 import { seatView } from './engine/view';
 import {
   cleanText,
@@ -40,20 +40,22 @@ export interface Settings {
   fastBots: boolean;
 }
 
-export interface SetupPlayer extends SeatSetup {
-  name: string;
+/** One board piece at local setup: one or two people sharing it, or a bot. */
+export interface SetupPiece extends SeatSetup {
+  /** One name per person (a second name makes a pair in Team Battle). */
+  names: string[];
   character: CharacterId;
 }
 
-/** Keyboard keys for up to two humans sharing one keyboard in a duel. */
-export interface KeyMap {
-  a: string;
-  b: string;
-}
-export const KEY_SETS: Array<{ label: string; keys: KeyMap }> = [
-  { label: 'F and J', keys: { a: 'f', b: 'j' } },
-  { label: 'A and L', keys: { a: 'a', b: 'l' } },
-  { label: 'Left Shift and Right Shift', keys: { a: 'ShiftLeft', b: 'ShiftRight' } },
+/**
+ * Keys for people sharing one keyboard in a challenge: up to four pieces jump
+ * at once, each with its own key. Space also works when only one person jumps.
+ */
+export const JUMP_KEYS: Array<{ code: string; label: string }> = [
+  { code: 'KeyF', label: 'F' },
+  { code: 'KeyJ', label: 'J' },
+  { code: 'KeyA', label: 'A' },
+  { code: 'KeyL', label: 'L' },
 ];
 
 export interface AppState {
@@ -63,9 +65,9 @@ export interface AppState {
   mode: 'local' | 'room';
   seats: SeatSetup[];
   personalization: Personalization;
-  setupPlayers: SetupPlayer[];
+  setupPieces: SetupPiece[];
+  setupMode: 'ffa' | 'teams';
   settings: Settings;
-  keySet: number;
   cameraMode: 'follow' | 'overview';
   tipDismissed: boolean;
   modal: Modal;
@@ -77,7 +79,7 @@ export interface AppState {
   rollId: number;
   hoverNode: number | null;
   editingPlayer: number;
-  /** Local secret placement: which seat is behind the curtain, and what they have tapped. */
+  /** Local secret placement: which piece is behind the curtain, and what they have tapped. */
   placement: { seat: number | null; draft: number | null; confirmed: boolean };
   /** Phone-room hosting (TV side). */
   room: { code: string | null; joinUrl: string | null; problem: string | null; status: string; view: import('./net/protocol').RoomView | null; error: string | null } | null;
@@ -106,13 +108,12 @@ function safeRemove(key: string) {
   }
 }
 
-function defaultSetupPlayers(n = 4): SetupPlayer[] {
-  return Array.from({ length: n }, (_, i) => ({
-    name: i === 0 ? DEFAULT_PLAYER_NAMES[0] : DEFAULT_PLAYER_NAMES[i],
-    character: CHARACTERS[i].id,
-    kind: i === 0 ? 'human' : 'bot',
-    bot: i === 0 ? undefined : defaultBotProfile(i),
-  }));
+function defaultSetupPieces(): SetupPiece[] {
+  return [
+    { names: [DEFAULT_PLAYER_NAMES[0]], character: CHARACTERS[0].id, kind: 'human' },
+    { names: [DEFAULT_PLAYER_NAMES[1]], character: CHARACTERS[1].id, kind: 'bot', bot: defaultBotProfile(1) },
+    { names: [DEFAULT_PLAYER_NAMES[2]], character: CHARACTERS[2].id, kind: 'bot', bot: defaultBotProfile(2) },
+  ];
 }
 
 function loadSettings(): Settings {
@@ -138,7 +139,7 @@ function loadSettings(): Settings {
   }
 }
 
-function sanitizeSeat(p: Partial<SetupPlayer>, i: number): SeatSetup {
+function sanitizeSeat(p: Partial<SetupPiece>, i: number): SeatSetup {
   if (p.kind === 'bot') {
     const bot = p.bot && ['cautious', 'greedy', 'mischievous'].includes(p.bot.personality) && ['shaky', 'steady', 'sharp'].includes(p.bot.skill) ? p.bot : defaultBotProfile(i);
     return { kind: 'bot', bot };
@@ -146,22 +147,33 @@ function sanitizeSeat(p: Partial<SetupPlayer>, i: number): SeatSetup {
   return { kind: 'human' };
 }
 
-function loadPrefs(): { personalization: Personalization; setupPlayers: SetupPlayer[] } {
+function loadPrefs(): { personalization: Personalization; setupPieces: SetupPiece[]; setupMode: 'ffa' | 'teams' } {
+  const d = { personalization: defaultPersonalization(), setupPieces: defaultSetupPieces(), setupMode: 'ffa' as const };
   try {
     const raw = safeGet(PREFS_KEY);
-    if (!raw) return { personalization: defaultPersonalization(), setupPlayers: defaultSetupPlayers() };
+    if (!raw) return d;
     const o = JSON.parse(raw);
-    const players: SetupPlayer[] = Array.isArray(o.setupPlayers) ? o.setupPlayers : [];
+    const pieces: SetupPiece[] = Array.isArray(o.setupPieces) ? o.setupPieces : [];
     const ids = new Set(CHARACTERS.map((c) => c.id));
-    const ok = players.length >= 2 && players.length <= 6 && players.every((p) => ids.has(p.character)) && new Set(players.map((p) => p.character)).size === players.length;
+    const ok =
+      pieces.length >= MIN_PIECES &&
+      pieces.length <= MAX_PIECES &&
+      pieces.every((p) => ids.has(p.character) && Array.isArray(p.names) && p.names.length >= 1 && p.names.length <= 2) &&
+      new Set(pieces.map((p) => p.character)).size === pieces.length;
+    const mode = o.setupMode === 'teams' ? 'teams' : 'ffa';
     return {
       personalization: sanitizePersonalization(o.personalization),
-      setupPlayers: ok
-        ? players.map((p, i) => ({ name: cleanText(p.name, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[i]), character: p.character, ...sanitizeSeat(p, i) }))
-        : defaultSetupPlayers(),
+      setupMode: mode,
+      setupPieces: ok
+        ? pieces.map((p, i) => {
+            const seat = sanitizeSeat(p, i);
+            const names = (seat.kind === 'bot' || mode === 'ffa' ? p.names.slice(0, 1) : p.names).map((n, k) => cleanText(n, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[(i * 2 + k) % DEFAULT_PLAYER_NAMES.length]));
+            return { names, character: p.character, ...seat };
+          })
+        : d.setupPieces,
     };
   } catch {
-    return { personalization: defaultPersonalization(), setupPlayers: defaultSetupPlayers() };
+    return d;
   }
 }
 
@@ -181,9 +193,9 @@ let state: AppState = {
   mode: 'local',
   seats: [],
   personalization: prefs.personalization,
-  setupPlayers: prefs.setupPlayers,
+  setupPieces: prefs.setupPieces,
+  setupMode: prefs.setupMode,
   settings: loadSettings(),
-  keySet: 0,
   cameraMode: 'follow',
   tipDismissed: false,
   modal: null,
@@ -247,7 +259,7 @@ export function updateSettings(patch: Partial<Settings>) {
 }
 
 export function savePrefs() {
-  safeSet(PREFS_KEY, JSON.stringify({ personalization: state.personalization, setupPlayers: state.setupPlayers }));
+  safeSet(PREFS_KEY, JSON.stringify({ personalization: state.personalization, setupPieces: state.setupPieces, setupMode: state.setupMode }));
 }
 
 function persist() {
@@ -267,23 +279,38 @@ export function setTransport(t: Transport | null) {
 }
 
 /** A room update arrived: show it like a locally dispatched action. */
-export function applyRemote(game: GameState, events: import('./engine/types').LogEntry[]) {
+export function applyRemote(game: GameState, events: LogEntry[]) {
   const before = state.session?.game ?? game;
-  const known = Array.from(new Set([...(state.session?.known ?? []), ...game.traps.filter((t) => t.revealed).map((t) => t.node)]));
+  const known = [...(state.session?.known ?? [])];
+  for (const t of game.traps) if (t.revealed && !known.some((k) => k.node === t.node)) known.push({ node: t.node, effect: t.effect });
   setState({
     session: { game, turnStart: game, previousTurnStart: null, known },
-    rollId: events.some((e) => e.kind === 'roll') ? state.rollId + 1 : state.rollId,
+    rollId: events.some((e) => e.kind === 'roll' || e.kind === 'lifeRoll') ? state.rollId + 1 : state.rollId,
   });
   if (events.length) director.play(events, before, game);
   afterEvents(game, events);
 }
 
-function afterEvents(game: GameState, events: import('./engine/types').LogEntry[]) {
-  audio.midnight = game.midnight;
-  if (events.some((e) => e.kind === 'midnight')) {
-    audio.play('bell');
-    setState((st) => ({ banner: { id: (st.banner?.id ?? 0) + 1, text: 'Three rounds until midnight', sub: 'The house wants a soul. Duels now leave one survivor.' } }));
+/** Round banners are shown by the store, so skipping an animation never loses them. */
+function afterEvents(game: GameState, events: LogEntry[]) {
+  audio.midnight = game.round >= ROUNDS - 2;
+  const end = events.find((e) => e.kind === 'roundEnd');
+  const start = events.find((e) => e.kind === 'roundStart');
+  if (!end && !start) return;
+  const name = (i: number) => game.pieces[i]?.name ?? '';
+  let text = '';
+  let sub = '';
+  if (end && end.kind === 'roundEnd') {
+    text = `${name(end.piece)} scores round ${end.round}`;
+    sub = end.round >= ROUNDS ? 'The last bell has rung.' : `Alive at the bell · ${end.score} point${end.score === 1 ? '' : 's'}`;
   }
+  if (start && start.kind === 'roundStart') {
+    const order = start.schedule.map(name).join(' → ');
+    if (!text) text = start.round === ROUNDS ? 'Final round' : `Round ${start.round}`;
+    else sub = `${sub} · Round ${start.round}${start.round === ROUNDS ? ' (final)' : ''}: ${order}`;
+    if (!end) sub = `Order: ${order}`;
+  }
+  setState((st) => ({ banner: { id: (st.banner?.id ?? 0) + 1, text, sub } }));
 }
 
 // ── game flow ───────────────────────────────────────────────────────────
@@ -292,7 +319,7 @@ const botMemories = new Map<number, BotMemory>();
 function memoryFor(seat: number): BotMemory {
   let m = botMemories.get(seat);
   if (!m) {
-    m = newBotMemory(((state.session?.game.players.length ?? 1) * 7919 + seat * 104729 + Date.now()) >>> 0);
+    m = newBotMemory(((state.session?.game.pieces.length ?? 1) * 7919 + seat * 104729 + Date.now()) >>> 0);
     botMemories.set(seat, m);
   }
   return m;
@@ -312,7 +339,7 @@ export function act(action: Action) {
   setState({ session: r.session, rollId: action.type === 'roll' ? s.rollId + 1 : s.rollId });
   director.play(r.events, before, r.session.game);
   afterEvents(r.session.game, r.events);
-  if (action.type === 'placeDecoy' || action.type === 'nominate') setState({});
+  if (action.type === 'nominate') setState({});
   if (action.type !== 'select') persist();
   else persistSoon();
   pumpBots();
@@ -335,14 +362,14 @@ let botTimer: number | null = null;
 /**
  * Let bots act when it is their move. Bots only ever see a seat view — the
  * public state plus their own nomination — through the same function a
- * remote bot would use.
+ * remote bot would use. With no people at all, the life roll happens by itself.
  */
 export function pumpBots() {
   if (state.mode !== 'local' || !state.session || botTimer !== null) return;
   const g = state.session.game;
   if (g.phase === 'gameOver' || g.phase === 'challenge') return;
   if (g.phase === 'placement') {
-    for (let seat = 0; seat < g.players.length; seat++) {
+    for (let seat = 0; seat < g.pieces.length; seat++) {
       if (!isBotSeat(seat) || g.nominations[seat] !== null) continue;
       const a = botAction(seatView(g, seat), state.seats[seat].bot!, memoryFor(seat));
       if (a) {
@@ -352,7 +379,16 @@ export function pumpBots() {
     }
     return;
   }
-  if (!isBotSeat(g.turn) || state.busy || state.modal) return;
+  if (g.phase === 'lifeRoll') {
+    if (state.seats.some((x) => x.kind === 'human') || state.busy || state.modal) return;
+    botTimer = window.setTimeout(() => {
+      botTimer = null;
+      act({ type: 'rollForLife' });
+    }, 600);
+    return;
+  }
+  const acting = actingPiece(g);
+  if (!isBotSeat(acting) || state.busy || state.modal) return;
   const fast = state.settings.fastBots;
   const delay = g.phase === 'choose' ? (fast ? 150 : 650) : fast ? 120 : 520;
   botTimer = window.setTimeout(() => {
@@ -362,31 +398,39 @@ export function pumpBots() {
       pumpBots();
       return;
     }
-    const a = botAction(seatView(cur, cur.turn), state.seats[cur.turn].bot!, memoryFor(cur.turn));
+    const me = actingPiece(cur);
+    const a = botAction(seatView(cur, me), state.seats[me].bot!, memoryFor(me));
     if (a) act(a);
     if (fast) director.skip();
   }, delay);
 }
 
 /** Inputs for the bot participants of the current challenge, via the same judged format. */
-export function botInputsFor(ch: NonNullable<GameState['challenge']>): Record<number, import('./engine/challenges').ChallengeInput[]> {
-  const out: Record<number, import('./engine/challenges').ChallengeInput[]> = {};
+export function botInputsFor(ch: NonNullable<GameState['challenge']>): Record<number, ChallengeInput[]> {
+  const out: Record<number, ChallengeInput[]> = {};
   for (const p of ch.participants) {
     const seat = state.seats[p];
-    if (seat?.kind === 'bot') out[p] = botChallengeInputs(ch.kind, ch.seed, p, reflexOf(seat.bot!), ch.oneSurvivor);
+    if (seat?.kind === 'bot') out[p] = botRopeInputs(ch.seed, p, reflexOf(seat.bot!));
   }
   return out;
 }
 
-export function startGame(players: SetupPlayer[] = state.setupPlayers) {
+export function startGame(pieces: SetupPiece[] = state.setupPieces) {
   const seed = (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
-  const game = createGame({ players: players.map((p, i) => ({ name: cleanText(p.name, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[i]), character: p.character })), seed });
+  const game = createGame({
+    pieces: pieces.map((p, i) => {
+      const bot = p.kind === 'bot';
+      const names = (bot ? p.names.slice(0, 1) : p.names).map((n, k) => cleanText(n, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[(i * 2 + k) % DEFAULT_PLAYER_NAMES.length]));
+      return { character: p.character, controllers: bot ? [`${names[0]} (bot)`] : names, bot };
+    }),
+    seed,
+  });
   director.reset();
   botMemories.clear();
   setState({
     session: newSession(game),
     mode: 'local',
-    seats: players.map((p, i) => sanitizeSeat(p, i)),
+    seats: pieces.map((p, i) => sanitizeSeat(p, i)),
     screen: 'game',
     modal: null,
     tipDismissed: false,
@@ -407,15 +451,15 @@ export function resumeGame() {
   }
   director.reset();
   botMemories.clear();
-  audio.midnight = r.session.game.midnight;
+  audio.midnight = r.session.game.round >= ROUNDS - 2;
   setState({
     session: r.session,
     mode: 'local',
-    seats: r.seats ?? r.session.game.players.map(() => ({ kind: 'human' as const })),
+    seats: r.seats ?? r.session.game.pieces.map((p) => (p.bot ? { kind: 'bot' as const, bot: defaultBotProfile(0) } : { kind: 'human' as const })),
     personalization: r.personalization,
     screen: 'game',
     modal: null,
-    tipDismissed: r.session.game.turnNumber > 1,
+    tipDismissed: r.session.game.actionNumber > 1,
     placement: { seat: null, draft: null, confirmed: false },
   });
   pumpBots();
@@ -432,7 +476,7 @@ export function doUndo() {
   director.reset();
   const session = undoSession(state.session);
   setState({ session, modal: null });
-  audio.midnight = session.game.midnight;
+  audio.midnight = session.game.round >= ROUNDS - 2;
   persist();
   pumpBots();
 }
@@ -451,7 +495,12 @@ export function goToTitle() {
 
 export function playAgain() {
   if (!state.session) return;
-  startGame(state.session.game.players.map((p, i) => ({ name: p.name, character: p.character, ...(state.seats[i] ?? { kind: 'human' }) })));
+  startGame(
+    state.session.game.pieces.map((p, i) => {
+      const seat = state.seats[i] ?? { kind: 'human' as const };
+      return { names: seat.kind === 'bot' ? [p.controllers[0].replace(/ \(bot\)$/, '')] : p.controllers.slice(), character: p.character, ...seat };
+    }),
+  );
 }
 
 export function toggleCamera() {

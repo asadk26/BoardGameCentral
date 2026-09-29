@@ -1,12 +1,13 @@
-// Death's side of the mansion: revealed Reapers, the ever-visible Super
-// Reaper, ghost-only wall links, spectral miniatures, protection shields and
-// transformation bursts. Only public facts reach this file — hidden traps are
-// never passed in, so nothing here can light, sound or load differently.
+// Death's side of the mansion: revealed traps (Reapers, Séance circles,
+// Poltergeists), the ever-visible Super Reaper, ghost-only wall links,
+// spectral miniatures, the living flame and transformation bursts. Only
+// public facts reach this file — hidden traps are never passed in, so
+// nothing here can light, sound or load differently.
 
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
-import { GHOST_WALL_LINKS, SUPER_REAPER } from '../engine/config';
+import { GHOST_WALL_LINKS, SEANCE_LIMIT, SUPER_REAPER, type TrapEffect } from '../engine/config';
 import { nodePos, nodeXZ, type V3 } from './layout';
 import { Label } from './Board';
 
@@ -78,7 +79,7 @@ function RevealedReaper({ node, reduced }: { node: number; reduced: boolean }) {
   );
 }
 
-function SuperReaper({ reduced }: { reduced: boolean }) {
+function SuperReaper({ reduced, effect, seancesLeft }: { reduced: boolean; effect: 'seance' | 'reaper'; seancesLeft: number }) {
   const ref = useRef<THREE.Group>(null);
   const [x, , z] = nodePos(SUPER_REAPER, 0);
   useFrame(({ clock }) => {
@@ -86,27 +87,126 @@ function SuperReaper({ reduced }: { reduced: boolean }) {
     ref.current.position.y = reduced ? 0 : Math.sin(clock.elapsedTime * 1.1) * 0.06;
     ref.current.rotation.y = Math.PI / 2 + (reduced ? 0 : Math.sin(clock.elapsedTime * 0.5) * 0.25);
   });
+  const glow = effect === 'seance' ? '#ff3d6e' : '#b36bff';
   return (
     <group position={[x - 0.75, 0, z]}>
       <group ref={ref}>
-        <ReaperModel glow="#ff3d6e" scale={0.95} />
+        <ReaperModel glow={glow} scale={0.95} />
       </group>
       <mesh position={[0.75, 0.16, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[0.44, 0.6, 36]} />
-        <meshBasicMaterial color="#ff3d6e" transparent opacity={0.9} toneMapped={false} />
+        <meshBasicMaterial color={glow} transparent opacity={0.9} toneMapped={false} />
       </mesh>
-      <Label pos={[0, 1.75, 0]} lines={['Super Reaper']} scale={0.4} color="#ff7b98" />
+      <Label
+        pos={[0, 1.85, 0]}
+        lines={['Super Reaper', effect === 'seance' ? `Séance · ${seancesLeft} left` : 'Reaper’s Challenge']}
+        scale={0.4}
+        color={effect === 'seance' ? '#ff7b98' : '#d6a6ff'}
+      />
     </group>
   );
 }
 
-export function Reapers({ revealed, reduced }: { revealed: readonly number[]; reduced: boolean }) {
+/** A ring of candles round a revealed Séance tile; guttered once it has been used. */
+function SeanceCircle({ node, spent, reduced }: { node: number; spent: boolean; reduced: boolean }) {
+  const flames = useRef<THREE.Group>(null);
+  const [x, , z] = nodePos(node, 0);
+  useFrame(({ clock }) => {
+    flames.current?.children.forEach((c, k) => {
+      c.scale.setScalar(spent ? 0.001 : 0.8 + (reduced ? 0.1 : Math.abs(Math.sin(clock.elapsedTime * 7 + k * 1.7)) * 0.35));
+    });
+  });
+  const n = 6;
+  return (
+    <group position={[x, 0.14, z]}>
+      {Array.from({ length: n }, (_, k) => {
+        const a = (k / n) * Math.PI * 2;
+        return (
+          <mesh key={k} position={[Math.cos(a) * 0.5, 0.09, Math.sin(a) * 0.5]}>
+            <cylinderGeometry args={[0.045, 0.05, 0.18, 8]} />
+            <meshStandardMaterial color={spent ? '#6b6272' : '#f3e6c8'} roughness={0.6} />
+          </mesh>
+        );
+      })}
+      <group ref={flames}>
+        {Array.from({ length: n }, (_, k) => {
+          const a = (k / n) * Math.PI * 2;
+          return (
+            <mesh key={k} position={[Math.cos(a) * 0.5, 0.24, Math.sin(a) * 0.5]}>
+              <coneGeometry args={[0.035, 0.1, 6]} />
+              <meshBasicMaterial color="#ffb347" toneMapped={false} />
+            </mesh>
+          );
+        })}
+      </group>
+      <mesh position={[0, 0.005, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.38, 0.44, 36]} />
+        <meshBasicMaterial color={spent ? '#4d4458' : '#ff7b98'} transparent opacity={0.85} toneMapped={false} />
+      </mesh>
+      {!spent && <pointLight color="#ffb347" intensity={1.2} distance={2.2} position={[0, 0.6, 0]} />}
+      <Label pos={[0, 1.0, 0]} lines={[spent ? 'Séance (used)' : 'Séance']} scale={0.34} color={spent ? '#a79db3' : '#ff9fb4'} />
+    </group>
+  );
+}
+
+/** A little storm of floating furniture over a revealed Poltergeist. */
+function PoltergeistSwirl({ node, reduced }: { node: number; reduced: boolean }) {
+  const ref = useRef<THREE.Group>(null);
+  const [x, , z] = nodePos(node, 0);
+  useFrame(({ clock }) => {
+    if (!ref.current) return;
+    const t = reduced ? 0 : clock.elapsedTime;
+    ref.current.rotation.y = t * 0.9;
+    ref.current.children.forEach((c, k) => {
+      c.position.y = 0.55 + k * 0.12 + Math.sin(t * 2 + k) * 0.08;
+      c.rotation.set(t * (0.7 + k * 0.2), t * 0.5, t * 0.3 * k);
+    });
+  });
+  return (
+    <group position={[x, 0.1, z]}>
+      <group ref={ref}>
+        <mesh position={[0.34, 0.55, 0]}>
+          <boxGeometry args={[0.16, 0.2, 0.05]} />
+          <meshStandardMaterial color="#7a4a2e" roughness={0.8} />
+        </mesh>
+        <mesh position={[-0.3, 0.7, 0.15]}>
+          <boxGeometry args={[0.14, 0.04, 0.2]} />
+          <meshStandardMaterial color="#3f6fb3" roughness={0.7} />
+        </mesh>
+        <mesh position={[0, 0.8, -0.32]}>
+          <cylinderGeometry args={[0.05, 0.07, 0.14, 8]} />
+          <meshStandardMaterial color="#d9d2c0" roughness={0.4} />
+        </mesh>
+      </group>
+      <mesh position={[0, 0.06, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.44, 0.52, 36]} />
+        <meshBasicMaterial color="#8fd0ff" transparent opacity={0.8} toneMapped={false} />
+      </mesh>
+      <Label pos={[0, 1.35, 0]} lines={['Poltergeist']} scale={0.34} color="#a9dcff" />
+    </group>
+  );
+}
+
+export interface KnownTrap {
+  node: number;
+  effect: TrapEffect;
+  spent: boolean;
+}
+
+export function Reapers({ revealed, reduced, seancesUsed }: { revealed: readonly KnownTrap[]; reduced: boolean; seancesUsed: number }) {
+  const left = Math.max(0, SEANCE_LIMIT - seancesUsed);
   return (
     <group>
-      <SuperReaper reduced={reduced} />
-      {revealed.map((n) => (
-        <RevealedReaper key={n} node={n} reduced={reduced} />
-      ))}
+      <SuperReaper reduced={reduced} effect={left > 0 ? 'seance' : 'reaper'} seancesLeft={left} />
+      {revealed.map((t) =>
+        t.effect === 'reaper' ? (
+          <RevealedReaper key={t.node} node={t.node} reduced={reduced} />
+        ) : t.effect === 'seance' ? (
+          <SeanceCircle key={t.node} node={t.node} spent={t.spent} reduced={reduced} />
+        ) : (
+          <PoltergeistSwirl key={t.node} node={t.node} reduced={reduced} />
+        ),
+      )}
     </group>
   );
 }
@@ -172,8 +272,8 @@ export function useSpectral(group: React.RefObject<THREE.Group | null>, spectral
   }, [group, spectral, tint]);
 }
 
-/** A brief swirl of light where someone just became a ghost. */
-export function TransformBurst({ at, onDone }: { at: V3; onDone: () => void }) {
+/** A brief swirl of light where life changes hands: teal for a new ghost, gold for new life. */
+export function TransformBurst({ at, onDone, living = false }: { at: V3; onDone: () => void; living?: boolean }) {
   const ring = useRef<THREE.Mesh>(null);
   const motes = useRef<THREE.Group>(null);
   const t0 = useRef<number | null>(null);
@@ -198,13 +298,13 @@ export function TransformBurst({ at, onDone }: { at: V3; onDone: () => void }) {
     <group position={at}>
       <mesh ref={ring} position={[0, 0.2, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[0.4, 0.55, 32]} />
-        <meshBasicMaterial color="#7ff5e6" transparent toneMapped={false} />
+        <meshBasicMaterial color={living ? '#ffd36b' : '#7ff5e6'} transparent toneMapped={false} />
       </mesh>
       <group ref={motes}>
         {Array.from({ length: 10 }, (_, k) => (
           <mesh key={k}>
             <sphereGeometry args={[0.05, 6, 4]} />
-            <meshBasicMaterial color={k % 2 ? '#7ff5e6' : '#d8fff9'} toneMapped={false} />
+            <meshBasicMaterial color={living ? (k % 2 ? '#ffd36b' : '#fff4d1') : k % 2 ? '#7ff5e6' : '#d8fff9'} toneMapped={false} />
           </mesh>
         ))}
       </group>
@@ -212,16 +312,26 @@ export function TransformBurst({ at, onDone }: { at: V3; onDone: () => void }) {
   );
 }
 
-/** A glowing dome over a player who survived a challenge. */
-export function ProtectionShield() {
-  const ref = useRef<THREE.Mesh>(null);
+/** The one life: a warm flame floating over the living piece. */
+export function LifeFlame({ reduced }: { reduced: boolean }) {
+  const ref = useRef<THREE.Group>(null);
   useFrame(({ clock }) => {
-    if (ref.current) (ref.current.material as THREE.MeshBasicMaterial).opacity = 0.16 + Math.sin(clock.elapsedTime * 3) * 0.05;
+    if (!ref.current) return;
+    const t = clock.elapsedTime;
+    ref.current.position.y = 1.45 + (reduced ? 0 : Math.sin(t * 2.4) * 0.05);
+    ref.current.scale.set(1, 1 + (reduced ? 0 : Math.sin(t * 9) * 0.08), 1);
   });
   return (
-    <mesh ref={ref} position={[0, 0.02, 0]}>
-      <sphereGeometry args={[0.42, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2]} />
-      <meshBasicMaterial color="#9fe8ff" transparent opacity={0.18} depthWrite={false} toneMapped={false} side={THREE.DoubleSide} />
-    </mesh>
+    <group ref={ref}>
+      <mesh>
+        <sphereGeometry args={[0.11, 14, 10]} />
+        <meshBasicMaterial color="#ffd36b" toneMapped={false} />
+      </mesh>
+      <mesh position={[0, 0.13, 0]}>
+        <coneGeometry args={[0.085, 0.22, 12]} />
+        <meshBasicMaterial color="#ff9a3c" toneMapped={false} />
+      </mesh>
+      <pointLight color="#ffc060" intensity={2.2} distance={3} />
+    </group>
   );
 }

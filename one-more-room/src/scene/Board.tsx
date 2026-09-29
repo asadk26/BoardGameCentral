@@ -1,8 +1,7 @@
 import { useMemo, useRef, type ReactNode } from 'react';
 import { useFrame, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
-import { ENTRANCE, NODE_COUNT, ORDINARY_EDGES, ROOMS, SECRET_EDGES, nodeKind, secretPairLabel } from '../engine/config';
-import type { GameState } from '../engine/types';
+import { DECORATED_CORRIDORS, ENTRANCE, NODE_COUNT, ORDINARY_EDGES, ROOMS, SECRET_EDGES, nodeKind, secretPairLabel } from '../engine/config';
 import {
   MANSION_OUTLINE,
   NODE_TOP,
@@ -185,7 +184,7 @@ export function Walls({ fade }: { fade: boolean }) {
   );
 }
 
-// ── nodes, candy, passages ──────────────────────────────────────────────
+// ── nodes, room plaques, passages ──────────────────────────────────────────────
 
 function Tile({ id }: { id: number }) {
   const kind = nodeKind(id);
@@ -194,8 +193,8 @@ function Tile({ id }: { id: number }) {
   const pair = secretPairLabel(id);
   const r = id === ENTRANCE ? 0.95 : 0.52;
   const color =
-    kind === 'entrance' ? '#e8b54a' : kind === 'room' ? plot!.accent : kind === 'event' ? '#f08a24' : kind === 'secret' ? PASSAGE_COLORS[pair!] : id === 16 ? '#5ff2e0' : '#a595b8';
-  const symbol = kind === 'event' ? tileSymbolTexture('event') : kind === 'secret' ? tileSymbolTexture(pair === 'A' ? 'secretA' : 'secretB') : kind === 'entrance' ? tileSymbolTexture('entrance') : null;
+    kind === 'entrance' ? '#e8b54a' : kind === 'room' ? plot!.accent : DECORATED_CORRIDORS.includes(id) ? '#b8703a' : kind === 'secret' ? PASSAGE_COLORS[pair!] : id === 16 ? '#5ff2e0' : '#a595b8';
+  const symbol = kind === 'secret' ? tileSymbolTexture(pair === 'A' ? 'secretA' : 'secretB') : kind === 'entrance' ? tileSymbolTexture('entrance') : null;
   const num = useMemo(() => labelTexture([String(id)], { bg: 'rgba(0,0,0,0)', fg: 'rgba(255,240,220,0.85)', height: 64 }).tex, [id]);
   return (
     <group position={[x, 0, z]}>
@@ -233,148 +232,19 @@ export function Tiles() {
   );
 }
 
-/** Wrapped sweets for candy bowls and dropped piles, drawn with instancing. */
-const CANDY_COLORS = ['#ff4d6d', '#ffd23f', '#6a4cff', '#3ddc97', '#ff8c42', '#f7f7ff'];
-
-function CandyInstances({ spots }: { spots: Array<{ p: V3; c: number; r: number }> }) {
-  const ref = useRef<THREE.InstancedMesh>(null);
-  const wrapRef = useRef<THREE.InstancedMesh>(null);
-  const max = 200;
-  useFrame(() => {
-    const m = ref.current;
-    const w = wrapRef.current;
-    if (!m || !w) return;
-    const o = new THREE.Object3D();
-    const col = new THREE.Color();
-    spots.slice(0, max).forEach((s, i) => {
-      o.position.set(...s.p);
-      o.rotation.set(0, s.r, Math.PI / 2);
-      o.scale.set(1, 1, 1);
-      o.updateMatrix();
-      m.setMatrixAt(i, o.matrix);
-      w.setMatrixAt(i, o.matrix);
-      col.set(CANDY_COLORS[s.c % CANDY_COLORS.length]);
-      m.setColorAt(i, col);
-      w.setColorAt(i, col);
-    });
-    m.count = w.count = Math.min(max, spots.length);
-    m.instanceMatrix.needsUpdate = true;
-    w.instanceMatrix.needsUpdate = true;
-    if (m.instanceColor) m.instanceColor.needsUpdate = true;
-    if (w.instanceColor) w.instanceColor.needsUpdate = true;
-  });
-  const wrapGeo = useMemo(() => {
-    const a = new THREE.ConeGeometry(0.05, 0.08, 6);
-    a.translate(0, 0.085, 0);
-    const b = new THREE.ConeGeometry(0.05, 0.08, 6);
-    b.rotateZ(Math.PI);
-    b.translate(0, -0.085, 0);
-    const merged = new THREE.BufferGeometry();
-    const pa = a.toNonIndexed().attributes.position.array as Float32Array;
-    const pb = b.toNonIndexed().attributes.position.array as Float32Array;
-    const all = new Float32Array(pa.length + pb.length);
-    all.set(pa);
-    all.set(pb, pa.length);
-    merged.setAttribute('position', new THREE.BufferAttribute(all, 3));
-    merged.computeVertexNormals();
-    return merged;
-  }, []);
+/** Room name plaques, beside each room's tile. */
+export function RoomLabels({ roomNames }: { roomNames: Record<number, string> }) {
   return (
     <group>
-      <instancedMesh ref={ref} args={[undefined, undefined, max]} castShadow frustumCulled={false}>
-        <capsuleGeometry args={[0.055, 0.07, 4, 8]} />
-        <meshStandardMaterial roughness={0.25} />
-      </instancedMesh>
-      <instancedMesh ref={wrapRef} args={[undefined, undefined, max]} frustumCulled={false}>
-        <primitive object={wrapGeo} attach="geometry" />
-        <meshStandardMaterial roughness={0.4} />
-      </instancedMesh>
-    </group>
-  );
-}
-
-/** Where each room keeps its candy bowl: beside the tile, toward the room. */
-export function bowlPos(id: number): V3 {
-  const plot = ROOM_PLOTS.find((p) => p.node === id)!;
-  const [x, z] = nodeXZ(id);
-  const cx = (plot.rect.x0 + plot.rect.x1) / 2;
-  const cz = (plot.rect.z0 + plot.rect.z1) / 2;
-  let dx = cx - x;
-  let dz = cz - z;
-  // Keep the bowl off the corridor axis: push it perpendicular to the dominant corridor.
-  if (Math.abs(dx) < 0.3 && Math.abs(dz) < 0.3) dz = -1;
-  const l = Math.hypot(dx, dz);
-  dx /= l;
-  dz /= l;
-  return [x + dx * 0.95, 0, z + dz * 0.95];
-}
-
-function hash(n: number) {
-  const s = Math.sin(n * 127.1) * 43758.5453;
-  return s - Math.floor(s);
-}
-
-export function Candy({ state, roomNames, labels = true }: { state: GameState | null; roomNames: Record<number, string>; labels?: boolean }) {
-  const stocks = state?.stocks ?? Object.fromEntries(Object.entries(ROOMS).map(([k, r]) => [k, r.stock]));
-  const piles = state?.piles ?? [];
-  const spots = useMemo(() => {
-    const out: Array<{ p: V3; c: number; r: number }> = [];
-    for (const idStr of Object.keys(ROOMS)) {
-      const id = Number(idStr);
-      const [bx, , bz] = bowlPos(id);
-      const n = (stocks as Record<number, number>)[id] ?? 0;
-      for (let i = 0; i < n; i++) {
-        const layer = Math.floor(i / 6);
-        const a = (i % 6) * (Math.PI / 3) + layer * 0.5;
-        const rr = layer === 0 ? 0.16 : layer === 1 ? 0.09 : 0;
-        out.push({ p: [bx + Math.cos(a) * rr, 0.3 + layer * 0.08, bz + Math.sin(a) * rr], c: i + id, r: a });
-      }
-    }
-    piles.forEach((n, id) => {
-      if (!n) return;
-      const [x, , z] = nodePos(id, 0);
-      for (let i = 0; i < Math.min(n, 14); i++) {
-        const a = hash(id * 31 + i) * Math.PI * 2;
-        const rr = 0.28 + hash(id * 7 + i * 3) * 0.16;
-        out.push({ p: [x + Math.cos(a) * rr, NODE_TOP + 0.06, z + Math.sin(a) * rr], c: i * 7 + id, r: a });
-      }
-    });
-    return out;
-  }, [stocks, piles]);
-
-  return (
-    <group>
-      <CandyInstances spots={spots} />
       {Object.keys(ROOMS).map((idStr) => {
         const id = Number(idStr);
-        const [bx, , bz] = bowlPos(id);
-        const n = (stocks as Record<number, number>)[id] ?? 0;
-        return (
-          <group key={id}>
-            <mesh position={[bx, 0.14, bz]} castShadow receiveShadow>
-              <cylinderGeometry args={[0.3, 0.18, 0.26, 16, 1, true]} />
-              <meshStandardMaterial color="#e8761c" roughness={0.5} side={THREE.DoubleSide} />
-            </mesh>
-            <mesh position={[bx, 0.02, bz]}>
-              <cylinderGeometry args={[0.18, 0.2, 0.04, 16]} />
-              <meshStandardMaterial color="#2a1a10" />
-            </mesh>
-            {labels && <Label pos={[bx, 1.05, bz]} lines={[roomNames[id] ?? ROOMS[id].defaultName, n ? `${n} candy left` : 'empty']} scale={0.52} dim={!n} />}
-          </group>
-        );
+        const [x, , z] = nodePos(id, 0);
+        return <Label key={id} pos={[x, 1.05, z + 0.6]} lines={[roomNames[id] ?? ROOMS[id].defaultName]} scale={0.5} />;
       })}
-      {labels && piles.map((n, id) =>
-        n ? <Label key={`pile${id}`} pos={nodePos(id, 0.75)} lines={[`${n} dropped`]} scale={0.34} color="#ffb36b" /> : null,
-      )}
     </group>
   );
 }
 
-/**
- * A billboard label that stays readable from both cameras: it grows with
- * distance (so the overview can read it) and fades when the camera is close
- * enough that it would fill the screen.
- */
 export function Label({ pos, lines, scale = 0.5, dim = false, color }: { pos: V3; lines: string[]; scale?: number; dim?: boolean; color?: string }) {
   const { tex, aspect } = useMemo(
     () => labelTexture(lines, { fg: dim ? '#b8aec8' : color ?? '#fff3d6', border: color ? color : dim ? undefined : 'rgba(255,211,107,0.55)' }),
@@ -580,34 +450,6 @@ export function Beacon({ id, color, children }: { id: number; color: string; chi
         </mesh>
         {children}
       </group>
-    </group>
-  );
-}
-
-export function Decoy({ id }: { id: number }) {
-  const ref = useRef<THREE.Group>(null);
-  useFrame(({ clock }) => {
-    if (!ref.current) return;
-    ref.current.rotation.y = clock.elapsedTime * 1.5;
-    ref.current.position.y = 0.5 + Math.sin(clock.elapsedTime * 3) * 0.06;
-  });
-  const [x, , z] = nodePos(id, 0);
-  return (
-    <group position={[x + 0.3, 0, z - 0.3]}>
-      <group ref={ref}>
-        <mesh rotation={[0, 0, Math.PI / 2]}>
-          <capsuleGeometry args={[0.13, 0.16, 6, 12]} />
-          <meshStandardMaterial color="#ff5fa2" emissive="#ff5fa2" emissiveIntensity={0.5} roughness={0.2} />
-        </mesh>
-        {[-1, 1].map((s) => (
-          <mesh key={s} position={[s * 0.28, 0, 0]} rotation={[0, 0, (s * -Math.PI) / 2]}>
-            <coneGeometry args={[0.12, 0.16, 8]} />
-            <meshStandardMaterial color="#ffd1e6" emissive="#ff5fa2" emissiveIntensity={0.3} />
-          </mesh>
-        ))}
-      </group>
-      <pointLight color="#ff5fa2" intensity={1.2} distance={2.5} position={[0, 0.8, 0]} />
-      <Label pos={[0, 1.15, 0]} lines={['Decoy']} scale={0.34} color="#ff9ad5" />
     </group>
   );
 }

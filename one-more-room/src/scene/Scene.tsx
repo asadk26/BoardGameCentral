@@ -1,19 +1,19 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { CHARACTERS, ENTRANCE, SECRET_ENDPOINTS, type CharacterId } from '../engine/config';
-import { finalScores, isProtected, legalRoutes, previewMove, currentGhostPlan } from '../engine/engine';
+import { CHARACTERS, NODE_COUNT, ROUNDS, type CharacterId } from '../engine/config';
+import { actingPiece, finalScores, legalRoutes, livingPiece, previewMove } from '../engine/engine';
+import { inAttackRange } from '../engine/graph';
 import type { GameState } from '../engine/types';
-import { ProtectionShield, Reapers, TransformBurst, useSpectral, WallLinks } from './Reaper';
-import { director, GHOST_HOVER, type Popup } from '../director';
+import { LifeFlame, Reapers, TransformBurst, useSpectral, WallLinks, type KnownTrap } from './Reaper';
+import { director, type Popup } from '../director';
 import { getState, useStore, act, setState } from '../store';
 import { Base, CharacterModel } from './Characters';
-import { GhostModel } from './Ghost';
 import { MansionProps } from './Props';
-import { Beacon, Candy, Corridors, Decoy, Ground, Label, NodeHitAreas, Passages, PathDots, Ring, Tiles, Walls } from './Board';
+import { Beacon, Corridors, Ground, Label, NodeHitAreas, Passages, PathDots, Ring, RoomLabels, Tiles, Walls } from './Board';
 import { labelTexture, badgeTexture } from './labels';
 import { lineupPos, nodePos, playerHeading, playerSlot, type V3 } from './layout';
-import { camInfo, hudInsets, overlay } from './shared';
+import { camInfo, hudInsets } from './shared';
 
 export const charColor = (id: CharacterId) => CHARACTERS.find((c) => c.id === id)!.color;
 
@@ -36,12 +36,12 @@ function Piece({ index, mode, rank, winner }: { index: number; mode: SceneMode; 
   const game = useStore((s) => s.session?.game);
   const reduced = useStore((s) => s.settings.reducedMotion);
   const overview = useStore((s) => s.cameraMode === 'overview');
-  const p = game?.players[index];
-  const isActive = mode === 'game' && game?.turn === index && game.phase !== 'gameOver';
+  const p = game?.pieces[index];
+  const isActive = mode === 'game' && !!game && actingPiece(game) === index && game.phase !== 'gameOver';
   const { camera } = useThree();
-  const dead = !!p && !p.alive;
-  const shielded = !!game && !!p && mode === 'game' && isProtected(game, index);
-  useSpectral(inner, dead, p ? charColor(p.character) : '#fff');
+  const started = !!game && game.phase !== 'placement' && game.phase !== 'lifeRoll';
+  const spectral = started && !!p && !p.alive;
+  useSpectral(inner, spectral, p ? charColor(p.character) : '#fff');
 
   useFrame(({ clock }, dt) => {
     const g = getState().session?.game;
@@ -49,10 +49,10 @@ function Piece({ index, mode, rank, winner }: { index: number; mode: SceneMode; 
     const pose = mode === 'game' ? director.pose(index) : null;
     let front: number | null = null;
     if (mode === 'game' && getState().cameraMode === 'follow') {
-      const [nx, , nz] = nodePos(g.players[index].node);
+      const [nx, , nz] = nodePos(g.pieces[index].node);
       front = Math.atan2(camera.position.x - nx, camera.position.z - nz);
     }
-    const target: V3 = mode === 'results' ? lineupPos(rank, g.players.length) : playerSlot(g, index, front);
+    const target: V3 = mode === 'results' ? lineupPos(rank, g.pieces.length) : playerSlot(g, index, front);
     if (!cur.current) cur.current = new THREE.Vector3(...target);
     if (pose) cur.current.set(...pose.pos);
     else cur.current.lerp(new THREE.Vector3(...target), 1 - Math.exp(-dt * 9));
@@ -78,7 +78,7 @@ function Piece({ index, mode, rank, winner }: { index: number; mode: SceneMode; 
       i.position.y = reduced ? 0.05 : j * 0.35;
       i.rotation.set(0, reduced ? 0 : Math.sin(t * 1.6) * 0.6, 0);
       i.scale.set(1, 1 + (1 - j) * 0.06, 1);
-    } else if (!g.players[index].alive) {
+    } else if (g.phase !== 'placement' && g.phase !== 'lifeRoll' && !g.pieces[index].alive) {
       // Ghosts float and sway a little above their base.
       i.position.y = 0.32 + (reduced ? 0 : Math.sin(t * 1.6) * 0.07);
       i.rotation.set(0, 0, reduced ? 0 : Math.sin(t * 1.1) * 0.06);
@@ -102,7 +102,7 @@ function Piece({ index, mode, rank, winner }: { index: number; mode: SceneMode; 
         </group>
       </group>
       {isActive && <ActiveRing color={color} />}
-      {shielded && <ProtectionShield />}
+      {p.alive && mode !== 'showcase' && <LifeFlame reduced={reduced} />}
       <NameTag index={index} name={p.name} color={color} big={isActive || overview || mode === 'results'} y={mode === 'results' ? 1.75 : 1.05} />
     </group>
   );
@@ -139,7 +139,7 @@ function NameTag({ index, name, color, big, y }: { index: number; name: string; 
 }
 
 function ShowcaseLineup({ interactive }: { interactive: boolean }) {
-  const setupPlayers = useStore((s) => s.setupPlayers);
+  const setupPlayers = useStore((s) => s.setupPieces);
   const editing = useStore((s) => s.editingPlayer);
   return (
     <group>
@@ -156,13 +156,13 @@ function ShowcaseLineup({ interactive }: { interactive: boolean }) {
               interactive
                 ? () => {
                     const s = getState();
-                    const players = s.setupPlayers.map((p) => ({ ...p }));
+                    const players = s.setupPieces.map((p) => ({ ...p }));
                     const me = players[s.editingPlayer];
                     if (!me) return;
                     const other = players.findIndex((p) => p.character === c.id);
                     if (other >= 0) players[other].character = me.character;
                     me.character = c.id;
-                    setState({ setupPlayers: players });
+                    setState({ setupPieces: players });
                   }
                 : undefined
             }
@@ -222,39 +222,7 @@ function ShowcaseFigure({ id, index, owner, editingThis, onPick }: { id: Charact
   );
 }
 
-// ── the ghost ───────────────────────────────────────────────────────────
-
-function GhostActor({ node }: { node: number }) {
-  const ref = useRef<THREE.Group>(null);
-  const cur = useRef(new THREE.Vector3(...nodePos(node, GHOST_HOVER)));
-  const yaw = useRef(0);
-  const reduced = useStore((s) => s.settings.reducedMotion);
-  const { camera } = useThree();
-  useFrame(({ clock }, dt) => {
-    const g = getState().session?.game;
-    const logical = g ? g.ghost : node;
-    const pose = director.pose('ghost');
-    if (pose) cur.current.set(...pose.pos);
-    else cur.current.lerp(new THREE.Vector3(...nodePos(logical, GHOST_HOVER)), 1 - Math.exp(-dt * 6));
-    if (!ref.current) return;
-    const bob = reduced ? 0 : Math.sin(clock.elapsedTime * 1.8) * 0.08;
-    ref.current.position.set(cur.current.x, cur.current.y + bob, cur.current.z);
-    director.rendered.set('ghost', [cur.current.x, cur.current.y, cur.current.z]);
-    const desired = pose?.heading ?? Math.atan2(camera.position.x - cur.current.x, camera.position.z - cur.current.z);
-    yaw.current = dampAngle(yaw.current, desired, 1 - Math.exp(-dt * 5));
-    ref.current.rotation.set(0, yaw.current, reduced ? 0 : Math.sin(clock.elapsedTime * 1.3) * 0.06);
-  });
-  return (
-    <group ref={ref}>
-      <group scale={0.95}>
-        <GhostModel />
-      </group>
-      <pointLight color="#5ff2e0" intensity={3} distance={4.5} position={[0, 0.9, 0]} />
-    </group>
-  );
-}
-
-// ── popups (+3 candy, Caught!) ──────────────────────────────────────────
+// ── popups (Life stolen!, +1 point) ──────────────────────────────────────
 
 function Popups() {
   const [list, setList] = useState<Popup[]>([]);
@@ -302,56 +270,49 @@ function GameHighlights() {
   const hover = useStore((s) => s.hoverNode);
   const overview = useStore((s) => s.cameraMode === 'overview');
   const busy = useStore((s) => s.busy);
-  if (!game) return null;
-  const me = game.players[game.turn];
+  if (!game || game.phase === 'placement' || game.phase === 'lifeRoll' || game.phase === 'gameOver') return null;
+  const actingIdx = actingPiece(game);
+  const me = game.pieces[actingIdx];
+  const living = livingPiece(game);
+  const livingNode = game.pieces[living].node;
 
   let reachable: number[] = [];
   let preview = null as ReturnType<typeof previewMove>;
   if (game.phase === 'choose') {
     reachable = [...legalRoutes(game).keys()];
     const sel = game.selection.dest;
-    if (sel !== null) preview = previewMove(game, game.selection.moveDie, sel);
+    if (sel !== null) preview = previewMove(game, sel);
   }
-  const eventOptions = game.phase === 'event' && game.event?.type === 'secretPassage' ? game.event.options : [];
-  const ghostPlan = preview?.ghost ?? (game.phase === 'ghost' ? currentGhostPlan(game) : null);
-  const pickable = new Set<number>(busy ? [] : [...reachable, ...eventOptions]);
-  const hoverPreview = game.phase === 'choose' && hover !== null && hover !== game.selection.dest && reachable.includes(hover) ? previewMove(game, game.selection.moveDie, hover) : null;
+  const pickable = new Set<number>(busy ? [] : reachable);
+  const hoverPreview = game.phase === 'choose' && hover !== null && hover !== game.selection.dest && reachable.includes(hover) ? previewMove(game, hover) : null;
+  // A ghost's attack range: the living piece's space and its ordinary neighbours.
+  const showRange = !me.alive && (game.phase === 'choose' || game.phase === 'hunt');
+  const range = showRange ? Array.from({ length: NODE_COUNT }, (_, n) => n).filter((n) => inAttackRange(n, livingNode)) : [];
 
   return (
     <group>
       {reachable.map((id) => (
         <Ring key={`r${id}`} id={id} color={id === game.selection.dest ? '#fff1b8' : hover === id ? '#ffd36b' : '#f2a93b'} strength={id === game.selection.dest ? 2 : 1} pulse={id !== game.selection.dest} />
       ))}
-      {eventOptions.map((id) => (
-        <Ring key={`e${id}`} id={id} color="#d9a6ff" strength={1.5} />
+      {range.map((id) => (
+        <Ring key={`a${id}`} id={id} color="#ff5a6a" radius={0.66} strength={0.7} pulse={false} />
       ))}
       {hoverPreview && <PathDots path={hoverPreview.path} color="#ffd36b" size={0.05} />}
       {preview && preview.dest !== 'stay' && (
         <>
           <PathDots path={preview.path} color="#fff1b8" />
-          <Beacon id={preview.dest} color="#fff1b8" />
+          <Beacon id={preview.dest} color={preview.canChallenge ? '#ff5a6a' : '#fff1b8'} />
         </>
       )}
-      {ghostPlan && ghostPlan.target && !busy && (
-        <>
-          <PathDots path={ghostPlan.path} color="#5ff2e0" size={0.085} y={0.3} dashed={!!preview?.provisional} />
-          {ghostPlan.fullPath.length > ghostPlan.path.length && (
-            <PathDots path={ghostPlan.fullPath.slice(ghostPlan.path.length - 1)} color="#2f7f78" size={0.045} y={0.3} dashed />
-          )}
-          <Ring id={ghostPlan.path[ghostPlan.path.length - 1]} color="#5ff2e0" radius={0.5} strength={1.2} />
-          {ghostPlan.encounter && <Beacon id={ghostPlan.encounter.node} color="#ff5a6a" />}
-        </>
-      )}
-      {game.decoy !== null && <Decoy id={game.decoy} />}
-      {game.phase !== 'gameOver' && me.node !== ENTRANCE && overview && game.phase === 'turnStart' && <Ring id={me.node} color={charColor(me.character)} radius={0.62} />}
+      {game.phase === 'hunt' && !busy && <Beacon id={livingNode} color="#ff5a6a" />}
+      {me.alive && game.phase === 'choose' && preview && preview.threats.map((t) => <Ring key={`t${t}`} id={game.pieces[t].node} color="#7ff5e6" radius={0.6} strength={1.4} />)}
+      {overview && game.phase === 'turnStart' && <Ring id={me.node} color={charColor(me.character)} radius={0.62} />}
       <NodeHitAreas
         pickable={pickable}
         onHover={(id) => setState({ hoverNode: id })}
         onPick={(id) => {
           const g = getState().session?.game;
-          if (!g) return;
-          if (g.phase === 'choose') act({ type: 'select', dest: id });
-          else if (g.phase === 'event' && g.event?.type === 'secretPassage' && SECRET_ENDPOINTS.includes(id)) act({ type: 'eventChoose', option: id });
+          if (g?.phase === 'choose') act({ type: 'select', dest: id });
         }}
       />
     </group>
@@ -482,7 +443,7 @@ function CameraRig({ mode }: { mode: SceneMode }) {
       rate = 1.5;
     } else if (mode === 'results' || !g) {
       // Back off far enough that the whole podium fits beside the score panel.
-      const n = g?.players.length ?? 6;
+      const n = g?.pieces.length ?? 6;
       const tanH = Math.tan((cam.fov * Math.PI) / 360) * (size.width / size.height);
       const fracH = Math.max(0.4, (size.width - hudInsets.left - hudInsets.right) / size.width);
       const d = Math.max(6.2, (n * 1.35 + 1.6) / (2 * tanH * fracH));
@@ -490,7 +451,7 @@ function CameraRig({ mode }: { mode: SceneMode }) {
       desiredLook.set(0, 0.8, 11.6);
       focus.set(0, 0, 11);
       rate = 2;
-    } else if (g.phase === 'challenge' && g.challenge && !calm) {
+    } else if (g.phase === 'challenge' && g.challenge && g.challenge.kind === 'duel' && !calm) {
       // Frame the encounter; the chosen camera mode resumes afterwards.
       const [cx, , cz] = nodePos(g.challenge.node, 0);
       focus.set(cx, 0, cz);
@@ -506,7 +467,7 @@ function CameraRig({ mode }: { mode: SceneMode }) {
       const fracH = Math.max(0.4, (size.width - hudInsets.left - hudInsets.right) / size.width);
       const H = Math.max(21.0 / (2 * tanV * fracV), 27.2 / (2 * tanH * fracH)) * 1.02 * zoom.current;
       const center = new THREE.Vector3(0, 0, 2.0);
-      const active = director.rendered.get(g.turn);
+      const active = director.rendered.get(actingPiece(g));
       if (active && zoom.current < 1) {
         const f = (1 - zoom.current) / 0.55;
         center.lerp(new THREE.Vector3(active[0], 0, active[2]), f);
@@ -516,28 +477,20 @@ function CameraRig({ mode }: { mode: SceneMode }) {
       focus = center.clone();
       rate = 4;
     } else {
-      const watchGhost = director.watchingGhost() && !calm;
-      const ghost = director.rendered.get('ghost');
-      const active = director.rendered.get(g.turn) ?? playerSlot(g, g.turn);
-      const pose = director.pose(g.turn);
-      const desiredYaw = pose?.heading ?? playerHeading(g, g.turn);
-      if (lastTurn.current !== g.turnNumber) {
-        lastTurn.current = g.turnNumber;
+      const who = actingPiece(g);
+      const active = director.rendered.get(who) ?? playerSlot(g, who);
+      const pose = director.pose(who);
+      const desiredYaw = pose?.heading ?? playerHeading(g, who);
+      if (lastTurn.current !== g.actionNumber) {
+        lastTurn.current = g.actionNumber;
         if (calm) yaw.current = desiredYaw;
       }
-      if (!watchGhost) yaw.current = dampAngle(yaw.current, desiredYaw, 1 - Math.exp(-dt * (calm ? 6 : 1.8)));
+      yaw.current = dampAngle(yaw.current, desiredYaw, 1 - Math.exp(-dt * (calm ? 6 : 1.8)));
       const fwd = new THREE.Vector3(Math.sin(yaw.current), 0, Math.cos(yaw.current));
-      if (watchGhost && ghost) {
-        focus.set(ghost[0], 0, ghost[2]);
-        desiredPos.copy(focus).addScaledVector(fwd, -6.2).add(new THREE.Vector3(0, 6.2, 0));
-        desiredLook.copy(focus).add(new THREE.Vector3(0, 0.4, 0));
-        rate = 2.6;
-      } else {
-        focus.set(active[0], 0, active[2]);
-        desiredPos.copy(focus).addScaledVector(fwd, -5.0).add(new THREE.Vector3(0, 4.6, 0));
-        desiredLook.copy(focus).addScaledVector(fwd, 2.4).add(new THREE.Vector3(0, 0, 0));
-        rate = calm ? 8 : 3.2;
-      }
+      focus.set(active[0], 0, active[2]);
+      desiredPos.copy(focus).addScaledVector(fwd, -5.0).add(new THREE.Vector3(0, 4.6, 0));
+      desiredLook.copy(focus).addScaledVector(fwd, 2.4).add(new THREE.Vector3(0, 0, 0));
+      rate = calm ? 8 : 3.2;
     }
 
     // Centre the picture in the part of the screen the HUD leaves free.
@@ -561,34 +514,6 @@ function CameraRig({ mode }: { mode: SceneMode }) {
     camInfo.position = [pos.current.x, pos.current.y, pos.current.z];
     camInfo.focus = [focus.x, 0, focus.z];
 
-    // Off-screen ghost indicator.
-    const el = overlay.ghostIndicator;
-    const gp = director.rendered.get('ghost');
-    if (el && gp && mode === 'game') {
-      const v = new THREE.Vector3(gp[0], gp[1] + 0.6, gp[2]).project(camera);
-      const behind = v.z > 1;
-      const off = behind || Math.abs(v.x) > 0.9 || Math.abs(v.y) > 0.8;
-      if (!off) {
-        el.style.opacity = '0';
-      } else {
-        let x = v.x;
-        let y = v.y;
-        if (behind) {
-          x = -x;
-          y = -y;
-        }
-        const a = Math.atan2(y, x);
-        const ex = Math.cos(a) * 0.86;
-        const ey = Math.sin(a) * 0.74;
-        const px = ((ex + 1) / 2) * size.width;
-        const py = ((1 - ey) / 2) * size.height;
-        const clampedY = Math.min(size.height - hudInsets.bottom - 50, Math.max(hudInsets.top + 50, py));
-        const clampedX = Math.min(size.width - hudInsets.right - 100, Math.max(hudInsets.left + 100, px));
-        el.style.opacity = '1';
-        el.style.transform = `translate(${clampedX}px, ${clampedY}px) translate(-50%, -50%)`;
-        el.style.setProperty('--arrow', `${-a}rad`);
-      }
-    } else if (el) el.style.opacity = '0';
   });
   return null;
 }
@@ -602,15 +527,18 @@ function World() {
   const overview = useStore((s) => s.cameraMode === 'overview');
   const reduced = useStore((s) => s.settings.reducedMotion);
   const knownLedger = useStore((s) => s.session?.known);
-  const known = useMemo(
-    () => Array.from(new Set([...(knownLedger ?? []), ...(game?.traps.filter((t) => t.revealed).map((t) => t.node) ?? [])])),
-    [knownLedger, game],
-  );
-  const mode: SceneMode = screen !== 'game' || !game || game.phase === 'placement' ? 'showcase' : game.phase === 'gameOver' ? 'results' : 'game';
-  const results = useMemo(() => (game && mode === 'results' ? finalScores(game) : null), [game, mode]);
+  const known = useMemo<KnownTrap[]>(() => {
+    const list: KnownTrap[] = (game?.traps ?? []).filter((t) => t.revealed).map((t) => ({ node: t.node, effect: t.effect, spent: t.spent }));
+    for (const k of knownLedger ?? []) if (!list.some((t) => t.node === k.node)) list.push({ node: k.node, effect: k.effect, spent: false });
+    return list;
+  }, [knownLedger, game]);
+  const mode: SceneMode = screen !== 'game' || !game || game.phase === 'placement' ? 'showcase' : game.phase === 'gameOver' || game.phase === 'lifeRoll' ? 'results' : 'game';
+  const results = useMemo(() => (game && game.phase === 'gameOver' ? finalScores(game) : null), [game]);
+  const ch = game?.challenge;
+  const phantom = ch && ch.kind === 'duel' && !ch.contact ? ch.participants.find((p) => game!.pieces[p].node !== ch.node) : undefined;
   return (
     <>
-      <Atmosphere midnight={!!game?.midnight && mode !== 'showcase'} />
+      <Atmosphere midnight={!!game && game.round >= ROUNDS - 2 && mode !== 'showcase'} />
       <CameraRig mode={mode} />
       <Ground />
       <Corridors />
@@ -618,26 +546,22 @@ function World() {
       <Tiles />
       <Passages strong={overview || mode !== 'game'} />
       <MansionProps round={game?.round ?? 1} />
-      <Candy state={game} roomNames={pz.roomNames} labels={mode !== 'results'} />
+      {mode !== 'results' && <RoomLabels roomNames={pz.roomNames} />}
       {mode !== 'game' && <Label pos={[0, 2.6, 10.6]} lines={[pz.mansionName]} scale={0.8} color="#f2b84b" />}
-      <GhostActor node={game?.ghost ?? 16} />
-      {game && mode !== 'showcase' && <Reapers revealed={known} reduced={reduced} />}
-      {mode === 'showcase' && <Reapers revealed={[]} reduced={reduced} />}
+      <Reapers revealed={game && mode !== 'showcase' ? known : []} reduced={reduced} seancesUsed={game?.seancesUsed ?? 0} />
       <WallLinks strong={overview && mode === 'game'} />
       {game && mode === 'game' && <Bursts game={game} />}
-      {game?.phase === 'challenge' && game.challenge?.host === 'superReaper' && game.challenge.kind === 'duel' && (
-        <SummonedPhantom character={game.players[game.challenge.participants[1]].character} />
-      )}
+      {phantom !== undefined && ch && <SummonedPhantom character={game!.pieces[phantom].character} node={ch.node} />}
       {mode === 'showcase' && <ShowcaseLineup interactive={screen === 'setup'} />}
       {game && mode !== 'showcase' && (
         <>
-          {game.players.map((p, i) => (
+          {game.pieces.map((p, i) => (
             <Piece
               key={p.id}
               index={i}
               mode={mode}
-              rank={results ? results.findIndex((l) => l.player === i) : 0}
-              winner={!!results?.find((l) => l.player === i)?.winner}
+              rank={results ? results.findIndex((l) => l.piece === i) : i}
+              winner={!!results?.find((l) => l.piece === i)?.winner}
             />
           ))}
           {mode === 'game' && <GameHighlights />}
@@ -648,29 +572,29 @@ function World() {
   );
 }
 
-/** Spawns a transformation burst whenever a player turns into a ghost. */
+/** A burst of light whenever life changes hands: gold where it arrives, teal where it leaves. */
 function Bursts({ game }: { game: GameState }) {
-  const prev = useRef<boolean[]>(game.players.map((p) => p.alive));
-  const [bursts, setBursts] = useState<Array<{ id: number; at: V3 }>>([]);
+  const prev = useRef<boolean[]>(game.pieces.map((p) => p.alive));
+  const [bursts, setBursts] = useState<Array<{ id: number; at: V3; living: boolean }>>([]);
   useEffect(() => {
-    const newly = game.players.map((p, i) => (prev.current[i] && !p.alive ? i : -1)).filter((i) => i >= 0);
-    prev.current = game.players.map((p) => p.alive);
-    if (newly.length) setBursts((b) => [...b, ...newly.map((i) => ({ id: Date.now() + i, at: nodePos(game.players[i].node, 0) }))]);
+    const changed = game.pieces.map((p, i) => (prev.current[i] !== p.alive ? i : -1)).filter((i) => i >= 0);
+    prev.current = game.pieces.map((p) => p.alive);
+    if (changed.length) setBursts((b) => [...b, ...changed.map((i) => ({ id: Date.now() + i, at: nodePos(game.pieces[i].node, 0), living: game.pieces[i].alive }))]);
   }, [game]);
   return (
     <>
       {bursts.map((b) => (
-        <TransformBurst key={b.id} at={b.at} onDone={() => setBursts((x) => x.filter((y) => y.id !== b.id))} />
+        <TransformBurst key={b.id} at={b.at} living={b.living} onDone={() => setBursts((x) => x.filter((y) => y.id !== b.id))} />
       ))}
     </>
   );
 }
 
-/** A Super Reaper summons an opponent's likeness to node 12; their piece stays put. */
-function SummonedPhantom({ character }: { character: CharacterId }) {
+/** A remote Reaper's Challenge summons the far opponent's likeness; their piece stays put. */
+function SummonedPhantom({ character, node }: { character: CharacterId; node: number }) {
   const ref = useRef<THREE.Group>(null);
   useSpectral(ref, true, '#ff3d6e');
-  const [x, , z] = nodePos(12, 0);
+  const [x, , z] = nodePos(node, 0);
   useFrame(({ clock }) => {
     if (ref.current) ref.current.position.y = 0.2 + Math.sin(clock.elapsedTime * 2) * 0.05;
   });

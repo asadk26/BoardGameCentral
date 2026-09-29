@@ -1,6 +1,7 @@
-// Curse the Mansion: each seat secretly nominates one corridor. On a shared
-// screen this is pass-and-play behind a neutral curtain; nothing about
-// anyone's pick is ever shown again after they hide it.
+// Curse the Mansion: each piece (a person, a pair, or a bot) secretly
+// nominates one corridor. On a shared screen this is pass-and-play behind a
+// neutral curtain; nothing about anyone's pick is ever shown again after
+// they hide it. Players choose places, never effects.
 
 import { CHARACTERS, TRAP_ELIGIBLE } from '../engine/config';
 import type { GameState } from '../engine/types';
@@ -14,15 +15,15 @@ export function PlacementScreen({ game }: { game: GameState }) {
   const placement = useStore((s) => s.placement);
   const mode = useStore((s) => s.mode);
   const done = game.nominations.map((n) => n !== null);
-  const nextHuman = game.players.findIndex((_, i) => !done[i] && !isBotSeat(i));
+  const nextHuman = game.pieces.findIndex((_, i) => !done[i] && !isBotSeat(i));
   const seat = placement.seat;
 
   const progress = (
     <ul className="placement-progress" aria-label="Who has chosen">
-      {game.players.map((p, i) => (
+      {game.pieces.map((p, i) => (
         <li key={p.id} className={done[i] ? 'done' : ''}>
           <PlayerBadge n={i + 1} color={CHARACTERS.find((c) => c.id === p.character)!.color} size={22} /> {p.name}
-          {isBotSeat(i) ? ' 🤖' : ''} — {done[i] ? 'cursed a corridor ✓' : 'choosing…'}
+          {isBotSeat(i) ? ' 🤖' : ''} — {done[i] ? 'trap set ✓' : 'choosing…'}
         </li>
       ))}
     </ul>
@@ -33,7 +34,10 @@ export function PlacementScreen({ game }: { game: GameState }) {
       <div className="curtain">
         <div className="curtain-card">
           <h2>Curse the Mansion</h2>
-          <p>Everyone secretly picks one corridor on their phone. Six Reapers will hide in the mansion — nobody knows them all.</p>
+          <p>
+            Each piece secretly picks one corridor on a phone (in a pair, the first person confirms; both see it). Six traps will hide
+            in the mansion — nobody knows them all, and nobody knows which trap does what.
+          </p>
           {progress}
         </div>
       </div>
@@ -42,15 +46,15 @@ export function PlacementScreen({ game }: { game: GameState }) {
 
   // A seat is behind the curtain, choosing or confirming.
   if (seat !== null) {
-    const p = game.players[seat];
+    const p = game.pieces[seat];
     if (placement.confirmed) {
       return (
         <div className="curtain">
           <div className="curtain-card" role="dialog" aria-label="Curse confirmed">
-            <h2>Your curse is set, {p.name}.</h2>
+            <h2>Your trap is set, {p.name}.</h2>
             <p>
-              A Reaper now waits at <b>space {placement.draft}</b>. It will not be shown to you again — remember it. You have no
-              immunity: land there and you face it too.
+              A hidden trap now waits at <b>space {placement.draft}</b>. It will not be shown again — remember it. You don’t know
+              which effect it got, and you have no immunity: land there and it works on you too.
             </p>
             <button className="btn primary big" onClick={() => setState({ placement: { seat: null, draft: null, confirmed: false } })}>
               Hide it and pass the device on
@@ -62,19 +66,22 @@ export function PlacementScreen({ game }: { game: GameState }) {
     return (
       <div className="curtain">
         <div className="curtain-card wide" role="dialog" aria-label={`${p.name} chooses a corridor`}>
-          <h2>{p.name}, curse one corridor</h2>
-          <p className="muted">Glowing spaces are allowed: ordinary hallways away from rooms, events, passages, the entrance and the Super Reaper.</p>
+          <h2>{p.name}, choose one corridor for a trap</h2>
+          <p className="muted">
+            Glowing spaces are allowed: hallways away from the rooms, passages, starting spaces, the Entrance Hall and the Super Reaper. The
+            game later deals six effects — two Reaper’s Challenges, two Séances, two Poltergeists — secretly over the six trap spaces.
+          </p>
           <MiniMap pickable={ELIGIBLE} selected={placement.draft} onPick={(id) => setState({ placement: { seat, draft: id, confirmed: false } })} label="Choose a corridor to curse" />
           <div className="row-btns">
             <button
               className="btn primary big"
               disabled={placement.draft === null}
               onClick={() => {
-                act({ type: 'nominate', seat, node: placement.draft! });
+                act({ type: 'nominate', piece: seat, node: placement.draft! });
                 setState({ placement: { seat, draft: placement.draft, confirmed: true } });
               }}
             >
-              {placement.draft === null ? 'Tap a glowing space' : `Curse space ${placement.draft}`}
+              {placement.draft === null ? 'Tap a glowing space' : `Set a trap on space ${placement.draft}`}
             </button>
             <button className="btn ghost" onClick={() => setState({ placement: { seat: null, draft: null, confirmed: false } })}>
               Back
@@ -90,17 +97,17 @@ export function PlacementScreen({ game }: { game: GameState }) {
       <div className="curtain-card">
         <h2>Curse the Mansion</h2>
         <p>
-          Each player secretly picks one corridor for a hidden Reaper. With fewer than six picks (or matching picks), the house
-          adds its own — six Reapers in all. Nobody learns anyone else’s pick.
+          Each piece secretly picks one corridor for a hidden trap. The house adds its own until there are exactly six (matching picks
+          simply merge). Nobody learns anyone else’s pick, and a trap does the same thing whoever chose it.
         </p>
         {progress}
         {nextHuman >= 0 ? (
           <>
             <p className="handoff">
-              Pass the device to <b>{game.players[nextHuman].name}</b>. Everyone else, please look away.
+              Pass the device to <b>{game.pieces[nextHuman].name}</b>. Everyone else, please look away.
             </p>
             <button className="btn primary big" onClick={() => setState({ placement: { seat: nextHuman, draft: null, confirmed: false } })}>
-              I’m {game.players[nextHuman].name} — show me the map
+              {game.pieces[nextHuman].controllers.length > 1 ? 'We’re' : 'I’m'} {game.pieces[nextHuman].name} — show the map
             </button>
           </>
         ) : (

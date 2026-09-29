@@ -91,8 +91,8 @@ export function badgeTexture(text: string, bg: string, fg = '#1a1024', ring = '#
   return tex;
 }
 
-/** Symbols painted on tiles: '?' for Trick or Treat, a keyhole for passages. */
-export function tileSymbolTexture(kind: 'event' | 'secretA' | 'secretB' | 'entrance'): THREE.CanvasTexture {
+/** Symbols painted on tiles: the hall's crest, a keyhole for passages. */
+export function tileSymbolTexture(kind: 'secretA' | 'secretB' | 'entrance'): THREE.CanvasTexture {
   const key = `tile:${kind}`;
   let tex = cache.get(key);
   if (!tex) {
@@ -102,20 +102,16 @@ export function tileSymbolTexture(kind: 'event' | 'secretA' | 'secretB' | 'entra
     ctx.clearRect(0, 0, 256, 256);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    if (kind === 'event') {
-      ctx.fillStyle = '#2a1206';
-      ctx.font = '900 170px Georgia, serif';
-      ctx.fillText('?', 128, 138);
-    } else if (kind === 'entrance') {
+    if (kind === 'entrance') {
       ctx.strokeStyle = '#3a2008';
       ctx.lineWidth = 10;
       ctx.beginPath();
       ctx.arc(128, 128, 100, 0, Math.PI * 2);
       ctx.stroke();
       ctx.fillStyle = '#3a2008';
-      ctx.font = '800 44px system-ui, sans-serif';
-      ctx.fillText('SAFE', 128, 100);
-      ctx.fillText('BANK', 128, 156);
+      ctx.font = '800 40px system-ui, sans-serif';
+      ctx.fillText('ENTRANCE', 128, 110);
+      ctx.fillText('HALL', 128, 158);
     } else {
       ctx.fillStyle = '#f6eaff';
       ctx.beginPath();

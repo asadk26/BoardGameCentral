@@ -57,16 +57,6 @@ export function Dialog({ title, onClose, children, wide = false, labelledBy }: {
   );
 }
 
-export function CandyIcon({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" className="candy-icon">
-      <path d="M3 7l4 2-1 3 1 3-4 2 1-5z" fill="#ff8fb8" />
-      <path d="M21 7l-4 2 1 3-1 3 4 2-1-5z" fill="#ff8fb8" />
-      <ellipse cx="12" cy="12" rx="6" ry="4.6" fill="#ff4d6d" />
-      <path d="M8.5 9.5c2 1 5 1 7 0M8.5 14.5c2-1 5-1 7 0" stroke="#ffd1dc" strokeWidth="1.2" fill="none" />
-    </svg>
-  );
-}
 
 export function PlayerBadge({ n, color, size = 26 }: { n: number; color: string; size?: number }) {
   return (

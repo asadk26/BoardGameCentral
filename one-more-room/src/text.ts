@@ -2,19 +2,17 @@
 // All output is text rendered by React as text nodes — never as HTML. Nothing
 // here may mention an unrevealed trap: callers pass public state.
 
-import { cardFlavorIndex, cardType, CHALLENGE, ENTRANCE, EVENT_INFO, nodeKind, ROOMS, SCORING, secretPairLabel, SUPER_REAPER } from './engine/config';
-import type { ChallengeOutcome, Encounter, GameState, GhostPlan, LogEntry, MovePreview } from './engine/types';
+import { CURSE_MULTIPLIERS, curseMultiplier, ENTRANCE, GHOST_MIN_MOVE, nodeKind, ROOMS, SEANCE_LIMIT, secretPairLabel, SUPER_REAPER } from './engine/config';
+import { actingPiece, activeController, livingPiece } from './engine/engine';
+import type { Challenge, ChallengeOutcome, GameState, LogEntry, MovePreview } from './engine/types';
 import type { Personalization } from './engine/save';
-import type { ChallengeKind } from './engine/challenges';
 
 export function nodeName(id: number, pz: Personalization): string {
   if (id === ENTRANCE) return 'Entrance Hall';
   if (ROOMS[id]) return pz.roomNames[id] ?? ROOMS[id].defaultName;
   if (id === SUPER_REAPER) return 'Super Reaper';
-  const kind = nodeKind(id);
-  if (kind === 'event') return 'Trick or Treat';
-  if (kind === 'secret') return `Secret Passage ${secretPairLabel(id)}`;
-  if (id === 16) return `${pz.ghostName}'s Lair`;
+  if (nodeKind(id) === 'secret') return `Secret Passage ${secretPairLabel(id)}`;
+  if (id === 16) return 'The Lair';
   return 'Hallway';
 }
 
@@ -23,148 +21,125 @@ export function placeName(id: number, pz: Personalization): string {
   return `${nodeName(id, pz)} · ${id}`;
 }
 
-export function cardFlavor(cardId: number, pz: Personalization): string {
-  const type = cardType(cardId);
-  return pz.flavors[type] || EVENT_INFO[type].flavors[cardFlavorIndex(cardId)];
+export const EFFECT_NAMES = { reaper: 'Reaper’s Challenge', seance: 'Séance', poltergeist: 'Poltergeist' } as const;
+
+/** "Alive for 3 rounds • Jump window 20% narrower" — or null when there is no curse yet. */
+export function curseLine(streak: number): string | null {
+  const m = curseMultiplier(streak);
+  const rounds = `Alive for ${streak} round${streak === 1 ? '' : 's'}`;
+  if (m >= 1) return streak > 0 ? `${rounds} • normal jump window` : null;
+  return `${rounds} • Jump window ${Math.round((1 - m) * 100)}% narrower${streak >= CURSE_MULTIPLIERS.length - 1 ? ' (the most it gets)' : ''}`;
 }
 
-export const CHALLENGE_TITLES: Record<ChallengeKind, string> = {
-  escape: 'Break the Curse',
-  dance: 'Dance for Death',
-  rope: 'Graveyard Jump Rope',
-  duel: 'Haunted Jump Rope',
-};
-
-export function challengeHowTo(kind: ChallengeKind, oneSurvivor: boolean): string {
-  const pass = CHALLENGE.rope.pass;
-  switch (kind) {
-    case 'escape':
-      return 'A marker circles the ring. Press when it is inside the glowing zone. Two tries — one hit breaks the curse.';
-    case 'dance':
-      return 'Death shows four moves, one at a time. Then repeat them in order. Two sequences — get one right to live. A wrong move ends that try.';
-    case 'rope':
-      return `The spectral rope sweeps eight times. Jump just before it reaches your feet. Clear at least ${pass} of 8 to live.`;
-    case 'duel':
-      return oneSurvivor
-        ? 'Both of you jump the same rope, eight sweeps. The lower score becomes a ghost. Tied? Up to four sudden-death sweeps, then the steadier timing, then the curse decides.'
-        : `Both of you jump the same rope, eight sweeps. Each needs ${pass} of 8 to live — both may survive, or neither.`;
-  }
+/** Who controls a piece this round, for pairs: "Maya’s round". */
+export function controllerLine(state: GameState, piece: number): string | null {
+  const p = state.pieces[piece];
+  if (p.bot || p.controllers.length < 2) return null;
+  return `${p.controllers[activeController(state, piece)]}’s round`;
 }
 
-export function ghostSummary(plan: GhostPlan, state: GameState, pz: Personalization): string {
-  const g = pz.ghostName;
-  if (!plan.target) return `${g} waits — nobody is out and unprotected`;
-  const steps = plan.path.length - 1;
-  const who = plan.target.kind === 'decoy' ? `${g} chases the decoy` : `${g} hunts ${state.players[plan.target.player!].name}`;
-  const parts = [who, `${steps} ${steps === 1 ? 'space' : 'spaces'}`];
-  if (plan.encounter) parts.push(`catches ${state.players[plan.encounter.player].name} → escape challenge`);
-  else if (!plan.reachesTarget) parts.push(`${plan.fullPath.length - plan.path.length} short`);
-  else parts.push('reaches it');
-  return parts.join(' • ');
+export function rollLine(state: GameState): string | null {
+  if (state.die === null) return null;
+  const me = state.pieces[actingPiece(state)];
+  if (!me.alive && state.die < GHOST_MIN_MOVE) return `Rolled ${state.die} • Ghost drift: ${state.allowance} spaces`;
+  return `Rolled ${state.die} • Move up to ${state.allowance} space${state.allowance === 1 ? '' : 's'}`;
 }
 
-export function encounterWarning(enc: Encounter, state: GameState, waives: boolean): string | null {
-  const names = (ids: number[]) => ids.map((i) => state.players[i].name).join(' or ');
-  switch (enc.kind) {
-    case 'duel':
-      return enc.lethal
-        ? `Duel with ${names(enc.opponents)} — after the bell, only one of you survives`
-        : `Duel with ${names(enc.opponents)} — Haunted Jump Rope, each needs ${CHALLENGE.rope.pass} of 8`;
-    case 'superReaper':
-      return enc.opponents.length
-        ? `Super Reaper: you and an opponent you choose jump for your lives — one survivor${waives ? ' (your protection does not apply here)' : ''}`
-        : `Super Reaper: nobody to summon, so you perform for Death alone${waives ? ' (protection does not apply)' : ''}`;
-    case 'reaper':
-      return `A revealed Reaper waits here — you must survive its game${waives ? ' (your protection does not apply here)' : ''}`;
-    case 'haunt':
-      return `Haunt ${names(enc.targets)}: they must break the curse or join the dead`;
-    default:
-      return null;
-  }
+export function superReaperLine(state: GameState): string {
+  const left = SEANCE_LIMIT - state.seancesUsed;
+  return left > 0 ? `Super Reaper: a Séance for everyone (${left} of ${SEANCE_LIMIT} left)` : 'Super Reaper: a Reaper’s Challenge (no Séances left)';
+}
+
+export const CHALLENGE_TITLE = 'Haunted Jump Rope';
+
+export function challengeTitle(ch: Challenge): string {
+  if (ch.kind === 'seance') return `Séance · ${CHALLENGE_TITLE}`;
+  if (ch.host === 'contact') return `Challenge! · ${CHALLENGE_TITLE}`;
+  return `Reaper’s Challenge · ${CHALLENGE_TITLE}`;
+}
+
+export function challengeHowTo(ch: Challenge): string {
+  const who = ch.kind === 'seance' ? `All ${ch.participants.length} of you jump` : 'You both jump';
+  return `${who} the same spectral rope, eight sweeps. Press just before it reaches your feet — one press per sweep; holding or mashing never counts twice. The most clean jumps holds the life. Tied at the top? Only the tied jump up to four sudden-death sweeps, then the steadiest timing wins, and an exact tie gets the Reaper’s verdict.`;
+}
+
+export function challengeHost(ch: Challenge, state: GameState): string {
+  const name = (i: number) => state.pieces[i]?.name ?? '?';
+  const living = name(ch.livingAtStart);
+  if (ch.kind === 'seance') return ch.host === 'superReaper' ? `The Super Reaper calls a Séance. Whoever jumps best holds the life — ${living} has it now.` : `A Séance! Whoever jumps best holds the life — ${living} has it now.`;
+  const other = ch.participants.find((p) => p !== ch.livingAtStart)!;
+  if (ch.host === 'contact') return `${name(other)} challenges ${living} for the life!`;
+  return `The Reaper summons ${name(other)} and ${living}: winner holds the life.`;
 }
 
 export function previewSummary(p: MovePreview, state: GameState, pz: Personalization): string {
   const bits: string[] = [];
-  if (p.dest === 'stay') bits.push('Stay put');
-  else bits.push(`${nodeName(p.dest, pz)} (${p.path.length - 1} ${p.path.length === 2 ? 'step' : 'steps'}${p.usesSecret ? ', secret passage' : ''})`);
-  if (p.harvest) bits.push(`+${p.harvest} candy`);
-  if (p.dest !== 'stay' && ROOMS[p.dest]) {
-    const left = state.stocks[p.dest] - p.harvest;
-    bits.push(p.harvest ? `${left} left` : 'room is empty');
-  }
-  if (p.pile) bits.push(`+${p.pile} from the floor`);
-  if (p.dest === ENTRANCE) bits.push(p.bank ? `bank ${p.bank}` : 'safe');
-  if (p.triggersEvent) bits.push('draw a Trick or Treat card');
-  if (p.encounter.kind !== 'none' && p.encounter.kind !== 'haunt' && (p.harvest || p.pile)) bits.push('(only if you survive)');
+  if (p.dest === 'stay') bits.push('Stay here');
+  else bits.push(`${nodeName(p.dest, pz)} (${p.path.length - 1} ${p.path.length === 2 ? 'step' : 'steps'}${p.usesSecret ? ', secret passage' : ''}${p.usesWall ? ', through the wall' : ''})`);
+  if (p.superReaper) bits.push(p.superReaper === 'seance' ? 'Super Reaper: Séance for everyone' : 'Super Reaper: Reaper’s Challenge');
+  else if (p.known === 'reaper') bits.push(state.pieces[actingPiece(state)].alive ? 'Reaper’s Challenge: pick a ghost to duel' : 'Reaper’s Challenge: duel the living piece from here');
+  else if (p.known === 'seance') bits.push('Séance for everyone');
+  else if (p.known === 'poltergeist') bits.push('Poltergeist: thrown elsewhere');
+  if (p.canChallenge) bits.push(`${state.pieces[livingPiece(state)].name} in range — you may challenge`);
+  if (p.threats.length) bits.push(`in range of ${p.threats.map((t) => state.pieces[t].name).join(', ')} now`);
   return bits.join(' • ');
 }
 
 export function outcomeLines(o: ChallengeOutcome, state: GameState, pz: Personalization): string[] {
-  const name = (i: number) => state.players[i]?.name ?? '?';
+  const name = (i: number) => state.pieces[i]?.name ?? '?';
   const lines: string[] = [];
-  const title = CHALLENGE_TITLES[o.kind];
-  const how = o.decidedBy === 'suddenDeath' ? 'sudden-death sweeps' : o.decidedBy === 'timing' ? 'steadier timing' : o.decidedBy === 'curse' ? 'the curse (an exact tie)' : null;
-  if (o.kind === 'duel') lines.push(`${title}: ${o.participants.map((p, k) => `${name(p)} ${o.scores[k]}/8`).join(' vs ')}${how ? ` — decided by ${how}` : ''}.`);
-  else lines.push(`${title}: ${name(o.participants[0])} ${o.survivors.length ? 'survived' : 'failed'}.`);
-  for (const d of o.deaths) lines.push(`${name(d.player)} became a ghost${d.dropped ? `, dropping ${d.dropped} candy` : ''}. Their banked candy stays theirs.`);
-  for (const r of o.relocations) lines.push(`${name(r.player)} fled to ${placeName(r.to, pz)}.`);
-  for (const s of o.survivors) lines.push(`${name(s)} is protected until the end of their next turn.`);
-  if (o.bounty) lines.push(o.bounty.amount ? `${name(o.bounty.player)} earns a ${o.bounty.amount}-point haunting bounty (${state.players[o.bounty.player].bounty}/${SCORING.bountyCap}).` : `${name(o.bounty.player)} is already at the ${SCORING.bountyCap}-point bounty cap.`);
+  const how =
+    o.decidedBy === 'suddenDeath'
+      ? ` — sudden death (${o.extraSweepsUsed} sweep${o.extraSweepsUsed === 1 ? '' : 's'}) among ${o.finalists.map(name).join(', ')}`
+      : o.decidedBy === 'timing'
+        ? ` — tied, then the steadier timing decided`
+        : o.decidedBy === 'verdict'
+          ? ` — a perfect tie: the Reaper’s seeded verdict chose`
+          : '';
+  lines.push(`${o.participants.map((p, k) => `${name(p)} ${o.scores[k]}/8${o.multipliers[k] < 1 ? ' (cursed)' : ''}`).join(' · ')}${how}.`);
+  lines.push(o.transferred ? `${name(o.winner)} steals the life from ${name(o.previousLiving)}!` : `${name(o.winner)} keeps the life.`);
+  for (const m of o.moves) {
+    if (m.reason === 'claim') lines.push(`${name(m.piece)} takes the space at ${placeName(m.to, pz)}.`);
+    else lines.push(`${name(m.piece)} is thrown back to ${placeName(m.to, pz)}.`);
+  }
   return lines;
 }
 
 export function logLine(e: LogEntry, state: GameState, pz: Personalization): string | null {
-  const name = (i: number) => state.players[i]?.name ?? '?';
+  const name = (i: number) => state.pieces[i]?.name ?? '?';
   switch (e.kind) {
-    case 'decoy':
-      return `${name(e.player)} left a decoy sweet at ${nodeName(e.node, pz)}.`;
+    case 'lifeRoll':
+      return `${name(e.winner)} rolled highest and starts alive.`;
+    case 'spawn':
+      return e.alive ? null : `${name(e.piece)} haunts ${placeName(e.node, pz)}.`;
+    case 'roundStart':
+      return `Round ${e.round}: ${e.schedule.map(name).join(' → ')}.`;
     case 'roll':
-      return e.dice.length === 1 ? `${name(e.player)} rolled a ${e.dice[0]} (ghost turn).` : `${name(e.player)} rolled ${e.dice[0]} and ${e.dice[1]}.`;
+      return `${name(e.piece)} rolled ${e.die}${e.allowance !== e.die ? ` (ghost drift ${e.allowance})` : ''}.`;
     case 'move':
-      return `${name(e.player)} moved ${e.path.length - 1} to ${nodeName(e.path[e.path.length - 1], pz)}${e.usesSecret ? ' through a secret passage' : ''}.`;
+      return `${name(e.piece)} moved ${e.path.length - 1} to ${placeName(e.path[e.path.length - 1], pz)}${e.usesSecret ? ' through a secret passage' : ''}${e.usesWall ? ' through the wall' : ''}.`;
     case 'stay':
-      return `${name(e.player)} stayed put.`;
-    case 'harvest':
-      return e.amount ? `Took ${e.amount} candy (${e.remaining} left in the ${nodeName(e.node, pz)}).` : `The ${nodeName(e.node, pz)} is empty.`;
-    case 'pile':
-      return `Scooped up ${e.amount} dropped candy.`;
-    case 'bank':
-      return e.amount ? `Banked ${e.amount} candy (bank: ${e.total}).` : 'Safe in the Entrance Hall.';
-    case 'card':
-      return `Drew “${EVENT_INFO[cardType(e.cardId)].title}”.`;
-    case 'relocate':
-      return `${name(e.player)} slipped through to ${placeName(e.to, pz)}.`;
-    case 'steal':
-      return `${name(e.player)} stole ${e.amount} from ${name(e.victim)}.`;
-    case 'gain':
-      return `${name(e.player)} found ${e.amount} candy.`;
-    case 'ghostBonus':
-      return `${pz.ghostName} moves ${e.amount} extra this turn.`;
-    case 'swap':
-      return `${name(e.player)} and ${name(e.other)} swapped places.`;
-    case 'drop':
-      return `${e.amount} candy flew out onto the floor.`;
-    case 'noEffect':
-      return e.reason;
-    case 'declined':
-      return `${name(e.player)} declined the card.`;
+      return `${name(e.piece)} stayed.`;
     case 'trapRevealed':
-      return `A Reaper rose from ${placeName(e.node, pz)}! It stays there for good.`;
-    case 'spared':
-      return `${name(e.player)} was protected, so the Reaper let them pass — this time.`;
+      return `${EFFECT_NAMES[e.effect]} revealed at ${placeName(e.node, pz)}.`;
+    case 'seanceDormant':
+      return `The Séance at ${placeName(e.node, pz)} is cold: both Séances have been used.`;
+    case 'superReaper':
+      return e.effect === 'seance' ? 'The Super Reaper calls a Séance.' : 'The Super Reaper calls a Reaper’s Challenge.';
+    case 'poltergeist':
+      return `A Poltergeist threw ${name(e.piece)} to ${placeName(e.to, pz)}.`;
     case 'challenge':
-      return `${CHALLENGE_TITLES[e.challenge.kind]}: ${e.challenge.participants.map(name).join(' vs ')}.`;
+      return `${e.challenge.kind === 'seance' ? 'Séance' : e.challenge.host === 'contact' ? 'Challenge' : 'Reaper’s Challenge'}: ${e.challenge.participants.map(name).join(' vs ')}.`;
     case 'outcome':
       return outcomeLines(e.outcome, state, pz).join(' ');
-    case 'ghost': {
-      const plan = e.plan;
-      const target = plan.target?.kind === 'decoy' ? 'the decoy' : plan.target ? name(plan.target.player!) : 'nobody';
-      return `${pz.ghostName} drifted ${plan.path.length - 1} toward ${target}${plan.encounter ? ` and caught ${name(plan.encounter.player)}` : ''}.`;
-    }
-    case 'ghostWaits':
-      return `${pz.ghostName} waited — nobody was out and unprotected.`;
+    case 'lifeTransfer':
+      return `${name(e.to)} now holds the life.`;
+    case 'huntDeclined':
+      return `${name(e.piece)} let the chance pass.`;
+    case 'roundEnd':
+      return `${name(e.piece)} held the life at the bell: +1 (total ${e.score}).`;
     case 'gameOver':
-      return e.reason === 'noneAlive' ? 'Nobody is left alive. The house wins the night.' : 'Midnight!';
+      return 'The last bell has rung.';
     default:
       return null;
   }

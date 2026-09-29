@@ -1,4 +1,4 @@
-import { CHALLENGE, EVENT_INFO, EVENT_TYPES, SCORING } from '../engine/config';
+import { CHALLENGE, GHOST_MIN_MOVE, GHOST_SPAWNS, ROUNDS, SEANCE_LIMIT, SUPER_REAPER } from '../engine/config';
 import { undoInfo } from '../engine/engine';
 import { discardSave, doUndo, goToSetup, goToTitle, setState, updateSettings, useStore } from '../store';
 import { audio } from '../audio/audio';
@@ -7,102 +7,90 @@ import { hostSend, leaveRoom } from '../net/host';
 import { Dialog } from './Dialog';
 
 export function RulesContent() {
-  const r = CHALLENGE.rope.pass;
+  const c = CHALLENGE.rope;
   return (
     <div className="rules">
       <p className="lede">
-        Sneak through a haunted mansion, grab candy, and get it home to the Entrance Hall before midnight. Survive what lurks
-        in the dark — or come back as a ghost and haunt your friends. Can you risk one more room?
+        There is one life in the mansion. One piece holds it; everyone else is a ghost trying to steal it. Whoever holds the life when
+        a round ends scores a point. Ten rounds — most points wins.
       </p>
-      <h3>Before the first roll: curse the mansion</h3>
+      <h3>Pieces, teams and control</h3>
       <p>
-        Each player secretly picks one ordinary corridor for a hidden Reaper. The house adds its own until there are exactly
-        six. Nobody sees anyone else’s pick, and yours is never shown again — remember it. You have no immunity to your own.
+        Two to four pieces play. In <strong>Free-for-all</strong> each piece is one person or a bot. In <strong>Team Battle</strong> one or two
+        people share a piece (uneven teams are fine): the first person controls it in odd rounds, the second in even rounds — every
+        move and every jump that round, even out of turn. A team shares one score, one position and one trap.
       </p>
-      <h3>A living player’s turn</h3>
+      <h3>Before the first round</h3>
       <ol>
         <li>
-          <strong>Decoy (optional, once per game).</strong> Before rolling, if you are out in the house, leave a wrapped sweet
-          on your space. This turn the resident ghost heads for it instead of anyone’s candy.
+          <strong>Hide the traps.</strong> Each piece secretly picks one corridor. The house tops them up to exactly six (matching picks merge)
+          and secretly deals six effects over them: two <em>Reaper’s Challenges</em>, two <em>Séances</em>, two <em>Poltergeists</em>. You pick
+          a place, never an effect, and your own trap works on you too.
         </li>
         <li>
-          <strong>Roll two dice.</strong> Choose one to <em>move you</em>; the other <em>moves the resident ghost</em>.
-        </li>
-        <li>
-          <strong>Move</strong> 1 space up to your die along the glowing spaces, or <strong>Stay</strong>. You can pass other
-          living players but never pass through or stop on a ghost. Only where you stop counts.
-        </li>
-        <li>
-          <strong>Land.</strong> Rooms give up to 3 candy (they never refill); dropped candy is scooped up; a Trick or Treat
-          space (?) draws a card. Entering the Entrance Hall banks everything you carry and ends your move.
-        </li>
-        <li>
-          <strong>The resident ghost moves</strong>, then you pass on.
+          <strong>Roll for life.</strong> Every piece rolls a die. The highest starts alive in the Entrance Hall; tied leaders roll again. The
+          others start as ghosts at spaces {GHOST_SPAWNS.join(', ')}.
         </li>
       </ol>
-      <h3>Carried vs banked candy</h3>
+      <h3>A round</h3>
       <p>
-        Carried candy is at risk: if you die you drop all of it where you fall. Banked candy is yours for good — even as a
-        ghost. Nobody can take it.
+        The piece holding the life acts first. Then each ghost acts once, in an order that shifts by one seat every round (shown at the top of
+        the screen). The order is fixed when the round starts: if life changes hands, nobody gets an extra action and nobody loses theirs — a
+        piece simply acts in its slot as whatever it is by then. When everyone has acted, the bell rings and the piece holding the life scores
+        one point.
       </p>
-      <h3>Survival encounters</h3>
+      <h3>Moving</h3>
+      <ul>
+        <li>Roll one die. The living piece moves up to its roll. A ghost always drifts at least {GHOST_MIN_MOVE} (a 1 or 2 counts as {GHOST_MIN_MOVE}).</li>
+        <li>Stop anywhere within reach, or stay. Pieces never block each other and may share spaces.</li>
+        <li>Everyone may take one secret passage per move. Only ghosts may slip through the two dotted wall links (dining room ↔ conservatory, laboratory ↔ nursery).</li>
+      </ul>
+      <h3>Stealing the life</h3>
+      <p>
+        A ghost that ends its action on the living piece’s space, or one ordinary step away, may <strong>challenge</strong> (wall links and secret
+        passages don’t count as “next to”). Both jump the same spectral rope. If the ghost wins, it takes the life and the living piece’s space,
+        and the loser is thrown two spaces away. If the living piece wins, it keeps the life and the ghost is thrown back. The living piece
+        can’t start a challenge itself.
+      </p>
+      <h3>Haunted Jump Rope</h3>
+      <p>
+        Eight shared sweeps, one press per sweep — holding or mashing never counts twice. The most clean jumps wins. Tied at the top? Only
+        the tied jump up to {c.extraSweeps} sudden-death sweeps; then the steadier timing on the eight sweeps wins; an exact tie gets the
+        Reaper’s seeded verdict. Exactly one piece always holds the life afterwards.
+      </p>
+      <p>
+        <strong>The curse:</strong> the longer you hold the life, the narrower your jump window — normal after 0–1 rounds held, 10% narrower after 2,
+        20% after 3, 30% after 4 or more. Losing the life resets it; winning a defence doesn’t change it. The rope is the same for everyone;
+        only how precisely you must jump changes, and the screen shows your own window.
+      </p>
+      <h3>Traps and the Super Reaper</h3>
+      <p>
+        Traps trigger when a move ends on them (living or ghost) and stay revealed. Passing over, staying, or being thrown onto a space never
+        triggers anything.
+      </p>
       <ul>
         <li>
-          <strong>Caught by a ghost</strong> (the resident ghost or a player ghost): <em>Break the Curse</em> — press when the
-          circling marker is in the glowing zone. Two tries, one hit escapes. You keep your candy and flee to the nearest empty
-          corridor.
+          <strong>Reaper’s Challenge:</strong> a ghost landing here duels the living piece from anywhere. The living piece landing here picks a
+          ghost to duel. Nobody moves. It stays active for later landings.
         </li>
         <li>
-          <strong>Stopping on a Reaper trap</strong> reveals it for good. Death demands a performance: <em>Dance for Death</em>{' '}
-          (repeat four moves; two tries) or <em>Graveyard Jump Rope</em> (clear {r} of 8 sweeps). Passing over a trap is always
-          safe; staying never triggers one.
+          <strong>Séance:</strong> every piece jumps; the winner holds the life. One use per tile, and only {SEANCE_LIMIT} Séances per game in total
+          (the Super Reaper shares them) — after that a Séance tile is revealed cold and does nothing.
         </li>
         <li>
-          <strong>The Super Reaper</strong> (always visible, space 12): stop there and pick any unprotected living opponent. You
-          both jump the same rope; exactly one survives. They stay where they are on the board. No opponent? You perform alone.
+          <strong>Poltergeist:</strong> throws whoever landed at least three spaces away (never to the Entrance Hall), keeping their role. A ghost
+          may still challenge from where it lands.
         </li>
         <li>
-          <strong>Stopping on another living player</strong> (outside the Entrance Hall) starts <em>Haunted Jump Rope</em>: eight
-          sweeps, each of you needs {r} to live — both may survive, or neither. After the bell at the end of round 7, duels leave
-          one survivor: the lower score dies; ties go to up to four sudden-death sweeps, then steadier timing, then a curse.
+          <strong>Super Reaper</strong> (space {SUPER_REAPER}, always visible): a Séance while any are left, then a Reaper’s Challenge for the rest of the
+          game.
         </li>
       </ul>
-      <p>One stop causes at most one encounter: Super Reaper first, then a duel, then a Reaper performance.</p>
-      <h3>Protection</h3>
+      <p>One minigame per action at most: a trap that starts a challenge ends the action.</p>
+      <h3>Winning</h3>
       <p>
-        Survive any challenge and you are protected until the end of your next turn: ghosts pass you by, nobody can duel you,
-        and you can’t start a duel. An unknown trap spares you (but is revealed). Choosing to stop on a <em>revealed</em> Reaper
-        or the Super Reaper ignores your protection for that encounter — you’ll be warned first.
-      </p>
-      <h3>Becoming a ghost</h3>
-      <p>
-        Fail a challenge and you turn into a spectral version of your character, right there. You keep your seat and your
-        banked candy. From your next turn you roll one die, drift through the mansion (including two ghost-only links through
-        walls), never enter the Entrance Hall, and can’t collect candy or draw cards. End your move on an unprotected living
-        player and they must break the curse. Each player you turn earns a {SCORING.bountyPerKill}-point bounty, up to {SCORING.bountyCap}.
-      </p>
-      <h3>How the resident ghost chooses</h3>
-      <ul>
-        <li>It hunts the unprotected living player <strong>carrying</strong> the most, outside the Entrance Hall.</li>
-        <li>Ties: the nearest; then the active player; then the next player clockwise. It never hunts ghosts.</li>
-        <li>It stops at the first unprotected living player on its path and they break the curse — one challenge per move.</li>
-        <li>If nobody is exposed and there is no decoy, it waits.</li>
-      </ul>
-      <h3>Trick or Treat cards</h3>
-      <ul className="cards-list">
-        {EVENT_TYPES.map((t) => (
-          <li key={t}>
-            <strong>{EVENT_INFO[t].title}:</strong> {EVENT_INFO[t].effect}
-          </li>
-        ))}
-      </ul>
-      <p>Moving or swapping through a card never collects candy, banks, triggers a Reaper or starts a duel.</p>
-      <h3>Midnight and scoring</h3>
-      <p>
-        Ten rounds, one turn each per round — or the night ends at once if nobody is left alive. Living players score{' '}
-        <strong>banked + half their carried candy (rounded down)</strong>, plus a <strong>{SCORING.survivalBonus}-point survival bonus</strong> if
-        they finish alive with at least {SCORING.survivalBonusMinBanked} banked. Ghosts score <strong>banked + bounty</strong>. Highest total wins;
-        ties share the win.
+        After round {ROUNDS}, the most points wins, whether you end alive or as a ghost. Tied top scores share the win. A game always hands out
+        exactly {ROUNDS} points.
       </p>
     </div>
   );
@@ -125,7 +113,7 @@ function Settings() {
           step={0.05}
           value={s.sfxVolume}
           onChange={(e) => updateSettings({ sfxVolume: Number(e.target.value) })}
-          onPointerUp={() => audio.play('candy')}
+          onPointerUp={() => audio.play('click')}
         />
       </label>
       <label className="row check">
@@ -138,7 +126,7 @@ function Settings() {
       </label>
       <label className="row check">
         <input type="checkbox" checked={s.calmCamera} onChange={(e) => updateSettings({ calmCamera: e.target.checked })} />
-        <span>Calm camera (no ghost chase shots, quicker cuts)</span>
+        <span>Calm camera (no challenge close-ups, quicker cuts)</span>
       </label>
       <label className="row check">
         <input type="checkbox" checked={s.lowGraphics} onChange={(e) => updateSettings({ lowGraphics: e.target.checked })} />
@@ -155,25 +143,49 @@ function Settings() {
 function HostControls() {
   const room = useStore((s) => s.room);
   const [confirm, setConfirm] = useState(false);
-  const seats = room?.view?.seats ?? [];
+  const view = room?.view;
+  const pieces = view?.pieces ?? [];
+  const spectators = view?.spectators ?? [];
+  const running = !!view?.run?.startAt;
+  const paused = !!view?.paused;
   return (
     <div className="stack host-controls">
       <p className="muted small">
-        Room {room?.code} — host controls. Undo is off in phone rooms; a restart starts a fresh game for everyone.
+        Room {room?.code} — host controls. Undo is off in phone rooms. Handovers wait until no challenge is being jumped.
       </p>
-      {seats
-        .filter((s) => s.kind === 'phone')
-        .map((s) => (
-          <div key={s.seat} className="row-btns">
-            <span>
-              {s.seat + 1}. {s.name} {s.connected ? '📱' : '📱 offline'}
-            </span>
-            <button className="btn tool" onClick={() => hostSend({ t: 'replaceWithBot', seat: s.seat })}>
-              Hand to a bot
-            </button>
-            <button className="btn tool" aria-pressed={!!s.localControl} onClick={() => hostSend({ t: 'localControl', seat: s.seat, on: !s.localControl })}>
-              {s.localControl ? 'Challenges on phone' : 'Challenges on TV keyboard'}
-            </button>
+      {view?.notice && <p className="notice">{view.notice}</p>}
+      <button className="btn" onClick={() => hostSend({ t: 'pause', on: !paused })}>
+        {paused ? 'Resume the game' : 'Pause the game'}
+      </button>
+      {pieces
+        .filter((p) => p.kind === 'phone')
+        .map((p) => (
+          <div key={p.piece} className="host-piece">
+            <b>
+              {p.piece + 1}. {p.name}
+            </b>
+            {p.members.map((m, slot) => (
+              <div key={slot} className="row-btns">
+                <span>
+                  {p.members.length > 1 ? (slot === 0 ? 'Odd rounds: ' : 'Even rounds: ') : ''}
+                  {m.name} {m.connected ? '📱' : '📱 offline'}
+                </span>
+                {!m.connected &&
+                  [...spectators, ...p.members.filter((o) => o.participantId !== m.participantId && o.connected)].map((to) => (
+                    <button key={to.participantId} className="btn tool" disabled={running} onClick={() => hostSend({ t: 'handover', piece: p.piece, slot, to: to.participantId })}>
+                      Hand to {to.name}
+                    </button>
+                  ))}
+              </div>
+            ))}
+            <div className="row-btns">
+              <button className="btn tool" disabled={running} onClick={() => hostSend({ t: 'replaceWithBot', piece: p.piece })}>
+                Hand the piece to a bot
+              </button>
+              <button className="btn tool" aria-pressed={!!p.localControl} onClick={() => hostSend({ t: 'localControl', piece: p.piece, on: !p.localControl })}>
+                {p.localControl ? 'Jumps on phone' : 'Jumps on TV keyboard'}
+              </button>
+            </div>
           </div>
         ))}
       {confirm ? (
@@ -260,12 +272,12 @@ export function Modals() {
       return (
         <Dialog title="Undo" onClose={close}>
           <p>
-            Go back to the start of <strong>{info.playerName}</strong>’s turn in round {info.round}? Everything since then
-            is undone. The dice and cards will come out exactly the same.
+            Go back to the start of <strong>{info.pieceName}</strong>’s action in round {info.round}? Everything since then is
+            undone and the die will roll exactly the same. Traps the table has already seen stay marked.
           </p>
           <div className="row-btns">
             <button className="btn primary" onClick={doUndo}>
-              Undo to {info.playerName}’s turn
+              Undo to {info.pieceName}’s action
             </button>
             <button className="btn" onClick={close}>
               Cancel
@@ -280,7 +292,7 @@ export function Modals() {
         <Dialog title="Saved game problem" onClose={close}>
           <p>
             {saveProblem === 'incompatible'
-              ? 'The saved game on this device is from a different version of One More Room and can’t be resumed.'
+              ? 'The saved game on this device uses the old candy rules. One Life is a different game, so that save can’t be resumed — clear it to start fresh.'
               : 'The saved game on this device looks damaged and can’t be resumed.'}
           </p>
           <p>You can clear it and start fresh. Nothing else stored in your browser is touched.</p>

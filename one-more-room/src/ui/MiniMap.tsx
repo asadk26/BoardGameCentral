@@ -2,7 +2,7 @@
 // by the phone controller. It draws only what it is given — callers pass
 // public facts (revealed traps), never the hidden map.
 
-import { CHARACTERS, GHOST_WALL_LINKS, NODE_COUNT, NODE_POSITIONS, ORDINARY_EDGES, SECRET_EDGES, SUPER_REAPER, nodeKind } from '../engine/config';
+import { CHARACTERS, DECORATED_CORRIDORS, GHOST_WALL_LINKS, NODE_COUNT, NODE_POSITIONS, ORDINARY_EDGES, SECRET_EDGES, SUPER_REAPER, nodeKind, type TrapEffect } from '../engine/config';
 import type { GameState } from '../engine/types';
 
 const X0 = -13;
@@ -16,8 +16,8 @@ export interface MiniMapProps {
   selected?: number | null;
   onPick?: (id: number) => void;
   game?: GameState | null;
-  /** Revealed (public) traps only. */
-  revealed?: readonly number[];
+  /** Revealed (public) traps only, with their effects. */
+  revealed?: ReadonlyArray<{ node: number; effect: TrapEffect; spent?: boolean }>;
   label?: string;
   /** Highlight a route. */
   path?: number[];
@@ -53,7 +53,9 @@ export function MiniMap({ pickable, selected, onPick, game, revealed = [], label
         const [x, y] = px(id);
         const kind = nodeKind(id);
         const can = pickable?.has(id) ?? false;
-        const fill = id === 0 ? '#e8b54a' : kind === 'room' ? '#c98a4b' : kind === 'event' ? '#f08a24' : kind === 'secret' ? '#9b6ce0' : id === SUPER_REAPER ? '#8a2be2' : '#5a4d66';
+        const fill = id === 0 ? '#e8b54a' : kind === 'room' ? '#c98a4b' : DECORATED_CORRIDORS.includes(id) ? '#b8703a' : kind === 'secret' ? '#9b6ce0' : id === SUPER_REAPER ? '#8a2be2' : '#5a4d66';
+        const trap = revealed.find((t) => t.node === id);
+        const mark = id === SUPER_REAPER ? '☠' : trap ? (trap.effect === 'reaper' ? '☠' : trap.effect === 'seance' ? (trap.spent ? '·' : '🕯') : '🌀') : String(id);
         const r = id === 0 ? 15 : 11;
         return (
           <g
@@ -68,35 +70,34 @@ export function MiniMap({ pickable, selected, onPick, game, revealed = [], label
             {can && <circle cx={x} cy={y} r={r + 7} fill={selected === id ? '#fff1b8' : '#f2a93b'} opacity={selected === id ? 0.9 : 0.35} />}
             <circle cx={x} cy={y} r={r} fill={fill} stroke="#150d24" strokeWidth={2} opacity={pickable && !can ? 0.45 : 1} />
             <text x={x} y={y + 4} textAnchor="middle" fontSize={10} fontWeight={800} fill="#150d24">
-              {id === SUPER_REAPER ? '☠' : revealed.includes(id) ? '☠' : id}
+              {mark}
             </text>
           </g>
         );
       })}
       {game &&
-        game.players.map((p, i) => {
+        game.phase !== 'placement' &&
+        game.phase !== 'lifeRoll' &&
+        game.pieces.map((p, i) => {
           const [x, y] = px(p.node);
-          const here = game.players.filter((q) => q.node === p.node);
+          const here = game.pieces.filter((q) => q.node === p.node);
           const k = here.indexOf(p);
-          const ox = (k - (here.length - 1) / 2) * 10;
+          const ox = (k - (here.length - 1) / 2) * 12;
           const color = CHARACTERS.find((c) => c.id === p.character)!.color;
           return (
-            <g key={p.id} transform={`translate(${x + ox},${y - 18})`} opacity={p.alive ? 1 : 0.6}>
-              <circle r={8} fill={p.alive ? color : '#bff'} stroke="#fff6e0" strokeWidth={2} />
+            <g key={p.id} transform={`translate(${x + ox},${y - 18})`} opacity={p.alive ? 1 : 0.65}>
+              <circle r={p.alive ? 10 : 8} fill={color} stroke={p.alive ? '#ffd36b' : '#bff'} strokeWidth={p.alive ? 3 : 2} strokeDasharray={p.alive ? undefined : '2 2'} />
               <text y={3.5} textAnchor="middle" fontSize={9} fontWeight={900} fill="#1a1024">
                 {i + 1}
               </text>
+              {p.alive && (
+                <text y={-12} textAnchor="middle" fontSize={11}>
+                  ❤
+                </text>
+              )}
             </g>
           );
         })}
-      {game && (() => {
-        const [x, y] = px(game.ghost);
-        return (
-          <text x={x} y={y + 26} textAnchor="middle" fontSize={16}>
-            👻
-          </text>
-        );
-      })()}
     </svg>
   );
 }
