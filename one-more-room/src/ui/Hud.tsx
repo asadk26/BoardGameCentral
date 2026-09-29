@@ -31,6 +31,7 @@ export function Hud() {
 
   useLayoutEffect(() => {
     const measure = () => {
+      if (!topRef.current) return; // the results screen measures itself
       const W = window.innerWidth;
       const Hh = window.innerHeight;
       const t = topRef.current?.getBoundingClientRect();
@@ -41,7 +42,7 @@ export function Hud() {
       let right = 0;
       let bottom = 0;
       if (l && l.width > 0) {
-        if (l.height > l.width) left = l.right + 8; // a side column
+        if (l.width < W * 0.3) left = l.right + 8; // a side column
         else top = Math.max(top, l.bottom + 8); // a strip under the top bar
       }
       if (b && b.width > 0) {
@@ -49,6 +50,7 @@ export function Hud() {
         else bottom = Hh - b.top + 8;
       }
       Object.assign(hudInsets, { top, left, right, bottom });
+      document.documentElement.style.setProperty('--topbar-h', `${t ? Math.round(t.bottom) : 62}px`);
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -520,12 +522,24 @@ function MidnightBanner() {
 }
 
 function Results({ game }: { game: GameState }) {
+  const panel = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const measure = () => {
+      const r = panel.current?.getBoundingClientRect();
+      if (!r) return;
+      const docked = r.left > window.innerWidth * 0.35;
+      Object.assign(hudInsets, docked ? { top: 0, left: 0, bottom: 0, right: window.innerWidth - r.left + 8 } : { top: 0, left: 0, right: 0, bottom: window.innerHeight - r.top + 8 });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
   const scores = finalScores(game);
   const winners = scores.filter((s) => s.winner).map((s) => game.players[s.player].name);
   const mansion = useStore((s) => s.personalization.mansionName);
   return (
     <div className="results-wrap">
-      <div className="results" role="dialog" aria-label="Final scores">
+      <div className="results" role="dialog" aria-label="Final scores" ref={panel}>
         <p className="kicker">Midnight at {mansion}</p>
         <h1>{winners.length === 1 ? `${winners[0]} wins!` : `${winners.join(' & ')} share the victory!`}</h1>
         <table>

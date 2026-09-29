@@ -460,7 +460,7 @@ kbd {
 
 .players {
   position: absolute;
-  top: 74px;
+  top: calc(var(--topbar-h, 62px) + 10px);
   left: 10px;
   width: 238px;
   display: flex;
@@ -676,10 +676,9 @@ kbd {
 
 .dest-list {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  overflow-x: auto;
   padding-bottom: 4px;
-  scrollbar-width: thin;
 }
 .dest {
   flex: none;
@@ -826,7 +825,7 @@ kbd {
 
 .tip {
   position: absolute;
-  top: 74px;
+  top: calc(var(--topbar-h, 62px) + 10px);
   right: 10px;
   width: min(440px, calc(100% - 20px));
   padding: 12px 16px;
@@ -1015,7 +1014,7 @@ kbd {
 
 @media (min-width: 900px) and (min-aspect-ratio: 6/5) {
   .bottom {
-    top: 72px;
+    top: calc(var(--topbar-h, 62px) + 10px);
     right: 10px;
     bottom: 10px;
     left: auto;
@@ -1039,18 +1038,28 @@ kbd {
     width: min(420px, calc(100% - 700px));
   }
   .players {
-    max-height: calc(100% - 84px);
+    max-height: calc(100% - var(--topbar-h, 62px) - 20px);
+  }
+  .results-wrap {
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .results {
+    width: min(600px, 50%);
+    max-height: calc(100% - 24px);
   }
 }
 
 @media (min-width: 900px) and (max-width: 1199px) and (min-aspect-ratio: 6/5) {
   .bottom {
     width: 370px;
-    top: 132px;
+  }
+  .players {
+    right: 390px !important;
   }
   .tip {
     left: 10px;
-    top: 140px;
+    top: calc(var(--topbar-h, 62px) + 80px);
     width: min(420px, calc(100% - 400px));
   }
 }
@@ -1065,13 +1074,13 @@ kbd {
     right: 10px;
     width: auto;
     flex-direction: row;
-    overflow-x: auto;
+    flex-wrap: wrap;
     max-height: none;
-    top: 66px;
+    top: calc(var(--topbar-h, 62px) + 6px);
   }
   .pcard {
-    flex: 0 0 auto;
-    min-width: 150px;
+    flex: 1 1 150px;
+    min-width: 0;
     padding: 5px 8px;
   }
   .ploc,
@@ -1082,7 +1091,13 @@ kbd {
     font-size: 0.8rem;
   }
   .tip {
-    top: 150px;
+    top: calc(var(--topbar-h, 62px) + 80px);
+  }
+}
+
+@media (max-width: 1400px) {
+  .mansion {
+    display: none;
   }
 }
 
@@ -1110,12 +1125,16 @@ kbd {
 }
 
 @media (max-width: 700px) and (orientation: portrait) {
+  .bottom {
+    bottom: 36px;
+  }
   .landscape-hint {
     display: block;
     position: absolute;
-    top: 50%;
+    bottom: 6px;
     left: 50%;
-    transform: translate(-50%, -50%);
+    transform: translateX(-50%);
+    white-space: nowrap;
     padding: 6px 12px;
     border-radius: 999px;
     background: rgba(0, 0, 0, 0.6);
@@ -1129,5 +1148,24 @@ kbd {
   .event-card.reveal,
   .banner {
     animation: none;
+  }
+}
+
+.results td {
+  white-space: nowrap;
+}
+@media (max-width: 1199px) {
+  .results {
+    width: min(560px, 58%);
+    font-size: 0.9rem;
+  }
+  .results .calc,
+  .results td .muted {
+    display: none;
+  }
+}
+@media (max-width: 899px), (max-aspect-ratio: 6/5) {
+  .results {
+    width: 100%;
   }
 }

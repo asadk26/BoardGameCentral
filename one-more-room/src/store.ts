@@ -177,11 +177,8 @@ export function useStore<T>(sel: (s: AppState) => T): T {
 director.subscribe(() => setState({ busy: director.busy }));
 
 // Read-only handle for automated browser checks and debugging.
-(globalThis as unknown as { __omr?: unknown }).__omr = { getState, director };
-director.onCue = (s) => {
-  audio.play(s);
-  if (s === 'bell') setState((st) => ({ banner: { id: (st.banner?.id ?? 0) + 1, text: 'Three rounds until midnight' } }));
-};
+(globalThis as unknown as { __omr?: unknown }).__omr = { getState, director, act: (a: Action) => act(a) };
+director.onCue = (s) => audio.play(s);
 
 function applyAudioSettings(s: Settings) {
   audio.musicVolume = s.musicVolume;
@@ -221,6 +218,10 @@ export function act(action: Action) {
   setState({ session: r.session, rollId: action.type === 'roll' ? s.rollId + 1 : s.rollId });
   director.play(r.events, before, r.session.game);
   audio.midnight = r.session.game.midnight;
+  if (r.events.some((e) => e.kind === 'midnight')) {
+    audio.play('bell');
+    setState((st) => ({ banner: { id: (st.banner?.id ?? 0) + 1, text: 'Three rounds until midnight' } }));
+  }
   if (action.type !== 'select') persist();
   else persistSoon();
 }

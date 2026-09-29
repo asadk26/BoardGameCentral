@@ -472,8 +472,13 @@ function CameraRig({ mode }: { mode: SceneMode }) {
       focus.set(0, 0, 11);
       rate = 1.5;
     } else if (mode === 'results' || !g) {
-      desiredPos.set(0, 3.6, 18.5);
-      desiredLook.set(0, 1.1, 10.4);
+      // Back off far enough that the whole podium fits beside the score panel.
+      const n = g?.players.length ?? 6;
+      const tanH = Math.tan((cam.fov * Math.PI) / 360) * (size.width / size.height);
+      const fracH = Math.max(0.4, (size.width - hudInsets.left - hudInsets.right) / size.width);
+      const d = Math.max(6.2, (n * 1.35 + 1.6) / (2 * tanH * fracH));
+      desiredPos.set(0, 1.4 + d * 0.36, 11.6 + d);
+      desiredLook.set(0, 0.8, 11.6);
       focus.set(0, 0, 11);
       rate = 2;
     } else if (st.cameraMode === 'overview') {
@@ -519,7 +524,7 @@ function CameraRig({ mode }: { mode: SceneMode }) {
     }
 
     // Centre the picture in the part of the screen the HUD leaves free.
-    const inGame = mode === 'game';
+    const inGame = mode === 'game' || mode === 'results';
     const ox = inGame ? Math.round((hudInsets.right - hudInsets.left) / 2) : 0;
     const oy = inGame ? Math.round((hudInsets.bottom - hudInsets.top) / 2) : 0;
     const key = `${size.width}x${size.height}:${ox},${oy}`;
@@ -590,7 +595,7 @@ function World() {
       <Tiles />
       <Passages strong={overview || mode !== 'game'} />
       <MansionProps round={game?.round ?? 1} />
-      <Candy state={game} roomNames={pz.roomNames} />
+      <Candy state={game} roomNames={pz.roomNames} labels={mode !== 'results'} />
       {mode !== 'game' && <Label pos={[0, 2.6, 10.6]} lines={[pz.mansionName]} scale={0.8} color="#f2b84b" />}
       <GhostActor node={game?.ghost ?? 16} />
       {mode === 'showcase' && <ShowcaseLineup interactive={screen === 'setup'} />}

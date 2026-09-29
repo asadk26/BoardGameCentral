@@ -80,6 +80,7 @@ async function settle(page) {
 }
 
 async function startGame(page, count, query = '') {
+  if (process.env.VERBOSE) console.log('      startGame', count, query);
   await page.goto(URL + query);
   await page.evaluate(() => {
     for (const k of Object.keys(localStorage)) if (k.startsWith('one-more-room/')) localStorage.removeItem(k);
@@ -114,16 +115,23 @@ async function loadScenario(page, mutate) {
 }
 
 async function playTurnViaUI(page, { pick = 'far' } = {}) {
+  const t0 = Date.now();
+  const v = (m) => process.env.VERBOSE && console.log(`        ${m} +${Date.now() - t0}ms`);
+  page.setDefaultTimeout(15000);
   let st = await S(page);
   const turnNo = st.game.turnNumber;
   await page.getByRole('button', { name: /Roll dice/ }).click();
+  v('rolled');
   await settle(page);
+  v('settled');
   st = await S(page);
   const opts = page.getByRole('option');
   const n = await opts.count();
   if (n > 1) await opts.nth(pick === 'near' ? 1 : n - 1).click();
   else await opts.first().click();
+  v('picked');
   await page.getByRole('button', { name: /^Confirm/ }).click();
+  v('confirmed');
   await settle(page);
   for (let i = 0; i < 3; i++) {
     st = await S(page);
@@ -220,7 +228,7 @@ try {
       st = await S(page);
       check('swapping dice keeps the same roll', JSON.stringify(st.game.dice) === JSON.stringify(diceBefore) && st.game.selection.moveDie === 1);
       await page.getByRole('button', { name: /Swap dice/ }).click();
-      if (dest) await page.mouse.click(dest.x, dest.y);
+      if (dest) await page.getByRole('option', { name: new RegExp(`#${dest.id} `) }).click();
     }
     const preview = await page.evaluate(() => document.querySelector('.forecast .ghostline')?.textContent ?? '');
     await page.getByRole('button', { name: /^Confirm/ }).click();
@@ -413,18 +421,43 @@ try {
     await page.getByRole('button', { name: 'Got it' }).click();
     const t0 = Date.now();
     const turns = new Array(6).fill(0);
+    let uiTurns = 0;
     let sawMidnight = false;
+    const engineTurn = async () => {
+      // Same store → engine → save path as the buttons, without clicking.
+      const act = (a) => page.evaluate((x) => { window.__omr.act(x); window.__omr.director.skip(); }, a);
+      await act({ type: 'roll' });
+      await page.waitForTimeout(40);
+      const ids = await page.evaluate(() => [...document.querySelectorAll('.dest .dmeta')].map((e) => Number(e.textContent.match(/#(\d+)/)[1])));
+      await act({ type: 'select', dest: ids.length ? ids[(turns.reduce((x, y) => x + y) * 7) % ids.length] : 'stay' });
+      await act({ type: 'confirmMove' });
+      let st = await S(page);
+      if (st.game.phase === 'event') {
+        await act(st.game.event.canDecline && st.game.event.type !== 'costumeMixup' ? { type: 'eventDecline' } : { type: 'eventChoose', option: st.game.event.options[0] });
+      }
+      await act({ type: 'moveGhost' });
+      await act({ type: 'nextTurn' });
+    };
     for (let i = 0; i < 70; i++) {
       const st = await S(page);
       if (st.game.phase === 'gameOver') break;
       turns[st.game.turn]++;
-      await playTurnViaUI(page, { pick: i % 3 === 0 ? 'near' : 'far' });
-      if (!sawMidnight && (await page.locator('.banner').count())) {
-        sawMidnight = true;
+      if (process.env.VERBOSE) console.log(`      turn ${i}: round ${st.game.round} player ${st.game.turn + 1} (${Math.round((Date.now() - t0) / 1000)}s)`);
+      const viaUI = st.game.round === 1 || st.game.round === 10;
+      if (viaUI) {
+        uiTurns++;
+        await playTurnViaUI(page, { pick: i % 3 === 0 ? 'near' : 'far' });
+      } else await engineTurn();
+      const after = await S(page);
+      if (!sawMidnight && after.game.round === 8) {
+        const banner = await page.evaluate(() => window.__omr.getState().banner?.text ?? '');
+        sawMidnight = banner.includes('Three rounds until midnight') && after.game.midnight;
+        await page.waitForTimeout(300);
         await page.screenshot({ path: `${OUT}/14-midnight.png` });
       }
-      if (i === 25) await page.screenshot({ path: `${OUT}/15-midgame.png` });
+      if (i === 30) await page.screenshot({ path: `${OUT}/15-midgame.png` });
     }
+    console.log(`      ${uiTurns} of 60 turns were played by clicking through the UI`);
     await page.waitForTimeout(1500);
     const st = await S(page);
     check('six-player game reaches the results after exactly ten turns each', st.game.phase === 'gameOver' && turns.every((t) => t === 10), JSON.stringify(turns));

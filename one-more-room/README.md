@@ -52,8 +52,18 @@ src/
   ui/                DOM HUD, setup, dialogs, dice
 tests/
   engine.test.ts     rules coverage
+  fuzz.test.ts       ~400 random complete games, invariants checked after every action
   browser/e2e.mjs    real-browser play-throughs
 ```
+
+The browser suite takes around 25–35 minutes under software WebGL
+(SwiftShader); on a machine with a GPU it is much faster. Run one part with
+`ONLY=1` (two players, both cameras, undo, reload), `ONLY=2` (catch, decoy,
+event card, banking via crafted saves), `ONLY=3` (six players through
+midnight: rounds 1 and 10 clicked, rounds 2–9 dispatched through the same
+store and engine), `ONLY=4` (screen sizes, reduced motion, mute) or `ONLY=5`
+(damaged save, no WebGL). The page exposes `window.__omr` (`getState`,
+`act`, `director`, `project`) for these checks.
 
 ## How the pieces fit
 
@@ -71,6 +81,8 @@ tests/
 * **Undo** keeps the snapshot from the start of the current turn and the one
   before it. Restoring a snapshot restores RNG and deck, so a replayed turn
   rolls the same dice and draws the same card.
+* **Low graphics** (Sound → graphics settings, or `?quality=low`) turns off
+  shadows and caps the pixel ratio at 1 for older laptops and tablets.
 * **Balancing** lives in `config.ts`: room stocks, harvest size, event cards,
   rounds, the midnight warning round.
 

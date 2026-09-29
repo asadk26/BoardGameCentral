@@ -54,6 +54,7 @@ class Director {
   private popupId = 1;
   private end = 0;
   private ghostUntil = 0;
+  private timer: number | null = null;
   private listeners = new Set<Listener>();
   /** Last rendered position of each actor, written by the scene each frame. */
   rendered = new Map<Actor, V3>();
@@ -190,8 +191,7 @@ class Director {
           this.popup(nodePos(before.ghost, 1.6), 'The ghost waits', '#7ff5e6', t - now());
           break;
         case 'midnight':
-          cue('bell', t);
-          break;
+          break; // announced by the store directly, so skipping can't lose it
         case 'gameOver':
           cue('fanfare', t);
           break;
@@ -200,7 +200,15 @@ class Director {
       }
     }
     this.end = t;
-    if (this.segs.length || this.end > now() + 0.05) this.setBusy(true);
+    if (this.segs.length || this.end > now() + 0.05) {
+      this.setBusy(true);
+      // Don't rely on frames to unlock the controls: a slow device may render rarely.
+      if (this.timer !== null) clearTimeout(this.timer);
+      this.timer = window.setTimeout(() => {
+        this.timer = null;
+        this.tick();
+      }, Math.max(0, (this.end - now()) * 1000) + 30);
+    }
   }
 
   /** Complete every running animation instantly. */

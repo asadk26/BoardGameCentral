@@ -314,7 +314,7 @@ function hash(n: number) {
   return s - Math.floor(s);
 }
 
-export function Candy({ state, roomNames }: { state: GameState | null; roomNames: Record<number, string> }) {
+export function Candy({ state, roomNames, labels = true }: { state: GameState | null; roomNames: Record<number, string>; labels?: boolean }) {
   const stocks = state?.stocks ?? Object.fromEntries(Object.entries(ROOMS).map(([k, r]) => [k, r.stock]));
   const piles = state?.piles ?? [];
   const spots = useMemo(() => {
@@ -359,11 +359,11 @@ export function Candy({ state, roomNames }: { state: GameState | null; roomNames
               <cylinderGeometry args={[0.18, 0.2, 0.04, 16]} />
               <meshStandardMaterial color="#2a1a10" />
             </mesh>
-            <Label pos={[bx, 1.05, bz]} lines={[roomNames[id] ?? ROOMS[id].defaultName, n ? `${n} candy left` : 'empty']} scale={0.52} dim={!n} />
+            {labels && <Label pos={[bx, 1.05, bz]} lines={[roomNames[id] ?? ROOMS[id].defaultName, n ? `${n} candy left` : 'empty']} scale={0.52} dim={!n} />}
           </group>
         );
       })}
-      {piles.map((n, id) =>
+      {labels && piles.map((n, id) =>
         n ? <Label key={`pile${id}`} pos={nodePos(id, 0.75)} lines={[`${n} dropped`]} scale={0.34} color="#ffb36b" /> : null,
       )}
     </group>
