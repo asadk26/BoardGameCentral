@@ -1,127 +1,105 @@
-// The rules of One More Room as a pure, deterministic state machine.
-// Every function here takes a snapshot and returns a new one; nothing is
-// mutated in place and nothing reads the clock or Math.random.
+// The rules of One More Room: One Life, as a pure, deterministic state
+// machine. Every function here takes a snapshot and returns a new one;
+// nothing is mutated in place and nothing reads the clock or Math.random.
 //
-// Living players collect and bank candy. Encounters are survival games:
-// failing one turns that player into a ghost for the rest of the game.
+// One piece is alive. Everyone else is a ghost trying to steal that life.
+// Whoever holds it when a round ends scores a point.
 
 import {
-  cardType,
   CHARACTERS,
-  DECK_SIZE,
+  curseMultiplier,
   ENTRANCE,
-  EVENT_NODES,
-  GHOST_START,
-  HARVEST_PER_LANDING,
-  LETHAL_DUELS_FROM_ROUND,
-  MAX_PLAYERS,
-  MIDNIGHT_WARNING_AFTER_ROUND,
-  MIN_PLAYERS,
+  GHOST_MIN_MOVE,
+  GHOST_SPAWNS,
+  LIVING_SPAWN,
+  MAX_CONTROLLERS_PER_PIECE,
+  MAX_PIECES,
+  MIN_PIECES,
   NODE_COUNT,
-  nodeKind,
-  ROOMS,
+  POLICY,
   ROUNDS,
-  SCORING,
-  SECRET_ENDPOINTS,
+  SEANCE_LIMIT,
   SUPER_REAPER,
   TRAP_COUNT,
+  TRAP_EFFECTS,
   TRAP_ELIGIBLE,
   TRAP_WINGS,
   trapEligible,
   type CharacterId,
+  type TrapEffect,
 } from './config';
-import { ghostBfs, ghostPath, nearestWhere, ORDINARY_ADJ, playerRoutes, type PlayerRoute } from './graph';
+import { inAttackRange, ordinaryDistance, pieceRoutes, type PlayerRoute } from './graph';
 import { nextFloat, rollDie, seedFrom, shuffle } from './rng';
-import { judgeDance, judgeDuel, judgeEscape, judgeSoloRope, type ChallengeKind } from './challenges';
-import type {
-  Action,
-  ActionResult,
-  Challenge,
-  ChallengeHost,
-  ChallengeOutcome,
-  Continuation,
-  Encounter,
-  EventState,
-  GameState,
-  GhostPlan,
-  GhostTarget,
-  LogEntry,
-  MovePreview,
-  PlayerState,
-} from './types';
+import { judgeRope, type ChallengeInput } from './challenges';
+import type { Action, ActionResult, Challenge, ChallengeHost, ChallengeOutcome, GameState, KnownEffect, LogEntry, MovePreview, PieceState, Trap } from './types';
 
-export interface NewGameOptions {
-  players: Array<{ name: string; character: CharacterId }>;
-  seed: number;
-  /** Skip secret placement with these six trap nodes (tests and tools only). */
-  presetTraps?: number[];
+export interface PieceSetup {
+  character: CharacterId;
+  /** One name per person (one or two); a bot has exactly one. */
+  controllers: string[];
+  bot?: boolean;
+  /** Display name; defaults to the controllers joined with “&”. */
+  name?: string;
 }
 
-export function createGame({ players, seed, presetTraps }: NewGameOptions): GameState {
-  if (players.length < MIN_PLAYERS || players.length > MAX_PLAYERS) {
-    throw new Error(`One More Room needs ${MIN_PLAYERS}–${MAX_PLAYERS} players`);
+export interface NewGameOptions {
+  pieces: PieceSetup[];
+  seed: number;
+  /** Skip secret placement with these six traps (tests and tools only). */
+  presetTraps?: Array<{ node: number; effect: TrapEffect }>;
+}
+
+export function createGame({ pieces, seed, presetTraps }: NewGameOptions): GameState {
+  if (pieces.length < MIN_PIECES || pieces.length > MAX_PIECES) throw new Error(`One More Room needs ${MIN_PIECES}–${MAX_PIECES} pieces`);
+  if (new Set(pieces.map((p) => p.character)).size !== pieces.length) throw new Error('Each piece needs a distinct character');
+  if (!pieces.every((p) => CHARACTERS.some((c) => c.id === p.character))) throw new Error('Unknown character');
+  for (const p of pieces) {
+    const max = p.bot ? 1 : MAX_CONTROLLERS_PER_PIECE;
+    if (p.controllers.length < 1 || p.controllers.length > max) throw new Error('A piece has one or two people, or one bot');
   }
-  const chars = new Set(players.map((p) => p.character));
-  if (chars.size !== players.length) throw new Error('Each player needs a distinct character');
-  if (!players.every((p) => CHARACTERS.some((c) => c.id === p.character))) throw new Error('Unknown character');
-
-  const stocks = new Array<number>(NODE_COUNT).fill(0);
-  for (const [id, room] of Object.entries(ROOMS)) stocks[Number(id)] = room.stock;
-
   const rng0 = seed >>> 0;
-  const [deck, rng] = shuffle(
-    Array.from({ length: DECK_SIZE }, (_, i) => i),
-    rng0,
-  );
-
   const state: GameState = {
-    schema: 2,
+    schema: 3,
     seed: rng0,
-    rng,
+    rng: seedFrom(`board:${rng0}`),
     challengeRng: seedFrom(`challenge:${rng0}`),
     challengeCount: 0,
-    players: players.map<PlayerState>((p, i) => ({
+    pieces: pieces.map<PieceState>((p, i) => ({
       id: `p${i + 1}`,
-      name: p.name,
+      name: p.name ?? p.controllers.join(' & '),
       character: p.character,
+      controllers: p.controllers.slice(),
+      bot: !!p.bot,
       node: ENTRANCE,
-      carried: 0,
-      banked: 0,
-      decoyUsed: false,
+      alive: false,
+      score: 0,
+      streak: 0,
       facingFrom: null,
-      alive: true,
-      bounty: 0,
-      protectedUntil: null,
-      diedInRound: null,
     })),
-    ghost: GHOST_START,
-    stocks,
-    piles: new Array<number>(NODE_COUNT).fill(0),
-    deck,
-    discard: [],
-    round: 1,
-    turn: 0,
-    turnNumber: 1,
     phase: 'placement',
-    dice: null,
-    selection: { moveDie: 0, dest: null },
-    decoy: null,
-    ghostBonus: 0,
-    event: null,
+    round: 1,
+    schedule: [],
+    slot: 0,
+    actionNumber: 0,
+    die: null,
+    allowance: 0,
+    selection: { dest: null },
+    origin: null,
+    minigameUsed: false,
     pick: null,
     challenge: null,
     lastOutcome: null,
-    nominations: players.map(() => null),
+    nominations: pieces.map(() => null),
     traps: [],
+    seancesUsed: 0,
     log: [],
     turnDirty: false,
-    midnight: false,
-    endReason: null,
   };
   if (presetTraps) {
-    if (new Set(presetTraps).size !== TRAP_COUNT || !presetTraps.every(trapEligible)) throw new Error('Preset traps must be six distinct eligible nodes');
-    state.traps = presetTraps.map((node) => ({ node, revealed: false }));
-    state.phase = 'turnStart';
+    const nodes = presetTraps.map((t) => t.node);
+    if (new Set(nodes).size !== TRAP_COUNT || !nodes.every(trapEligible)) throw new Error('Preset traps must be six distinct eligible nodes');
+    state.traps = presetTraps.map((t) => ({ node: t.node, effect: t.effect, revealed: false, spent: false }));
+    state.phase = 'lifeRoll';
   }
   return state;
 }
@@ -131,14 +109,9 @@ export function createGame({ players, seed, presetTraps }: NewGameOptions): Game
 export function clone(state: GameState): GameState {
   return {
     ...state,
-    players: state.players.map((p) => ({ ...p })),
-    stocks: state.stocks.slice(),
-    piles: state.piles.slice(),
-    deck: state.deck.slice(),
-    discard: state.discard.slice(),
-    dice: state.dice ? state.dice.slice() : null,
+    pieces: state.pieces.map((p) => ({ ...p, controllers: p.controllers.slice() })),
+    schedule: state.schedule.slice(),
     selection: { ...state.selection },
-    event: state.event ? { ...state.event, options: state.event.options.slice() } : null,
     pick: state.pick ? { ...state.pick, options: state.pick.options.slice() } : null,
     nominations: state.nominations.slice(),
     traps: state.traps.map((t) => ({ ...t })),
@@ -150,827 +123,564 @@ function fail(state: GameState, error: string): ActionResult {
   return { state, events: [], error };
 }
 
-export function activePlayer(state: GameState): PlayerState {
-  return state.players[state.turn];
+function draw(s: GameState): number {
+  let v: number;
+  [v, s.rng] = nextFloat(s.rng);
+  return v;
 }
 
-export function isProtected(state: GameState, i: number): boolean {
-  const p = state.players[i];
-  return p.alive && p.protectedUntil !== null && state.turnNumber <= p.protectedUntil;
+/** The one living piece (−1 before the life roll). */
+export function livingPiece(state: GameState): number {
+  return state.pieces.findIndex((p) => p.alive);
 }
 
-/** A living player outside the entrance who can be drawn into an encounter. */
-export function isExposed(state: GameState, i: number): boolean {
-  const p = state.players[i];
-  return p.alive && p.node !== ENTRANCE && !isProtected(state, i);
+/** The piece whose scheduled action it is (−1 outside the action phases). */
+export function actingPiece(state: GameState): number {
+  return state.schedule[state.slot] ?? -1;
 }
 
-export function livingCount(state: GameState): number {
-  return state.players.filter((p) => p.alive).length;
+/**
+ * Which of a piece's people controls it this round: the first person in odd
+ * rounds, the second in even rounds. A solo piece's person controls every round.
+ */
+export function activeController(state: GameState, piece: number): number {
+  const p = state.pieces[piece];
+  return p.controllers.length >= 2 ? (state.round % 2 === 1 ? 0 : 1) : 0;
 }
 
-/** Nodes a living player may not enter or cross: the resident ghost and every player ghost. */
-export function hostileNodes(state: GameState): Set<number> {
-  const s = new Set([state.ghost]);
-  for (const p of state.players) if (!p.alive) s.add(p.node);
-  return s;
+export function movementAllowance(die: number, alive: boolean): number {
+  return alive ? die : Math.max(GHOST_MIN_MOVE, die);
 }
 
-/** turnNumber of seat i's next scheduled turn after the current one. */
-function nextTurnNumberOf(state: GameState, i: number): number {
-  const n = state.players.length;
-  const ahead = (i - state.turn + n) % n;
-  return state.turnNumber + (ahead === 0 ? n : ahead);
+/** Legal destinations for the acting piece. Never depends on hidden traps. */
+export function legalRoutes(state: GameState): Map<number, PlayerRoute> {
+  const i = actingPiece(state);
+  if (i < 0 || state.die === null) return new Map();
+  const p = state.pieces[i];
+  return pieceRoutes(p.node, state.allowance, !p.alive);
 }
 
-export function survivalBonusQualifies(p: PlayerState): boolean {
-  return p.alive && p.banked >= SCORING.survivalBonusMinBanked;
+/** The frozen order for a round: the living piece first, then the hunters by a rotating priority. */
+export function buildSchedule(state: GameState): number[] {
+  const n = state.pieces.length;
+  const living = livingPiece(state);
+  const offset = POLICY.rotateHunters ? (state.round - 1) % n : 0;
+  const hunters = Array.from({ length: n }, (_, k) => (offset + k) % n).filter((i) => i !== living);
+  return [living, ...hunters];
 }
 
-export function movementAllowance(state: GameState, moveDie: 0 | 1 = state.selection.moveDie): number {
-  if (!state.dice) return 0;
-  return state.dice.length === 1 ? state.dice[0] : state.dice[moveDie];
-}
-
-export function ghostAllowance(state: GameState, moveDie: 0 | 1 = state.selection.moveDie): number {
-  if (!state.dice || state.dice.length < 2) return 0;
-  return state.dice[moveDie === 0 ? 1 : 0] + state.ghostBonus;
-}
-
-/** Legal destinations for the active seat (living or ghost). Never depends on hidden traps. */
-export function legalRoutes(state: GameState, moveDie: 0 | 1 = state.selection.moveDie): Map<number, PlayerRoute> {
-  if (!state.dice) return new Map();
-  const p = activePlayer(state);
-  if (!p.alive) return playerRoutes(p.node, state.dice[0], { ghost: true });
-  return playerRoutes(p.node, state.dice[moveDie], { blocked: hostileNodes(state) });
+/** Can this ghost challenge the living piece from where it stands? */
+export function canHunt(state: GameState, ghost: number): boolean {
+  const living = livingPiece(state);
+  if (living < 0 || ghost === living || state.pieces[ghost].alive) return false;
+  return inAttackRange(state.pieces[ghost].node, state.pieces[living].node);
 }
 
 // ── secret placement ────────────────────────────────────────────────────
 
 function wingOf(node: number): string {
-  for (const [wing, nodes] of Object.entries(TRAP_WINGS)) if (nodes.includes(node)) return wing;
+  for (const [w, nodes] of Object.entries(TRAP_WINGS)) if (nodes.includes(node)) return w;
   return 'other';
 }
 
 /**
- * Turn the nominations into exactly six traps: duplicates merge silently,
- * then the game fills the remaining slots without replacement, preferring
- * the wings with the fewest traps so far.
+ * Merge the nominations (duplicates silently collapse), top up to six with
+ * seeded picks that favour the least-cursed wing, then privately shuffle the
+ * six effects over the six spaces. Players choose places, never effects.
  */
 function finalizeTraps(s: GameState) {
-  const picks: number[] = [];
-  for (const n of s.nominations) if (n !== null && !picks.includes(n)) picks.push(n);
-  let rng = s.rng;
-  while (picks.length < TRAP_COUNT) {
-    const free = TRAP_ELIGIBLE.filter((n) => !picks.includes(n));
-    const counts = new Map<string, number>();
-    for (const w of Object.keys(TRAP_WINGS)) counts.set(w, 0);
-    for (const n of picks) counts.set(wingOf(n), (counts.get(wingOf(n)) ?? 0) + 1);
-    const wingsWithRoom = [...counts.keys()].filter((w) => free.some((n) => wingOf(n) === w));
-    const least = Math.min(...wingsWithRoom.map((w) => counts.get(w)!));
-    const wings = wingsWithRoom.filter((w) => counts.get(w) === least);
-    let v: number;
-    [v, rng] = nextFloat(rng);
-    const wing = wings[Math.floor(v * wings.length)];
-    const pool = free.filter((n) => wingOf(n) === wing);
-    [v, rng] = nextFloat(rng);
-    picks.push(pool[Math.floor(v * pool.length)]);
+  const chosen: number[] = [];
+  for (const n of s.nominations) if (n !== null && !chosen.includes(n)) chosen.push(n);
+  while (chosen.length < TRAP_COUNT) {
+    const pool = TRAP_ELIGIBLE.filter((n) => !chosen.includes(n));
+    const count = (w: string) => chosen.filter((c) => wingOf(c) === w).length;
+    const fewest = Math.min(...pool.map((n) => count(wingOf(n))));
+    const preferred = pool.filter((n) => count(wingOf(n)) === fewest);
+    chosen.push(preferred[Math.floor(draw(s) * preferred.length)]);
   }
-  s.rng = rng;
-  s.traps = picks.map((node) => ({ node, revealed: false }));
+  let effects: TrapEffect[];
+  [effects, s.rng] = shuffle(TRAP_EFFECTS, s.rng);
+  s.traps = chosen.map((node, k) => ({ node, effect: effects[k], revealed: false, spent: false }));
 }
 
-// ── resident ghost targeting and movement ───────────────────────────────
+// ── the life roll and spawns ────────────────────────────────────────────
 
-/**
- * Who the resident ghost hunts: a live decoy, else the exposed living player
- * carrying the most; ties to the nearest, then the active player, then the
- * first clockwise after them. Ghosts and protected players are ignored.
- */
-export function ghostTarget(state: GameState): GhostTarget | null {
-  if (state.decoy !== null) return { kind: 'decoy', node: state.decoy };
-  const n = state.players.length;
-  const { dist } = ghostBfs(state.ghost);
-  let best: number | null = null;
-  let bestKey: [number, number, number] | null = null;
-  for (let i = 0; i < n; i++) {
-    if (!isExposed(state, i)) continue;
-    const p = state.players[i];
-    const key: [number, number, number] = [-p.carried, dist[p.node], (i - state.turn + n) % n];
-    if (!bestKey || key[0] < bestKey[0] || (key[0] === bestKey[0] && (key[1] < bestKey[1] || (key[1] === bestKey[1] && key[2] < bestKey[2])))) {
-      best = i;
-      bestKey = key;
-    }
+function rollForLife(s: GameState, events: LogEntry[]) {
+  const n = s.pieces.length;
+  let contenders = Array.from({ length: n }, (_, i) => i);
+  const rolls: Array<Array<number | null>> = [];
+  for (let guard = 0; guard < 50 && contenders.length > 1; guard++) {
+    const row: Array<number | null> = new Array(n).fill(null);
+    for (const i of contenders) [row[i], s.rng] = rollDie(s.rng);
+    rolls.push(row);
+    const top = Math.max(...contenders.map((i) => row[i]!));
+    contenders = contenders.filter((i) => row[i] === top);
   }
-  if (best === null) return null;
-  return { kind: 'player', player: best, node: state.players[best].node };
+  const winner = contenders[0];
+  events.push({ kind: 'lifeRoll', rolls, winner });
+  let spawns: number[];
+  [spawns, s.rng] = shuffle(GHOST_SPAWNS, s.rng);
+  let k = 0;
+  s.pieces.forEach((p, i) => {
+    p.alive = i === winner;
+    p.node = i === winner ? LIVING_SPAWN : spawns[k++ % spawns.length];
+    events.push({ kind: 'spawn', piece: i, node: p.node, alive: p.alive });
+  });
 }
 
-/** Plan this ghost phase without changing anything. It stops at its first encounter. */
-export function planGhost(state: GameState, allowance: number): GhostPlan {
-  const target = ghostTarget(state);
-  if (!target) return { target: null, allowance, fullPath: [state.ghost], path: [state.ghost], reachesTarget: false, encounter: null };
-  const fullPath = ghostPath(state.ghost, target.node) ?? [state.ghost];
-  const steps = Math.min(allowance, fullPath.length - 1);
-  let path = fullPath.slice(0, steps + 1);
-  let encounter: GhostPlan['encounter'] = null;
-  const n = state.players.length;
-  for (let k = 1; k < path.length && !encounter; k++) {
-    const node = path[k];
-    const here = state.players.map((_, i) => i).filter((i) => state.players[i].node === node && isExposed(state, i));
-    if (!here.length) continue;
-    const chosen = target.kind === 'player' && here.includes(target.player!) ? target.player! : here.sort((a, b) => ((a - state.turn + n) % n) - ((b - state.turn + n) % n))[0];
-    encounter = { player: chosen, node };
-    path = path.slice(0, k + 1);
-  }
-  return { target, allowance, fullPath, path, reachesTarget: path[path.length - 1] === target.node, encounter };
+function startRound(s: GameState, events: LogEntry[]) {
+  s.schedule = buildSchedule(s);
+  s.slot = 0;
+  events.push({ kind: 'roundStart', round: s.round, schedule: s.schedule.slice() });
+  startAction(s);
+}
+
+function startAction(s: GameState) {
+  s.actionNumber += 1;
+  s.phase = 'turnStart';
+  s.die = null;
+  s.allowance = 0;
+  s.selection = { dest: null };
+  s.origin = s.pieces[actingPiece(s)].node;
+  s.minigameUsed = false;
+  s.pick = null;
+  s.lastOutcome = null;
+}
+
+// ── life ────────────────────────────────────────────────────────────────
+
+/** Move life from one piece to another in one step. The loser's streak resets at once. */
+function transferLife(s: GameState, from: number, to: number, events: LogEntry[]) {
+  if (from === to) return;
+  s.pieces[from].alive = false;
+  s.pieces[from].streak = 0;
+  s.pieces[to].alive = true;
+  events.push({ kind: 'lifeTransfer', from, to });
 }
 
 // ── challenges ──────────────────────────────────────────────────────────
 
-function newChallenge(
-  s: GameState,
-  kind: ChallengeKind,
-  host: ChallengeHost,
-  participants: number[],
-  node: number,
-  oneSurvivor: boolean,
-  attacker: number | null,
-  cont: Continuation,
-  events: LogEntry[],
-): Challenge {
-  let v: number;
-  [v, s.challengeRng] = nextFloat(s.challengeRng);
+function newChallenge(s: GameState, kind: 'duel' | 'seance', participants: number[], host: ChallengeHost, node: number, contact: boolean, events: LogEntry[]) {
+  let seedVal: number;
+  [seedVal, s.challengeRng] = nextFloat(s.challengeRng);
   s.challengeCount += 1;
+  const living = livingPiece(s);
+  const sorted = participants.slice().sort((a, b) => a - b);
   const ch: Challenge = {
-    id: `c${s.turnNumber}-${s.challengeCount}`,
+    id: `c${s.challengeCount}`,
     kind,
-    seed: Math.floor(v * 0x7fffffff),
-    participants,
+    seed: Math.floor(seedVal * 0xffffffff) >>> 0,
+    participants: sorted,
     host,
     node,
-    origins: participants.map((p) => s.players[p].node),
-    oneSurvivor,
-    attacker,
+    multipliers: sorted.map((i) => (i === living ? curseMultiplier(s.pieces[i].streak) : 1)),
+    livingAtStart: living,
+    instigator: actingPiece(s),
+    contact,
     attempt: 0,
-    cont,
   };
   s.challenge = ch;
+  s.minigameUsed = true;
   s.phase = 'challenge';
   events.push({ kind: 'challenge', challenge: ch });
-  return ch;
 }
 
-/** A regular Reaper performance: Dance for Death or Graveyard Jump Rope, chosen privately. */
-function soloReaper(s: GameState, host: ChallengeHost, player: number, node: number, cont: Continuation, events: LogEntry[]) {
-  let v: number;
-  [v, s.challengeRng] = nextFloat(s.challengeRng);
-  newChallenge(s, v < 0.5 ? 'dance' : 'rope', host, [player], node, false, null, cont, events);
+function startSeance(s: GameState, node: number, host: ChallengeHost, events: LogEntry[]) {
+  s.seancesUsed += 1;
+  newChallenge(s, 'seance', s.pieces.map((_, i) => i), host, node, false, events);
 }
 
-function startDuel(s: GameState, a: number, b: number, host: ChallengeHost, node: number, cont: Continuation, events: LogEntry[]) {
-  const oneSurvivor = host === 'superReaper' || s.round >= LETHAL_DUELS_FROM_ROUND;
-  newChallenge(s, 'duel', host, [a, b], node, oneSurvivor, null, cont, events);
+function startRemoteDuel(s: GameState, a: number, b: number, host: ChallengeHost, node: number, events: LogEntry[]) {
+  newChallenge(s, 'duel', [a, b], host, node, false, events);
 }
 
-function startEscape(s: GameState, player: number, host: ChallengeHost, attacker: number | null, cont: Continuation, events: LogEntry[]) {
-  newChallenge(s, 'escape', host, [player], s.players[player].node, false, attacker, cont, events);
+/** Judge a challenge from everyone's inputs. Pure; used by the engine and the room. */
+export function judgeChallenge(ch: Challenge, inputs: Record<number, ChallengeInput[]>) {
+  return judgeRope(
+    ch.seed,
+    ch.participants,
+    ch.participants.map((p) => inputs[p] ?? []),
+    ch.multipliers,
+  );
 }
 
-export interface JudgedResult {
-  survivors: number[];
-  scores: number[];
-  decidedBy?: string;
+function occupied(s: GameState, except: number): Set<number> {
+  return new Set(s.pieces.filter((_, i) => i !== except).map((p) => p.node));
 }
 
-/** Judge a challenge's inputs. Pure: same challenge + same inputs → same verdict. */
-export function judgeChallenge(ch: Challenge, inputs: Record<number, import('./challenges').ChallengeInput[]>): JudgedResult {
-  const get = (p: number) => inputs[p] ?? [];
-  if (ch.kind === 'duel') {
-    const [a, b] = ch.participants;
-    const v = judgeDuel(ch.seed, [a, b], [get(a), get(b)], ch.oneSurvivor);
-    return { survivors: v.survivors, scores: v.scores, decidedBy: v.decidedBy };
+/**
+ * Where a duel's loser goes: an unoccupied space exactly two ordinary steps
+ * from the encounter, preferring where the loser began its action, then the
+ * lowest id; otherwise the nearest unoccupied space at least one step away.
+ * Never looks at traps.
+ */
+export function retreatNode(s: GameState, loser: number, encounter: number, preferred: number | null): number {
+  const taken = occupied(s, loser);
+  const steps = POLICY.loserRetreatSteps;
+  const exact: number[] = [];
+  for (let n = 0; n < NODE_COUNT; n++) if (ordinaryDistance(encounter, n) === steps && !taken.has(n)) exact.push(n);
+  if (preferred !== null && exact.includes(preferred)) return preferred;
+  if (exact.length) return exact[0];
+  let best = -1;
+  for (let n = 0; n < NODE_COUNT; n++) {
+    const d = ordinaryDistance(encounter, n);
+    if (d < 1 || taken.has(n)) continue;
+    if (best < 0 || d < ordinaryDistance(encounter, best) || (d === ordinaryDistance(encounter, best) && n < best)) best = n;
   }
-  const p = ch.participants[0];
-  if (ch.kind === 'escape') {
-    const r = judgeEscape(ch.seed, get(p));
-    return { survivors: r.survived ? [p] : [], scores: [r.hits.filter(Boolean).length] };
+  return best < 0 ? s.pieces[loser].node : best;
+}
+
+/** A Poltergeist's throw: a seeded unoccupied space at least three ordinary steps away, never the entrance. */
+function poltergeistNode(s: GameState, piece: number): number {
+  const from = s.pieces[piece].node;
+  const taken = occupied(s, piece);
+  const ok = (n: number) => n !== ENTRANCE && n !== from && !taken.has(n);
+  const far: number[] = [];
+  for (let n = 0; n < NODE_COUNT; n++) if (ok(n) && ordinaryDistance(from, n) >= POLICY.poltergeistMinSteps) far.push(n);
+  if (far.length) return far[Math.floor(draw(s) * far.length)];
+  let best = from;
+  for (let n = 0; n < NODE_COUNT; n++) {
+    if (!ok(n)) continue;
+    if (best === from || ordinaryDistance(from, n) > ordinaryDistance(from, best)) best = n;
   }
-  if (ch.kind === 'dance') {
-    const r = judgeDance(ch.seed, get(p));
-    return { survivors: r.survived ? [p] : [], scores: [r.attempts.filter(Boolean).length] };
+  return best;
+}
+
+function resolveChallenge(s: GameState, ch: Challenge, inputs: Record<number, ChallengeInput[]>, events: LogEntry[]) {
+  const v = judgeChallenge(ch, inputs);
+  const before = livingPiece(s);
+  const moves: ChallengeOutcome['moves'] = [];
+  const transferred = v.winner !== before;
+  if (transferred) transferLife(s, before, v.winner, events);
+  if (ch.contact) {
+    // A contact duel: the winner holds the encounter space, the loser retreats.
+    const loser = ch.participants.find((p) => p !== v.winner)!;
+    const encounter = ch.node;
+    const winnerPiece = s.pieces[v.winner];
+    if (winnerPiece.node !== encounter) {
+      moves.push({ piece: v.winner, from: winnerPiece.node, to: encounter, reason: 'claim' });
+      winnerPiece.facingFrom = winnerPiece.node;
+      winnerPiece.node = encounter;
+    }
+    const loserPiece = s.pieces[loser];
+    const preferred = loser === ch.instigator ? s.origin : null;
+    const to = retreatNode(s, loser, encounter, preferred);
+    if (to !== loserPiece.node) {
+      moves.push({ piece: loser, from: loserPiece.node, to, reason: 'retreat' });
+      loserPiece.facingFrom = loserPiece.node;
+      loserPiece.node = to;
+    }
   }
-  const r = judgeSoloRope(ch.seed, get(p));
-  return { survivors: r.survived ? [p] : [], scores: [r.score] };
-}
-
-function kill(s: GameState, player: number, node: number): number {
-  const p = s.players[player];
-  const dropped = p.carried;
-  s.piles[node] += dropped;
-  p.carried = 0;
-  p.alive = false;
-  p.node = node;
-  p.decoyUsed = true;
-  p.protectedUntil = null;
-  p.diedInRound = s.round;
-  return dropped;
-}
-
-function protect(s: GameState, player: number) {
-  s.players[player].protectedUntil = nextTurnNumberOf(s, player);
-}
-
-/** Nearest empty corridor space, by ordinary edges, for a survivor who broke a curse. */
-export function escapeDestination(s: GameState, origin: number): number | null {
-  const hostile = hostileNodes(s);
-  return nearestWhere(origin, (n) => {
-    const k = nodeKind(n);
-    return (k === 'corridor' || k === 'secret') && n !== ENTRANCE && !hostile.has(n) && !s.players.some((p) => p.node === n);
-  });
-}
-
-function resolveChallenge(s: GameState, ch: Challenge, verdict: JudgedResult, events: LogEntry[]) {
   const outcome: ChallengeOutcome = {
     challengeId: ch.id,
     kind: ch.kind,
     host: ch.host,
     participants: ch.participants.slice(),
-    survivors: verdict.survivors.slice(),
-    deaths: [],
-    relocations: [],
-    scores: verdict.scores,
-    decidedBy: verdict.decidedBy,
+    winner: v.winner,
+    previousLiving: before,
+    transferred,
+    scores: v.scores,
+    multipliers: ch.multipliers.slice(),
+    decidedBy: v.decidedBy,
+    finalists: v.finalists,
+    extraSweepsUsed: v.extraSweepsUsed,
+    moves,
   };
-  // Deaths and survivals settle together, before anything else is checked.
-  ch.participants.forEach((p, k) => {
-    if (verdict.survivors.includes(p)) return;
-    const dropped = kill(s, p, ch.origins[k]);
-    outcome.deaths.push({ player: p, node: ch.origins[k], dropped });
-  });
-  if (ch.attacker !== null && outcome.deaths.length) {
-    const hunter = s.players[ch.attacker];
-    const amount = Math.max(0, Math.min(SCORING.bountyCap - hunter.bounty, SCORING.bountyPerKill));
-    hunter.bounty += amount;
-    outcome.bounty = { player: ch.attacker, amount };
-  }
-  for (const p of verdict.survivors) protect(s, p);
-  if (ch.kind === 'escape') {
-    for (const p of verdict.survivors) {
-      const from = s.players[p].node;
-      const to = escapeDestination(s, from);
-      if (to !== null) {
-        s.players[p].facingFrom = from;
-        s.players[p].node = to;
-        outcome.relocations.push({ player: p, from, to });
-      }
-    }
-  }
-  s.challenge = null;
-  s.lastOutcome = outcome;
   events.push({ kind: 'outcome', outcome });
-
-  if (livingCount(s) === 0) {
-    s.phase = 'gameOver';
-    s.endReason = 'noneAlive';
-    events.push({ kind: 'gameOver', reason: 'noneAlive' });
-    return;
-  }
-
-  const cont = ch.cont;
-  if (cont.kind !== 'landing') {
-    s.phase = 'summary';
-    return;
-  }
-  // Rewards for the landing come only after surviving it, and only once.
-  s.phase = 'ghost';
-  const arriving = cont.arriving;
-  const arrivingLives = verdict.survivors.includes(arriving);
-  if (ch.kind === 'duel' && ch.host !== 'superReaper') {
-    const defender = ch.participants.find((p) => p !== arriving)!;
-    if (arrivingLives) landingRewards(s, arriving, cont.dest, true, events);
-    else if (verdict.survivors.includes(defender)) landingRewards(s, defender, cont.dest, false, events);
-  } else if (arrivingLives) {
-    landingRewards(s, arriving, cont.dest, true, events);
-  }
+  s.lastOutcome = outcome;
+  s.challenge = null;
+  s.phase = 'summary';
 }
 
 // ── landing ─────────────────────────────────────────────────────────────
 
-/** Room harvest, dropped candy, and (for the mover) a Trick or Treat card. */
-function landingRewards(s: GameState, pi: number, dest: number, allowEvent: boolean, events: LogEntry[], drawEvent = true) {
-  const p = s.players[pi];
-  const out = { harvest: 0, pile: 0, triggersEvent: false };
-  if (ROOMS[dest]) {
-    const take = Math.min(HARVEST_PER_LANDING, s.stocks[dest]);
-    s.stocks[dest] -= take;
-    p.carried += take;
-    out.harvest = take;
-    events.push({ kind: 'harvest', player: pi, node: dest, amount: take, remaining: s.stocks[dest] });
-  }
-  if (s.piles[dest] > 0) {
-    out.pile = s.piles[dest];
-    p.carried += s.piles[dest];
-    s.piles[dest] = 0;
-    events.push({ kind: 'pile', player: pi, node: dest, amount: out.pile });
-  }
-  if (allowEvent && EVENT_NODES.includes(dest)) {
-    out.triggersEvent = true;
-    if (drawEvent) drawCard(s, events);
-  }
-  return out;
+/** What the Super Reaper does right now: a Séance while the allowance lasts, then a Reaper's Challenge. */
+export function superReaperEffect(state: GameState): 'seance' | 'reaper' {
+  return state.seancesUsed < SEANCE_LIMIT ? 'seance' : 'reaper';
 }
 
-/** Living opponents a Super Reaper summons could choose (anywhere outside the entrance). */
-export function summonOptions(s: GameState, arriving: number): number[] {
-  return s.players.map((_, i) => i).filter((i) => i !== arriving && isExposed(s, i));
+/** Ghosts the living piece may pick on a Reaper's Challenge. */
+export function reaperOptions(s: GameState, living: number): number[] {
+  return s.pieces.map((_, i) => i).filter((i) => i !== living);
+}
+
+function reaperChallenge(s: GameState, pi: number, node: number, host: ChallengeHost, events: LogEntry[]) {
+  const living = livingPiece(s);
+  if (pi === living) {
+    const options = reaperOptions(s, living);
+    if (options.length === 1) startRemoteDuel(s, living, options[0], host, node, events);
+    else {
+      s.pick = { options, node };
+      s.phase = 'pick';
+    }
+  } else {
+    startRemoteDuel(s, pi, living, host, node, events);
+  }
+}
+
+/** After a move (or a stay) with no minigame: a ghost in range may choose to challenge. */
+function endOfMovement(s: GameState, pi: number) {
+  s.phase = !s.minigameUsed && canHunt(s, pi) ? 'hunt' : 'summary';
+}
+
+/** A normal movement landing: resolve the Super Reaper or a trap, before any contact. */
+function resolveLanding(s: GameState, pi: number, events: LogEntry[]) {
+  const node = s.pieces[pi].node;
+  if (node === SUPER_REAPER) {
+    const effect = superReaperEffect(s);
+    events.push({ kind: 'superReaper', piece: pi, effect });
+    if (effect === 'seance') return startSeance(s, node, 'superReaper', events);
+    return reaperChallenge(s, pi, node, 'superReaper', events);
+  }
+  const trap = s.traps.find((t) => t.node === node);
+  if (!trap || trap.spent) return endOfMovement(s, pi);
+  if (!trap.revealed) {
+    trap.revealed = true;
+    events.push({ kind: 'trapRevealed', node, effect: trap.effect, piece: pi });
+  }
+  if (trap.effect === 'reaper') return reaperChallenge(s, pi, node, 'reaper', events);
+  if (trap.effect === 'seance') {
+    trap.spent = true;
+    if (s.seancesUsed < SEANCE_LIMIT) return startSeance(s, node, 'seance', events);
+    events.push({ kind: 'seanceDormant', node, piece: pi, super: false });
+    return endOfMovement(s, pi);
+  }
+  // Poltergeist: thrown away. Nothing triggers where it lands.
+  const from = node;
+  const to = poltergeistNode(s, pi);
+  s.pieces[pi].facingFrom = from;
+  s.pieces[pi].node = to;
+  events.push({ kind: 'poltergeist', piece: pi, from, to });
+  return endOfMovement(s, pi);
+}
+
+// ── public knowledge and previews ───────────────────────────────────────
+
+/** What the table knows about a space: revealed traps and the Super Reaper only. */
+export function knownEffectAt(state: GameState, node: number): KnownEffect {
+  const t = state.traps.find((x) => x.node === node && x.revealed);
+  if (!t) return null;
+  if (t.effect === 'seance') return t.spent ? null : 'seance';
+  return t.effect;
 }
 
 /**
- * What a living player's normal landing would set off. With `knownOnly`,
- * hidden traps are ignored — used for anything a player can see.
+ * Forecast a move from public facts only: the route, a known effect at the
+ * destination, and who would be within ordinary range afterwards. Hidden
+ * traps are never consulted, so a preview can never promise a safe landing.
  */
-export function encounterAt(s: GameState, i: number, dest: number, knownOnly: boolean): { encounter: Encounter; hiddenTrap: boolean; spared: boolean } {
-  const none = { encounter: { kind: 'none' } as Encounter, hiddenTrap: false, spared: false };
-  if (dest === ENTRANCE) return none;
-  if (dest === SUPER_REAPER) return { encounter: { kind: 'superReaper', opponents: summonOptions(s, i) }, hiddenTrap: false, spared: false };
-  const trap = s.traps.find((t) => t.node === dest && (!knownOnly || t.revealed));
-  const hiddenTrap = !!trap && !trap.revealed;
-  const prot = isProtected(s, i);
-  const opponents = prot ? [] : s.players.map((_, j) => j).filter((j) => j !== i && s.players[j].node === dest && isExposed(s, j));
-  if (opponents.length) return { encounter: { kind: 'duel', lethal: s.round >= LETHAL_DUELS_FROM_ROUND, opponents }, hiddenTrap, spared: false };
-  if (trap) {
-    // A known Reaper waives protection; an unknown one cannot silently strip it.
-    if (trap.revealed || !prot) return { encounter: { kind: 'reaper' }, hiddenTrap, spared: false };
-    return { encounter: { kind: 'none' }, hiddenTrap, spared: true };
-  }
-  return none;
-}
-
-function resolveLivingLanding(s: GameState, route: PlayerRoute | null, events: LogEntry[]) {
-  const pi = s.turn;
-  const p = s.players[pi];
-  s.phase = 'ghost';
-  if (!route) {
-    events.push({ kind: 'stay', player: pi, node: p.node });
-    return;
-  }
-  const dest = route.dest;
-  p.facingFrom = route.path[route.path.length - 2];
-  p.node = dest;
-  events.push({ kind: 'move', player: pi, path: route.path, usesSecret: route.usesSecret });
-
-  if (dest === ENTRANCE) {
-    const amount = p.carried;
-    p.banked += amount;
-    p.carried = 0;
-    events.push({ kind: 'bank', player: pi, amount, total: p.banked });
-    return;
-  }
-  const { encounter, hiddenTrap, spared } = encounterAt(s, pi, dest, false);
-  if (hiddenTrap) {
-    s.traps.find((t) => t.node === dest)!.revealed = true;
-    events.push({ kind: 'trapRevealed', node: dest, player: pi });
-  }
-  const cont: Continuation = { kind: 'landing', arriving: pi, dest };
-  switch (encounter.kind) {
-    case 'superReaper':
-      if (encounter.opponents.length === 1) startDuel(s, pi, encounter.opponents[0], 'superReaper', dest, cont, events);
-      else if (encounter.opponents.length > 1) {
-        s.pick = { kind: 'summon', options: encounter.opponents, cont };
-        s.phase = 'pick';
-      } else soloReaper(s, 'superReaper', pi, dest, cont, events);
-      return;
-    case 'duel':
-      if (encounter.opponents.length === 1) startDuel(s, pi, encounter.opponents[0], hiddenTrap || s.traps.some((t) => t.node === dest) ? 'reaper' : 'duel', dest, cont, events);
-      else {
-        s.pick = { kind: 'duel', options: encounter.opponents, cont };
-        s.phase = 'pick';
-      }
-      return;
-    case 'reaper':
-      soloReaper(s, 'reaper', pi, dest, cont, events);
-      return;
-    default:
-      if (spared) events.push({ kind: 'spared', node: dest, player: pi });
-      landingRewards(s, pi, dest, true, events);
-  }
-}
-
-function drawCard(s: GameState, events: LogEntry[]): void {
-  if (s.deck.length === 0) {
-    const [deck, rng] = shuffle(s.discard, s.rng);
-    s.deck = deck;
-    s.discard = [];
-    s.rng = rng;
-  }
-  const cardId = s.deck[0];
-  s.deck = s.deck.slice(1);
-  s.discard = [...s.discard, cardId];
-  const pi = s.turn;
-  const me = s.players[pi];
-  const type = cardType(cardId);
-  const hostile = hostileNodes(s);
-  events.push({ kind: 'card', player: pi, cardId });
-
-  const ev: EventState = { cardId, type, status: 'resolved', options: [], canDecline: false };
-  switch (type) {
-    case 'secretPassage': {
-      ev.options = SECRET_ENDPOINTS.filter((n) => !hostile.has(n) && n !== me.node);
-      ev.canDecline = true;
-      if (ev.options.length) ev.status = 'choice';
-      else events.push({ kind: 'noEffect', player: pi, reason: 'No secret passage is free of ghosts.' });
-      break;
-    }
-    case 'stickyFingers': {
-      ev.options = stickyTargets(s);
-      if (ev.options.length) ev.status = 'choice';
-      else events.push({ kind: 'noEffect', player: pi, reason: 'No living opponent with candy is on or next to your space.' });
-      break;
-    }
-    case 'sweetDiscovery': {
-      me.carried += 2;
-      events.push({ kind: 'gain', player: pi, amount: 2 });
-      break;
-    }
-    case 'creakyFloorboards': {
-      s.ghostBonus += 2;
-      events.push({ kind: 'ghostBonus', amount: 2 });
-      break;
-    }
-    case 'costumeMixup': {
-      ev.options = s.players
-        .map((p, i) => ({ p, i }))
-        .filter(({ p, i }) => i !== pi && p.alive && p.node !== ENTRANCE && !hostile.has(p.node) && !hostile.has(me.node))
-        .map(({ i }) => i);
-      ev.canDecline = true;
-      if (ev.options.length) ev.status = 'choice';
-      else events.push({ kind: 'noEffect', player: pi, reason: 'No living opponent is out in the house to swap with.' });
-      break;
-    }
-    case 'flyingCandy': {
-      const amount = Math.min(2, me.carried);
-      if (amount > 0) {
-        me.carried -= amount;
-        s.piles[me.node] += amount;
-        events.push({ kind: 'drop', player: pi, node: me.node, amount });
-      } else {
-        events.push({ kind: 'noEffect', player: pi, reason: 'Your sack is empty, so nothing flies out.' });
-      }
-      break;
-    }
-  }
-  s.event = ev;
-  s.phase = ev.status === 'choice' ? 'event' : 'ghost';
-}
-
-export function stickyTargets(state: GameState): number[] {
-  const me = state.players[state.turn];
-  if (me.node === ENTRANCE || !me.alive) return [];
-  const near = new Set([me.node, ...ORDINARY_ADJ[me.node]]);
-  return state.players
-    .map((p, i) => ({ p, i }))
-    .filter(({ p, i }) => i !== state.turn && p.alive && p.node !== ENTRANCE && p.carried > 0 && near.has(p.node))
-    .map(({ i }) => i);
-}
-
-// ── previews ────────────────────────────────────────────────────────────
-
-/** A copy with hidden traps removed: what anyone at the table may know. */
-export function withoutHiddenTraps(state: GameState): GameState {
-  return { ...clone(state), traps: state.traps.filter((t) => t.revealed).map((t) => ({ ...t })) };
-}
-
-/**
- * Forecast a move. Never mutates the given state, never consumes randomness,
- * and never looks at unrevealed traps.
- */
-export function previewMove(state: GameState, moveDie: 0 | 1, dest: number | 'stay'): MovePreview | null {
-  if (state.phase !== 'choose' || !state.dice) return null;
-  const pub = withoutHiddenTraps(state);
-  const pi = pub.turn;
-  const me = pub.players[pi];
+export function previewMove(state: GameState, dest: number | 'stay'): MovePreview | null {
+  const pi = actingPiece(state);
+  if (pi < 0 || state.die === null) return null;
+  const me = state.pieces[pi];
   let route: PlayerRoute | null = null;
   if (dest !== 'stay') {
-    route = legalRoutes(pub, moveDie).get(dest) ?? null;
+    route = legalRoutes(state).get(dest) ?? null;
     if (!route) return null;
   }
-  const base = {
+  const end = dest === 'stay' ? me.node : dest;
+  const superReaper = dest !== 'stay' && end === SUPER_REAPER ? superReaperEffect(state) : null;
+  const known = dest === 'stay' ? null : superReaper ?? knownEffectAt(state, end);
+  const living = livingPiece(state);
+  const minigame = known === 'reaper' || known === 'seance';
+  const canChallenge = !me.alive && !minigame && known !== 'poltergeist' && inAttackRange(end, state.pieces[living].node);
+  const threats = me.alive ? state.pieces.map((_, i) => i).filter((i) => i !== pi && inAttackRange(state.pieces[i].node, end)) : [];
+  return {
     dest,
     path: route ? route.path : [me.node],
     usesSecret: route?.usesSecret ?? false,
-    harvest: 0,
-    pile: 0,
-    bank: 0,
-    carriedAfter: me.carried,
-    triggersEvent: false,
-    encounter: { kind: 'none' } as Encounter,
-    waivesProtection: false,
-    ghost: null as GhostPlan | null,
-    provisional: false,
+    usesWall: route?.usesWall ?? false,
+    known,
+    superReaper,
+    canChallenge,
+    threats,
   };
-  if (!me.alive) {
-    if (dest !== 'stay') {
-      const targets = pub.players.map((_, i) => i).filter((i) => i !== pi && pub.players[i].node === dest && isExposed(pub, i));
-      if (targets.length) base.encounter = { kind: 'haunt', targets };
-    }
-    return base;
-  }
-  const sim = clone(pub);
-  sim.selection = { moveDie, dest };
-  const p = sim.players[pi];
-  let encounter: Encounter = { kind: 'none' };
-  if (route) {
-    p.facingFrom = route.path[route.path.length - 2];
-    p.node = route.dest;
-    if (route.dest === ENTRANCE) {
-      base.bank = p.carried;
-      p.banked += p.carried;
-      p.carried = 0;
-    } else {
-      encounter = encounterAt(sim, pi, route.dest, true).encounter;
-      const known = sim.traps.some((t) => t.node === route!.dest) || route.dest === SUPER_REAPER;
-      base.waivesProtection = known && isProtected(sim, pi);
-      if (encounter.kind === 'none' || encounter.kind === 'duel') {
-        // Rewards are shown as what surviving would bring.
-        const r = landingRewards(sim, pi, route.dest, true, [], false);
-        base.harvest = r.harvest;
-        base.pile = r.pile;
-        base.triggersEvent = r.triggersEvent;
-      }
-    }
-  }
-  base.carriedAfter = sim.players[pi].carried;
-  base.encounter = encounter;
-  base.ghost = planGhost(sim, ghostAllowance(state, moveDie));
-  base.provisional = base.triggersEvent || encounter.kind !== 'none';
-  return base;
 }
 
-/** The exact resident-ghost plan once the move and any event have resolved. */
-export function currentGhostPlan(state: GameState): GhostPlan | null {
-  if (state.phase !== 'ghost' || !state.dice || state.dice.length < 2) return null;
-  return planGhost(state, ghostAllowance(state));
-}
-
-// ── the state machine ───────────────────────────────────────────────────
-
-export function canPlaceDecoy(state: GameState): boolean {
-  const p = activePlayer(state);
-  return state.phase === 'turnStart' && p.alive && !p.decoyUsed && p.node !== ENTRANCE && state.decoy === null;
-}
+// ── the action reducer ──────────────────────────────────────────────────
 
 export function apply(state: GameState, action: Action): ActionResult {
   const s = clone(state);
   const events: LogEntry[] = [];
-  const me = s.players[s.turn];
+  const pi = actingPiece(s);
 
   switch (action.type) {
     case 'nominate': {
-      if (s.phase !== 'placement') return fail(state, 'Placement is over.');
-      if (!Number.isInteger(action.seat) || action.seat < 0 || action.seat >= s.players.length) return fail(state, 'No such seat.');
-      if (s.nominations[action.seat] !== null) return fail(state, 'That seat has already chosen.');
-      if (!trapEligible(action.node)) return fail(state, 'That space cannot hold a trap.');
-      s.nominations[action.seat] = action.node;
+      if (s.phase !== 'placement') return fail(state, 'Traps are placed only before the game starts');
+      if (!Number.isInteger(action.piece) || action.piece < 0 || action.piece >= s.pieces.length) return fail(state, 'No such piece');
+      if (s.nominations[action.piece] !== null) return fail(state, 'This piece has already chosen');
+      if (!trapEligible(action.node)) return fail(state, 'A trap can only go on an eligible corridor space');
+      s.nominations[action.piece] = action.node;
       if (s.nominations.every((n) => n !== null)) {
         finalizeTraps(s);
-        s.phase = 'turnStart';
+        s.phase = 'lifeRoll';
         events.push({ kind: 'placementDone' });
       }
-      // Placement never counts as turn progress, so undo stays clean.
       return { state: s, events };
     }
-    case 'placeDecoy': {
-      if (!canPlaceDecoy(state)) return fail(state, 'You cannot place a decoy now.');
-      me.decoyUsed = true;
-      s.decoy = me.node;
-      events.push({ kind: 'decoy', player: s.turn, node: me.node });
-      break;
+
+    case 'rollForLife': {
+      if (s.phase !== 'lifeRoll') return fail(state, 'Not time to roll for life');
+      rollForLife(s, events);
+      startRound(s, events);
+      s.log = events.slice();
+      return { state: s, events };
     }
+
     case 'roll': {
-      if (s.phase !== 'turnStart') return fail(state, 'Already rolled.');
-      let a: number;
-      [a, s.rng] = rollDie(s.rng);
-      if (me.alive) {
-        let b: number;
-        [b, s.rng] = rollDie(s.rng);
-        s.dice = [a, b];
-      } else s.dice = [a];
-      s.selection = { moveDie: 0, dest: null };
+      if (s.phase !== 'turnStart') return fail(state, 'Cannot roll now');
+      const me = s.pieces[pi];
+      let die: number;
+      [die, s.rng] = rollDie(s.rng);
+      s.die = die;
+      s.allowance = movementAllowance(die, me.alive);
+      events.push({ kind: 'roll', piece: pi, die, allowance: s.allowance });
       s.phase = 'choose';
-      events.push({ kind: 'roll', player: s.turn, dice: s.dice.slice() });
       break;
     }
+
     case 'select': {
-      if (s.phase !== 'choose') return fail(state, 'Nothing to select now.');
-      if (action.moveDie !== undefined && me.alive) {
-        s.selection.moveDie = action.moveDie;
-        if (typeof s.selection.dest === 'number' && !legalRoutes(s).has(s.selection.dest)) s.selection.dest = null;
-      }
-      if (action.dest !== undefined) {
-        if (typeof action.dest === 'number' && !legalRoutes(s).has(action.dest)) return fail(state, 'That space is out of reach.');
-        s.selection.dest = action.dest;
-      }
-      break;
+      if (s.phase !== 'choose') return fail(state, 'Nothing to select now');
+      if (action.dest !== null && action.dest !== 'stay' && !legalRoutes(s).has(action.dest)) return fail(state, 'That space is out of reach');
+      s.selection.dest = action.dest;
+      return { state: s, events };
     }
+
     case 'confirmMove': {
-      if (s.phase !== 'choose') return fail(state, 'Nothing to confirm.');
+      if (s.phase !== 'choose') return fail(state, 'Nothing to confirm');
       const dest = s.selection.dest;
-      if (dest === null) return fail(state, 'Choose a destination or Stay first.');
-      let route: PlayerRoute | null = null;
-      if (dest !== 'stay') {
-        route = legalRoutes(s).get(dest) ?? null;
-        if (!route) return fail(state, 'That space is out of reach.');
-      }
-      if (me.alive) resolveLivingLanding(s, route, events);
-      else resolveGhostMove(s, route, events);
-      break;
-    }
-    case 'pickOpponent': {
-      const pk = s.pick;
-      if (s.phase !== 'pick' || !pk) return fail(state, 'Nothing to pick.');
-      if (!pk.options.includes(action.option)) return fail(state, 'That is not a legal choice.');
-      s.pick = null;
-      if (pk.kind === 'haunt') startEscape(s, action.option, 'playerGhost', s.turn, pk.cont, events);
-      else {
-        const cont = pk.cont as Extract<Continuation, { kind: 'landing' }>;
-        const host: ChallengeHost = pk.kind === 'summon' ? 'superReaper' : s.traps.some((t) => t.node === cont.dest) ? 'reaper' : 'duel';
-        startDuel(s, cont.arriving, action.option, host, cont.dest, cont, events);
-      }
-      break;
-    }
-    case 'eventChoose': {
-      const ev = s.event;
-      if (s.phase !== 'event' || !ev || ev.status !== 'choice') return fail(state, 'No card choice pending.');
-      if (!ev.options.includes(action.option)) return fail(state, 'That is not a legal choice.');
-      const pi = s.turn;
-      if (ev.type === 'secretPassage') {
-        const from = me.node;
-        me.facingFrom = from;
-        me.node = action.option;
-        events.push({ kind: 'relocate', player: pi, from, to: action.option });
-      } else if (ev.type === 'stickyFingers') {
-        const victim = s.players[action.option];
-        const amount = Math.min(2, victim.carried);
-        victim.carried -= amount;
-        me.carried += amount;
-        events.push({ kind: 'steal', player: pi, victim: action.option, amount });
-      } else if (ev.type === 'costumeMixup') {
-        const other = s.players[action.option];
-        const a = me.node;
-        const b = other.node;
-        me.facingFrom = a;
-        other.facingFrom = b;
-        me.node = b;
-        other.node = a;
-        events.push({ kind: 'swap', player: pi, other: action.option, playerTo: b, otherTo: a });
-      }
-      ev.status = 'resolved';
-      s.phase = 'ghost';
-      break;
-    }
-    case 'eventDecline': {
-      const ev = s.event;
-      if (s.phase !== 'event' || !ev || ev.status !== 'choice' || !ev.canDecline) return fail(state, 'Cannot decline now.');
-      ev.status = 'resolved';
-      s.phase = 'ghost';
-      events.push({ kind: 'declined', player: s.turn });
-      break;
-    }
-    case 'challengeResult': {
-      const ch = s.challenge;
-      if (s.phase !== 'challenge' || !ch) return fail(state, 'No challenge in progress.');
-      if (action.id !== ch.id) return fail(state, 'That challenge is already over.');
-      if (!ch.participants.every((p) => Array.isArray(action.inputs[p]))) return fail(state, 'Inputs are missing for a participant.');
-      resolveChallenge(s, ch, judgeChallenge(ch, action.inputs), events);
-      break;
-    }
-    case 'moveGhost': {
-      if (s.phase !== 'ghost') return fail(state, 'The ghost is not ready to move.');
-      const plan = planGhost(s, ghostAllowance(s));
-      s.decoy = null;
-      if (!plan.target) {
-        events.push({ kind: 'ghostWaits' });
-        s.phase = 'summary';
-      } else {
-        s.ghost = plan.path[plan.path.length - 1];
-        events.push({ kind: 'ghost', plan });
-        if (plan.encounter) startEscape(s, plan.encounter.player, 'npc', null, { kind: 'npc' }, events);
-        else s.phase = 'summary';
-      }
-      break;
-    }
-    case 'nextTurn': {
-      if (s.phase !== 'summary') return fail(state, 'Finish this turn first.');
-      const n = s.players.length;
-      if (s.turn === n - 1 && s.round === ROUNDS) {
-        s.phase = 'gameOver';
-        s.endReason = 'midnight';
-        events.push({ kind: 'gameOver', reason: 'midnight' });
+      if (dest === null) return fail(state, 'Choose a destination or stay');
+      const me = s.pieces[pi];
+      if (dest === 'stay') {
+        events.push({ kind: 'stay', piece: pi, node: me.node });
+        endOfMovement(s, pi);
         break;
       }
-      s.turn = (s.turn + 1) % n;
-      if (s.turn === 0) {
-        s.round += 1;
-        if (s.round === MIDNIGHT_WARNING_AFTER_ROUND + 1) {
-          s.midnight = true;
-          events.push({ kind: 'midnight' });
-        }
-      }
-      s.turnNumber += 1;
-      for (const p of s.players) if (p.protectedUntil !== null && s.turnNumber > p.protectedUntil) p.protectedUntil = null;
-      s.phase = 'turnStart';
-      s.dice = null;
-      s.selection = { moveDie: 0, dest: null };
-      s.decoy = null;
-      s.ghostBonus = 0;
-      s.event = null;
+      const route = legalRoutes(s).get(dest);
+      if (!route) return fail(state, 'That space is out of reach');
+      me.facingFrom = route.path[route.path.length - 2];
+      me.node = dest;
+      events.push({ kind: 'move', piece: pi, path: route.path, usesSecret: route.usesSecret, usesWall: route.usesWall });
+      resolveLanding(s, pi, events);
+      break;
+    }
+
+    case 'pickOpponent': {
+      if (s.phase !== 'pick' || !s.pick) return fail(state, 'Nothing to pick');
+      if (!s.pick.options.includes(action.option)) return fail(state, 'Not a valid opponent');
+      const node = s.pick.node;
       s.pick = null;
-      s.lastOutcome = null;
-      s.log = [];
+      startRemoteDuel(s, pi, action.option, node === SUPER_REAPER ? 'superReaper' : 'reaper', node, events);
+      break;
+    }
+
+    case 'hunt': {
+      if (s.phase !== 'hunt' || !canHunt(s, pi) || s.minigameUsed) return fail(state, 'No one in range to challenge');
+      const living = livingPiece(s);
+      newChallenge(s, 'duel', [pi, living], 'contact', s.pieces[living].node, true, events);
+      break;
+    }
+
+    case 'declineHunt': {
+      if (s.phase !== 'hunt') return fail(state, 'Nothing to decline');
+      events.push({ kind: 'huntDeclined', piece: pi });
+      s.phase = 'summary';
+      break;
+    }
+
+    case 'challengeResult': {
+      if (s.phase !== 'challenge' || !s.challenge) return fail(state, 'No challenge in progress');
+      if (action.id !== s.challenge.id) return fail(state, 'That challenge is already over');
+      resolveChallenge(s, s.challenge, action.inputs ?? {}, events);
+      break;
+    }
+
+    case 'nextTurn': {
+      if (s.phase !== 'summary') return fail(state, 'Finish this action first');
+      if (s.slot + 1 < s.schedule.length) {
+        s.slot += 1;
+        startAction(s);
+        s.log = [];
+        s.turnDirty = false;
+        return { state: s, events };
+      }
+      // The bell: whoever holds life now scores the round.
+      const living = livingPiece(s);
+      const holder = s.pieces[living];
+      holder.score += 1;
+      holder.streak += 1;
+      events.push({ kind: 'roundEnd', round: s.round, piece: living, score: holder.score, streak: holder.streak });
+      if (s.round >= ROUNDS) {
+        s.phase = 'gameOver';
+        s.pick = null;
+        events.push({ kind: 'gameOver' });
+        s.log = [...s.log, ...events];
+        s.turnDirty = true;
+        return { state: s, events };
+      }
+      s.round += 1;
+      startRound(s, events);
+      s.log = events.slice();
       s.turnDirty = false;
       return { state: s, events };
     }
+
+    default:
+      return fail(state, 'Unknown action');
   }
   s.log = [...s.log, ...events];
   s.turnDirty = true;
   return { state: s, events };
 }
 
-/** A player ghost's move: no traps, no candy, no cards; ending on the living starts a hunt. */
-function resolveGhostMove(s: GameState, route: PlayerRoute | null, events: LogEntry[]) {
-  const pi = s.turn;
-  const p = s.players[pi];
-  s.phase = 'summary';
-  if (!route) {
-    events.push({ kind: 'stay', player: pi, node: p.node });
-    return;
-  }
-  p.facingFrom = route.path[route.path.length - 2];
-  p.node = route.dest;
-  events.push({ kind: 'move', player: pi, path: route.path, usesSecret: route.usesSecret });
-  const targets = s.players.map((_, i) => i).filter((i) => i !== pi && s.players[i].node === route.dest && isExposed(s, i));
-  if (targets.length === 1) startEscape(s, targets[0], 'playerGhost', pi, { kind: 'playerGhost' }, events);
-  else if (targets.length > 1) {
-    s.pick = { kind: 'haunt', options: targets, cont: { kind: 'playerGhost' } };
-    s.phase = 'pick';
-  }
-}
-
 // ── scoring ─────────────────────────────────────────────────────────────
 
 export interface ScoreLine {
-  player: number;
+  piece: number;
+  score: number;
   alive: boolean;
-  banked: number;
-  carried: number;
-  carriedHalf: number;
-  survivalBonus: number;
-  bounty: number;
-  total: number;
   rank: number;
   winner: boolean;
 }
 
-export function scoreOf(p: PlayerState): Omit<ScoreLine, 'player' | 'rank' | 'winner'> {
-  if (!p.alive) return { alive: false, banked: p.banked, carried: 0, carriedHalf: 0, survivalBonus: 0, bounty: p.bounty, total: p.banked + p.bounty };
-  const carriedHalf = Math.floor(p.carried / 2);
-  const survivalBonus = survivalBonusQualifies(p) ? SCORING.survivalBonus : 0;
-  return { alive: true, banked: p.banked, carried: p.carried, carriedHalf, survivalBonus, bounty: 0, total: p.banked + carriedHalf + survivalBonus };
-}
-
 export function finalScores(state: GameState): ScoreLine[] {
-  const lines: ScoreLine[] = state.players.map((p, i) => ({ player: i, ...scoreOf(p), rank: 0, winner: false }));
-  const sorted = lines.slice().sort((a, b) => b.total - a.total || a.player - b.player);
-  const top = sorted[0]?.total ?? 0;
+  const lines: ScoreLine[] = state.pieces.map((p, i) => ({ piece: i, score: p.score, alive: p.alive, rank: 0, winner: false }));
+  const sorted = lines.slice().sort((a, b) => b.score - a.score || a.piece - b.piece);
+  const top = sorted[0]?.score ?? 0;
   for (const line of sorted) {
-    line.rank = 1 + lines.filter((l) => l.total > line.total).length;
-    line.winner = line.total === top;
+    line.rank = 1 + lines.filter((l) => l.score > line.score).length;
+    line.winner = line.score === top;
   }
   return sorted;
+}
+
+/** Rounds whose bell has rung: always equal to the sum of all scores. */
+export function completedRounds(state: GameState): number {
+  if (state.phase === 'placement' || state.phase === 'lifeRoll') return 0;
+  return state.phase === 'gameOver' ? state.round : state.round - 1;
 }
 
 // ── undo-aware session ──────────────────────────────────────────────────
 
 /**
- * A session wraps the live snapshot with the snapshot taken when this turn
- * began and the one from the turn before. Undo restores one of those whole —
- * RNG, deck, stocks, traps and all — so a replayed turn rolls the same dice.
+ * A session wraps the live snapshot with the snapshot taken when this action
+ * began and the one from the action before. Undo restores one of those whole
+ * — RNG and traps included — so a replayed action rolls the same die.
  * `known` is the table's memory of revealed traps: undo never erases it.
  */
 export interface Session {
   game: GameState;
   turnStart: GameState;
   previousTurnStart: GameState | null;
-  known: number[];
+  known: Array<Pick<Trap, 'node' | 'effect'>>;
 }
 
 export function newSession(game: GameState): Session {
   return { game, turnStart: game, previousTurnStart: null, known: [] };
 }
 
-function remember(known: number[], game: GameState): number[] {
-  const add = game.traps.filter((t) => t.revealed && !known.includes(t.node)).map((t) => t.node);
+function remember(known: Session['known'], game: GameState): Session['known'] {
+  const add = game.traps.filter((t) => t.revealed && !known.some((k) => k.node === t.node)).map((t) => ({ node: t.node, effect: t.effect }));
   return add.length ? [...known, ...add] : known;
 }
 
@@ -978,39 +688,39 @@ export function dispatch(session: Session, action: Action): { session: Session; 
   const result = apply(session.game, action);
   if (result.error) return { session, events: [], error: result.error };
   const known = remember(session.known ?? [], result.state);
-  if (action.type === 'nominate' && result.state.phase === 'turnStart') {
-    // Placement is finished: this is the game's first real snapshot.
-    return { session: { game: result.state, turnStart: result.state, previousTurnStart: null, known }, events: result.events };
+  const g = result.state;
+  if (action.type === 'nominate' || action.type === 'rollForLife') {
+    // Placement and the life roll cannot be undone: the first real snapshot starts here.
+    return { session: { game: g, turnStart: g, previousTurnStart: null, known }, events: result.events };
   }
-  if (action.type === 'nominate') return { session: { ...session, game: result.state, turnStart: result.state, known }, events: result.events };
-  if (action.type === 'nextTurn' && result.state.phase === 'turnStart') {
-    return {
-      session: { game: result.state, turnStart: result.state, previousTurnStart: session.turnStart, known },
-      events: result.events,
-    };
+  if (action.type === 'nextTurn' && g.phase === 'turnStart') {
+    return { session: { game: g, turnStart: g, previousTurnStart: session.turnStart, known }, events: result.events };
   }
-  return { session: { ...session, game: result.state, known }, events: result.events };
+  return { session: { ...session, game: g, known }, events: result.events };
 }
 
 export interface UndoInfo {
   available: boolean;
   which: 'current' | 'previous' | null;
-  playerName: string;
+  pieceName: string;
   round: number;
 }
 
 export function undoInfo(session: Session): UndoInfo {
   const g = session.game;
-  if (g.phase === 'placement') return { available: false, which: null, playerName: '', round: g.round };
+  const none: UndoInfo = { available: false, which: null, pieceName: '', round: g.round };
+  if (g.phase === 'placement' || g.phase === 'lifeRoll') return none;
+  const nameAt = (t: GameState) => t.pieces[actingPiece(t)]?.name ?? '';
   if (g.turnDirty || g.phase === 'gameOver') {
     const t = session.turnStart;
-    return { available: true, which: 'current', playerName: t.players[t.turn].name, round: t.round };
+    if (t.phase !== 'turnStart') return none;
+    return { available: true, which: 'current', pieceName: nameAt(t), round: t.round };
   }
   if (session.previousTurnStart) {
     const t = session.previousTurnStart;
-    return { available: true, which: 'previous', playerName: t.players[t.turn].name, round: t.round };
+    return { available: true, which: 'previous', pieceName: nameAt(t), round: t.round };
   }
-  return { available: false, which: null, playerName: '', round: g.round };
+  return none;
 }
 
 export function undo(session: Session): Session {

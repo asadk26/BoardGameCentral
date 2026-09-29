@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "balance": "BALANCE=1 vitest run tests/balance.test.ts"
+    "balance": "BALANCE=1 vitest run tests/balance.test.ts --silent=false --disableConsoleIntercept"
   },
   "dependencies": {
     "@react-three/fiber": "^9.8.1",
