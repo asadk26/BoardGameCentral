@@ -223,3 +223,16 @@
   text-decoration: none;
   margin-top: 8px;
 }
+.phead.living {
+  box-shadow: 0 0 0 2px #ffd36b inset;
+}
+.pcurse {
+  color: #ffd0a8;
+}
+.pchallenge .rope-lanes {
+  grid-template-columns: 1fr;
+}
+.pchallenge .press-btn {
+  min-height: 110px;
+  font-size: 1.6rem;
+}
