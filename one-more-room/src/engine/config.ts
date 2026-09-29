@@ -36,6 +36,46 @@ export const SECRET_EDGES: ReadonlyArray<readonly [number, number]> = [
 ];
 export const SECRET_ENDPOINTS: readonly number[] = [8, 11, 24, 27];
 
+/** Ghost-only links through a wall, one step each: dining↔conservatory, laboratory↔nursery. */
+export const GHOST_WALL_LINKS: ReadonlyArray<readonly [number, number]> = [
+  [7, 10],
+  [22, 25],
+];
+
+// ── The Reaper ──────────────────────────────────────────────────────────
+
+/** The one permanently visible Super Reaper, beside the 4–12 passage. */
+export const SUPER_REAPER = 12;
+/** Exactly this many hidden regular Reaper traps, whatever the seat count. */
+export const TRAP_COUNT = 6;
+/** Corridor spaces that may never hold a hidden trap. */
+export const TRAP_EXCLUDED: readonly number[] = [0, 1, 31, 16, SUPER_REAPER];
+/** Mansion wings used to spread computer-filled traps around. */
+export const TRAP_WINGS: Record<string, readonly number[]> = {
+  west: [2, 4, 6, 9],
+  north: [14, 18, 19],
+  east: [20, 21, 26, 28, 30],
+};
+
+/** Scoring constants — a starting balance, meant to be tuned. */
+export const SCORING = {
+  survivalBonus: 5,
+  survivalBonusMinBanked: 6,
+  bountyPerKill: 3,
+  bountyCap: 6,
+};
+
+/** From this round on, duels leave exactly one survivor. */
+export const LETHAL_DUELS_FROM_ROUND = 8;
+
+/** Timings for the survival games, in milliseconds. */
+export const CHALLENGE = {
+  readyMs: 3000,
+  escape: { attempts: 2, periodMs: 2200, gapMs: 700, zoneDeg: 52 },
+  dance: { length: 4, symbolMs: 650, gapMs: 180, answerMs: 8000, attempts: 2 },
+  rope: { sweeps: 8, extraSweeps: 4, periodMs: 1250, firstMs: 1100, jitterMs: 110, pass: 5, airMinMs: 70, airMaxMs: 430, windowMs: 700, lateMs: 60, idealMs: 250, missErrorMs: 600 },
+};
+
 export const ROOMS: Record<number, { key: RoomKey; defaultName: string; stock: number }> = {
   3: { key: 'kitchen', defaultName: 'Kitchen', stock: 6 },
   7: { key: 'dining', defaultName: 'Dining Room', stock: 8 },
@@ -56,6 +96,11 @@ export function nodeKind(id: number): NodeKind {
   if (SECRET_ENDPOINTS.includes(id)) return 'secret';
   return 'corridor';
 }
+
+export function trapEligible(id: number): boolean {
+  return nodeKind(id) === 'corridor' && !TRAP_EXCLUDED.includes(id);
+}
+export const TRAP_ELIGIBLE: readonly number[] = Array.from({ length: NODE_COUNT }, (_, i) => i).filter(trapEligible);
 
 export function secretPairLabel(id: number): 'A' | 'B' | null {
   if (id === 8 || id === 24) return 'A';

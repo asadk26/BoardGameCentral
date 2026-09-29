@@ -1,6 +1,6 @@
 // Graph queries shared by the rules, the previews and the renderer.
 
-import { ENTRANCE, NODE_COUNT, ORDINARY_EDGES, SECRET_EDGES } from './config';
+import { ENTRANCE, GHOST_WALL_LINKS, NODE_COUNT, ORDINARY_EDGES, SECRET_EDGES } from './config';
 
 function buildAdjacency(edges: ReadonlyArray<readonly [number, number]>): number[][] {
   const adj: number[][] = Array.from({ length: NODE_COUNT }, () => []);
@@ -16,6 +16,8 @@ function buildAdjacency(edges: ReadonlyArray<readonly [number, number]>): number
 export const ORDINARY_ADJ: readonly (readonly number[])[] = buildAdjacency(ORDINARY_EDGES);
 /** Secret-passage neighbours (players only). */
 export const SECRET_ADJ: readonly (readonly number[])[] = buildAdjacency(SECRET_EDGES);
+/** Ghost-only links straight through a wall (player ghosts only). */
+export const WALL_ADJ: readonly (readonly number[])[] = buildAdjacency(GHOST_WALL_LINKS);
 
 export function isSecretEdge(a: number, b: number): boolean {
   return SECRET_ADJ[a].includes(b);
@@ -89,15 +91,28 @@ function lexLess(a: number[], b: number[]): boolean {
   return a.length < b.length;
 }
 
+export interface RouteOptions {
+  /** Nodes that may be neither entered nor passed (hostile ghosts, for the living). */
+  blocked?: ReadonlySet<number>;
+  /** Player ghosts: may use the ghost-only wall links and may never enter the entrance. */
+  ghost?: boolean;
+}
+
 /**
- * Every legal destination for a player move of 1..allowance steps, each with
- * its deterministic route: the shortest legal route, lower next-node id first
- * on ties. Legal routes are simple paths that never enter the ghost's node,
- * use at most one secret-passage edge, and stop on entering the entrance hall.
- * Routes are enumerated exhaustively (the graph is tiny), which makes both the
- * shortest-route and the tie-break rule easy to trust.
+ * Every legal destination for a move of 1..allowance steps, each with its
+ * deterministic route: the shortest legal route, lower next-node id first on
+ * ties. Legal routes are simple paths that avoid blocked nodes, use at most
+ * one secret-passage edge, and (for the living) stop on entering the entrance
+ * hall. Player ghosts may also cross the ghost-only wall links and never
+ * enter the entrance. Routes are enumerated exhaustively (the graph is tiny),
+ * which makes both the shortest-route and tie-break rules easy to trust.
+ *
+ * Hidden Reaper traps are deliberately not an input: route output can never
+ * depend on where they are.
  */
-export function playerRoutes(start: number, allowance: number, ghostNode: number): Map<number, PlayerRoute> {
+export function playerRoutes(start: number, allowance: number, blockedOrGhostNode: number | RouteOptions = {}): Map<number, PlayerRoute> {
+  const opts: RouteOptions = typeof blockedOrGhostNode === 'number' ? { blocked: new Set([blockedOrGhostNode]) } : blockedOrGhostNode;
+  const blocked = opts.blocked ?? new Set<number>();
   const best = new Map<number, PlayerRoute>();
   const path = [start];
   const onPath = new Set([start]);
@@ -119,10 +134,12 @@ export function playerRoutes(start: number, allowance: number, ghostNode: number
     if (path.length - 1 >= allowance) return;
     const steps: Array<[number, boolean]> = [];
     for (const m of ORDINARY_ADJ[here]) steps.push([m, false]);
+    if (opts.ghost) for (const m of WALL_ADJ[here]) steps.push([m, false]);
     if (!usedSecret) for (const m of SECRET_ADJ[here]) steps.push([m, true]);
     steps.sort((a, b) => a[0] - b[0]);
     for (const [m, secret] of steps) {
-      if (m === ghostNode || onPath.has(m)) continue;
+      if (blocked.has(m) || onPath.has(m)) continue;
+      if (opts.ghost && m === ENTRANCE) continue;
       path.push(m);
       onPath.add(m);
       visit(usedSecret || secret);
@@ -131,5 +148,16 @@ export function playerRoutes(start: number, allowance: number, ghostNode: number
     }
   };
   visit(false);
+  return best;
+}
+
+/** Shortest distance over ordinary edges, avoiding the entrance (for relocation). */
+export function nearestWhere(start: number, ok: (n: number) => boolean): number | null {
+  const { dist } = bfs(start, { blocked: (n) => n === ENTRANCE });
+  let best: number | null = null;
+  for (let n = 0; n < NODE_COUNT; n++) {
+    if (n === start || dist[n] === Infinity || !ok(n)) continue;
+    if (best === null || dist[n] < dist[best] || (dist[n] === dist[best] && n < best)) best = n;
+  }
   return best;
 }

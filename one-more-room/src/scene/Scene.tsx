@@ -2,7 +2,9 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { CHARACTERS, ENTRANCE, SECRET_ENDPOINTS, type CharacterId } from '../engine/config';
-import { finalScores, legalRoutes, previewMove, currentGhostPlan } from '../engine/engine';
+import { finalScores, isProtected, legalRoutes, previewMove, currentGhostPlan } from '../engine/engine';
+import type { GameState } from '../engine/types';
+import { ProtectionShield, Reapers, TransformBurst, useSpectral, WallLinks } from './Reaper';
 import { director, GHOST_HOVER, type Popup } from '../director';
 import { getState, useStore, act, setState } from '../store';
 import { Base, CharacterModel } from './Characters';
@@ -37,6 +39,9 @@ function Piece({ index, mode, rank, winner }: { index: number; mode: SceneMode; 
   const p = game?.players[index];
   const isActive = mode === 'game' && game?.turn === index && game.phase !== 'gameOver';
   const { camera } = useThree();
+  const dead = !!p && !p.alive;
+  const shielded = !!game && !!p && mode === 'game' && isProtected(game, index);
+  useSpectral(inner, dead, p ? charColor(p.character) : '#fff');
 
   useFrame(({ clock }, dt) => {
     const g = getState().session?.game;
@@ -73,6 +78,11 @@ function Piece({ index, mode, rank, winner }: { index: number; mode: SceneMode; 
       i.position.y = reduced ? 0.05 : j * 0.35;
       i.rotation.set(0, reduced ? 0 : Math.sin(t * 1.6) * 0.6, 0);
       i.scale.set(1, 1 + (1 - j) * 0.06, 1);
+    } else if (!g.players[index].alive) {
+      // Ghosts float and sway a little above their base.
+      i.position.y = 0.32 + (reduced ? 0 : Math.sin(t * 1.6) * 0.07);
+      i.rotation.set(0, 0, reduced ? 0 : Math.sin(t * 1.1) * 0.06);
+      i.scale.set(1, 1, 1);
     } else {
       i.position.y = reduced ? 0 : Math.sin(t * 2.2) * 0.025 + 0.02;
       i.rotation.set(0, 0, pose?.moving ? Math.sin(t * 18) * 0.08 : 0);
@@ -92,6 +102,7 @@ function Piece({ index, mode, rank, winner }: { index: number; mode: SceneMode; 
         </group>
       </group>
       {isActive && <ActiveRing color={color} />}
+      {shielded && <ProtectionShield />}
       <NameTag index={index} name={p.name} color={color} big={isActive || overview || mode === 'results'} y={mode === 'results' ? 1.75 : 1.05} />
     </group>
   );
@@ -328,9 +339,7 @@ function GameHighlights() {
             <PathDots path={ghostPlan.fullPath.slice(ghostPlan.path.length - 1)} color="#2f7f78" size={0.045} y={0.3} dashed />
           )}
           <Ring id={ghostPlan.path[ghostPlan.path.length - 1]} color="#5ff2e0" radius={0.5} strength={1.2} />
-          {ghostPlan.catches.map((c) => (
-            <Beacon key={`c${c.player}`} id={c.node} color="#ff5a6a" />
-          ))}
+          {ghostPlan.encounter && <Beacon id={ghostPlan.encounter.node} color="#ff5a6a" />}
         </>
       )}
       {game.decoy !== null && <Decoy id={game.decoy} />}
@@ -481,6 +490,14 @@ function CameraRig({ mode }: { mode: SceneMode }) {
       desiredLook.set(0, 0.8, 11.6);
       focus.set(0, 0, 11);
       rate = 2;
+    } else if (g.phase === 'challenge' && g.challenge && !calm) {
+      // Frame the encounter; the chosen camera mode resumes afterwards.
+      const [cx, , cz] = nodePos(g.challenge.node, 0);
+      focus.set(cx, 0, cz);
+      const fwd = new THREE.Vector3(Math.sin(yaw.current), 0, Math.cos(yaw.current));
+      desiredPos.copy(focus).addScaledVector(fwd, -4.2).add(new THREE.Vector3(0, 3.4, 0));
+      desiredLook.copy(focus).add(new THREE.Vector3(0, 0.6, 0));
+      rate = 2.4;
     } else if (st.cameraMode === 'overview') {
       const fov = (cam.fov * Math.PI) / 180;
       const tanV = Math.tan(fov / 2);
@@ -583,7 +600,13 @@ function World() {
   const game = useStore((s) => s.session?.game ?? null);
   const pz = useStore((s) => s.personalization);
   const overview = useStore((s) => s.cameraMode === 'overview');
-  const mode: SceneMode = screen !== 'game' || !game ? 'showcase' : game.phase === 'gameOver' ? 'results' : 'game';
+  const reduced = useStore((s) => s.settings.reducedMotion);
+  const knownLedger = useStore((s) => s.session?.known);
+  const known = useMemo(
+    () => Array.from(new Set([...(knownLedger ?? []), ...(game?.traps.filter((t) => t.revealed).map((t) => t.node) ?? [])])),
+    [knownLedger, game],
+  );
+  const mode: SceneMode = screen !== 'game' || !game || game.phase === 'placement' ? 'showcase' : game.phase === 'gameOver' ? 'results' : 'game';
   const results = useMemo(() => (game && mode === 'results' ? finalScores(game) : null), [game, mode]);
   return (
     <>
@@ -598,6 +621,13 @@ function World() {
       <Candy state={game} roomNames={pz.roomNames} labels={mode !== 'results'} />
       {mode !== 'game' && <Label pos={[0, 2.6, 10.6]} lines={[pz.mansionName]} scale={0.8} color="#f2b84b" />}
       <GhostActor node={game?.ghost ?? 16} />
+      {game && mode !== 'showcase' && <Reapers revealed={known} reduced={reduced} />}
+      {mode === 'showcase' && <Reapers revealed={[]} reduced={reduced} />}
+      <WallLinks strong={overview && mode === 'game'} />
+      {game && mode === 'game' && <Bursts game={game} />}
+      {game?.phase === 'challenge' && game.challenge?.host === 'superReaper' && game.challenge.kind === 'duel' && (
+        <SummonedPhantom character={game.players[game.challenge.participants[1]].character} />
+      )}
       {mode === 'showcase' && <ShowcaseLineup interactive={screen === 'setup'} />}
       {game && mode !== 'showcase' && (
         <>
@@ -615,6 +645,41 @@ function World() {
         </>
       )}
     </>
+  );
+}
+
+/** Spawns a transformation burst whenever a player turns into a ghost. */
+function Bursts({ game }: { game: GameState }) {
+  const prev = useRef<boolean[]>(game.players.map((p) => p.alive));
+  const [bursts, setBursts] = useState<Array<{ id: number; at: V3 }>>([]);
+  useEffect(() => {
+    const newly = game.players.map((p, i) => (prev.current[i] && !p.alive ? i : -1)).filter((i) => i >= 0);
+    prev.current = game.players.map((p) => p.alive);
+    if (newly.length) setBursts((b) => [...b, ...newly.map((i) => ({ id: Date.now() + i, at: nodePos(game.players[i].node, 0) }))]);
+  }, [game]);
+  return (
+    <>
+      {bursts.map((b) => (
+        <TransformBurst key={b.id} at={b.at} onDone={() => setBursts((x) => x.filter((y) => y.id !== b.id))} />
+      ))}
+    </>
+  );
+}
+
+/** A Super Reaper summons an opponent's likeness to node 12; their piece stays put. */
+function SummonedPhantom({ character }: { character: CharacterId }) {
+  const ref = useRef<THREE.Group>(null);
+  useSpectral(ref, true, '#ff3d6e');
+  const [x, , z] = nodePos(12, 0);
+  useFrame(({ clock }) => {
+    if (ref.current) ref.current.position.y = 0.2 + Math.sin(clock.elapsedTime * 2) * 0.05;
+  });
+  return (
+    <group position={[x + 0.35, 0.14, z + 0.35]} scale={0.66}>
+      <group ref={ref}>
+        <CharacterModel id={character} />
+      </group>
+    </group>
   );
 }
 

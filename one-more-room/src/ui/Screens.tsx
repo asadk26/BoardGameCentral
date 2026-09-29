@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { CHARACTERS, DEFAULT_PLAYER_NAMES, EVENT_INFO, EVENT_TYPES, MAX_PLAYERS, MIN_PLAYERS, ROOMS, TEXT_LIMITS } from '../engine/config';
 import { cleanText, defaultPersonalization } from '../engine/save';
+import { defaultBotProfile } from '../engine/bots';
 import { goToSetup, goToTitle, resumeGame, savePrefs, setPersonalization, setState, startGame, useStore, getState } from '../store';
 import { PlayerBadge } from './Dialog';
 
@@ -57,7 +58,7 @@ export function Setup() {
     while (next.length < n) {
       const used = new Set(next.map((p) => p.character));
       const free = CHARACTERS.find((c) => !used.has(c.id))!;
-      next.push({ name: DEFAULT_PLAYER_NAMES[next.length], character: free.id });
+      next.push({ name: DEFAULT_PLAYER_NAMES[next.length], character: free.id, kind: 'bot', bot: defaultBotProfile(next.length) });
     }
     setState({ editingPlayer: Math.min(getState().editingPlayer, n - 1) });
     setPlayers(next);
@@ -99,7 +100,7 @@ export function Setup() {
             </button>
           </div>
         </div>
-        <p className="hint">Pick a costume for each player or team — tap a figure on the steps, or use the buttons. Everyone has the same abilities.</p>
+        <p className="hint">Pick a costume for each player or team — tap a figure on the steps, or use the buttons. Everyone has the same abilities. Any seat can be a person or a bot; one person plus bots works fine.</p>
         <ol className="setup-players">
           {players.map((p, i) => {
             const color = CHARACTERS.find((c) => c.id === p.character)!.color;
@@ -113,6 +114,44 @@ export function Setup() {
                   onChange={(e) => setPlayers(players.map((q, j) => (j === i ? { ...q, name: e.target.value } : q)))}
                   onBlur={(e) => setPlayers(players.map((q, j) => (j === i ? { ...q, name: cleanText(e.target.value, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[i]) } : q)))}
                 />
+                <div className="seat-kind" role="group" aria-label={`Player ${i + 1} is played by`}>
+                  <button
+                    type="button"
+                    className={`chip ${p.kind === 'human' ? 'on' : ''}`}
+                    aria-pressed={p.kind === 'human'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPlayers(players.map((q, j) => (j === i ? { ...q, kind: 'human', bot: undefined } : q)));
+                    }}
+                  >
+                    Person
+                  </button>
+                  {(['greedy', 'cautious', 'mischievous'] as const).map((pers) => (
+                    <button
+                      type="button"
+                      key={pers}
+                      className={`chip ${p.kind === 'bot' && p.bot?.personality === pers ? 'on' : ''}`}
+                      aria-pressed={p.kind === 'bot' && p.bot?.personality === pers}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setPlayers(players.map((q, j) => (j === i ? { ...q, kind: 'bot', bot: { personality: pers, skill: q.bot?.skill ?? 'steady' } } : q)));
+                      }}
+                    >
+                      🤖 {pers}
+                    </button>
+                  ))}
+                  {p.kind === 'bot' && (
+                    <select
+                      aria-label={`Player ${i + 1} bot reflexes`}
+                      value={p.bot?.skill ?? 'steady'}
+                      onChange={(e) => setPlayers(players.map((q, j) => (j === i ? { ...q, bot: { personality: q.bot?.personality ?? 'greedy', skill: e.target.value as 'steady' } } : q)))}
+                    >
+                      <option value="shaky">shaky reflexes</option>
+                      <option value="steady">steady reflexes</option>
+                      <option value="sharp">sharp reflexes</option>
+                    </select>
+                  )}
+                </div>
                 <div className="char-pick" role="radiogroup" aria-label={`Player ${i + 1} costume`}>
                   {CHARACTERS.map((c) => {
                     const owner = players.findIndex((q) => q.character === c.id);

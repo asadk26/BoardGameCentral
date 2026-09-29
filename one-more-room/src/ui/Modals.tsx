@@ -1,69 +1,91 @@
-import { EVENT_INFO, EVENT_TYPES } from '../engine/config';
+import { CHALLENGE, EVENT_INFO, EVENT_TYPES, SCORING } from '../engine/config';
 import { undoInfo } from '../engine/engine';
 import { discardSave, doUndo, goToSetup, goToTitle, setState, updateSettings, useStore } from '../store';
 import { audio } from '../audio/audio';
 import { Dialog } from './Dialog';
 
 export function RulesContent() {
+  const r = CHALLENGE.rope.pass;
   return (
     <div className="rules">
       <p className="lede">
-        Sneak through a haunted mansion, grab candy, and get it home to the Entrance Hall before midnight. The ghost hunts
-        whoever is carrying the most. Can you risk one more room?
+        Sneak through a haunted mansion, grab candy, and get it home to the Entrance Hall before midnight. Survive what lurks
+        in the dark — or come back as a ghost and haunt your friends. Can you risk one more room?
       </p>
-      <h3>Your turn</h3>
+      <h3>Before the first roll: curse the mansion</h3>
+      <p>
+        Each player secretly picks one ordinary corridor for a hidden Reaper. The house adds its own until there are exactly
+        six. Nobody sees anyone else’s pick, and yours is never shown again — remember it. You have no immunity to your own.
+      </p>
+      <h3>A living player’s turn</h3>
       <ol>
         <li>
-          <strong>Decoy (optional, once per game).</strong> Before rolling, if you are out in the house, you may leave a
-          wrapped sweet on your space. This turn the ghost chases the decoy instead of anyone — though it still catches
-          anybody standing on its route. The decoy vanishes after this ghost move.
+          <strong>Decoy (optional, once per game).</strong> Before rolling, if you are out in the house, leave a wrapped sweet
+          on your space. This turn the resident ghost heads for it instead of anyone’s candy.
         </li>
         <li>
-          <strong>Roll two dice.</strong> Choose one die to <em>move you</em>; the other die <em>moves the ghost</em>. You
-          can switch the dice and your destination freely until you confirm.
+          <strong>Roll two dice.</strong> Choose one to <em>move you</em>; the other <em>moves the resident ghost</em>.
         </li>
         <li>
-          <strong>Move</strong> 1 space up to your die, along the glowing spaces — or <strong>Stay</strong>. You follow
-          the shortest route. You cannot pass through or stop on the ghost. Passing through a room does nothing; only
-          where you stop counts.
+          <strong>Move</strong> 1 space up to your die along the glowing spaces, or <strong>Stay</strong>. You can pass other
+          living players but never pass through or stop on a ghost. Only where you stop counts.
         </li>
         <li>
-          <strong>Land.</strong> In a candy room, take up to 3 candy (rooms never refill). On dropped candy, scoop up the
-          whole pile. On a Trick or Treat space (?), draw a card.
+          <strong>Land.</strong> Rooms give up to 3 candy (they never refill); dropped candy is scooped up; a Trick or Treat
+          space (?) draws a card. Entering the Entrance Hall banks everything you carry and ends your move.
         </li>
         <li>
-          <strong>The ghost moves</strong>, then you pass to the next player.
+          <strong>The resident ghost moves</strong>, then you pass on.
         </li>
       </ol>
       <h3>Carried vs banked candy</h3>
       <p>
-        Candy you pick up is <strong>carried</strong> — it is at risk. Reaching the Entrance Hall <strong>banks</strong>{' '}
-        it automatically: banked candy is safe for good. Entering the Entrance Hall ends your move, so you cannot run
-        through it to the other wing. The ghost can never go in there.
+        Carried candy is at risk: if you die you drop all of it where you fall. Banked candy is yours for good — even as a
+        ghost. Nobody can take it.
       </p>
-      <h3>Secret passages</h3>
-      <p>
-        Spaces marked A connect to each other, and so do the B spaces. Crossing one costs 1 step, and you may use at most
-        one passage per move. The ghost cannot use them.
-      </p>
-      <h3>How the ghost chooses</h3>
+      <h3>Survival encounters</h3>
       <ul>
-        <li>It ignores anyone in the Entrance Hall and never looks at banked candy.</li>
-        <li>It hunts the player <strong>carrying</strong> the most candy (even if that is zero).</li>
-        <li>Ties: the one nearest the ghost; then the active player; then the next player clockwise.</li>
-        <li>If everyone is in the Entrance Hall and there is no decoy, it waits.</li>
+        <li>
+          <strong>Caught by a ghost</strong> (the resident ghost or a player ghost): <em>Break the Curse</em> — press when the
+          circling marker is in the glowing zone. Two tries, one hit escapes. You keep your candy and flee to the nearest empty
+          corridor.
+        </li>
+        <li>
+          <strong>Stopping on a Reaper trap</strong> reveals it for good. Death demands a performance: <em>Dance for Death</em>{' '}
+          (repeat four moves; two tries) or <em>Graveyard Jump Rope</em> (clear {r} of 8 sweeps). Passing over a trap is always
+          safe; staying never triggers one.
+        </li>
+        <li>
+          <strong>The Super Reaper</strong> (always visible, space 12): stop there and pick any unprotected living opponent. You
+          both jump the same rope; exactly one survives. They stay where they are on the board. No opponent? You perform alone.
+        </li>
+        <li>
+          <strong>Stopping on another living player</strong> (outside the Entrance Hall) starts <em>Haunted Jump Rope</em>: eight
+          sweeps, each of you needs {r} to live — both may survive, or neither. After the bell at the end of round 7, duels leave
+          one survivor: the lower score dies; ties go to up to four sudden-death sweeps, then steadier timing, then a curse.
+        </li>
       </ul>
+      <p>One stop causes at most one encounter: Super Reaper first, then a duel, then a Reaper performance.</p>
+      <h3>Protection</h3>
       <p>
-        Its die is how far it moves; the target decides where. It takes the shortest route, stops when it reaches its
-        target, and catches everyone it passes on the way. Before you confirm a move, the forecast shows who it will
-        hunt, how far it goes and who it will catch.
+        Survive any challenge and you are protected until the end of your next turn: ghosts pass you by, nobody can duel you,
+        and you can’t start a duel. An unknown trap spares you (but is revealed). Choosing to stop on a <em>revealed</em> Reaper
+        or the Super Reaper ignores your protection for that encounter — you’ll be warned first.
       </p>
-      <h3>Getting caught</h3>
+      <h3>Becoming a ghost</h3>
       <p>
-        Drop half your carried candy (rounded up) on that space, then fly home: the rest is banked for you straight
-        away. You keep your banked candy, your decoy and your next turn. Dropped candy stays on the floor for anyone who
-        later ends a move there.
+        Fail a challenge and you turn into a spectral version of your character, right there. You keep your seat and your
+        banked candy. From your next turn you roll one die, drift through the mansion (including two ghost-only links through
+        walls), never enter the Entrance Hall, and can’t collect candy or draw cards. End your move on an unprotected living
+        player and they must break the curse. Each player you turn earns a {SCORING.bountyPerKill}-point bounty, up to {SCORING.bountyCap}.
       </p>
+      <h3>How the resident ghost chooses</h3>
+      <ul>
+        <li>It hunts the unprotected living player <strong>carrying</strong> the most, outside the Entrance Hall.</li>
+        <li>Ties: the nearest; then the active player; then the next player clockwise. It never hunts ghosts.</li>
+        <li>It stops at the first unprotected living player on its path and they break the curse — one challenge per move.</li>
+        <li>If nobody is exposed and there is no decoy, it waits.</li>
+      </ul>
       <h3>Trick or Treat cards</h3>
       <ul className="cards-list">
         {EVENT_TYPES.map((t) => (
@@ -72,12 +94,13 @@ export function RulesContent() {
           </li>
         ))}
       </ul>
-      <p>Moving or swapping through a card never collects candy, banks or draws another card.</p>
-      <h3>Midnight</h3>
+      <p>Moving or swapping through a card never collects candy, banks, triggers a Reaper or starts a duel.</p>
+      <h3>Midnight and scoring</h3>
       <p>
-        The game lasts 10 rounds; everyone gets one turn per round. After round 7 the bell tolls: three rounds until
-        midnight. At the end, your score is <strong>banked candy + half your carried candy (rounded down)</strong>. The
-        highest score wins; tied leaders share the victory.
+        Ten rounds, one turn each per round — or the night ends at once if nobody is left alive. Living players score{' '}
+        <strong>banked + half their carried candy (rounded down)</strong>, plus a <strong>{SCORING.survivalBonus}-point survival bonus</strong> if
+        they finish alive with at least {SCORING.survivalBonusMinBanked} banked. Ghosts score <strong>banked + bounty</strong>. Highest total wins;
+        ties share the win.
       </p>
     </div>
   );
@@ -118,6 +141,10 @@ function Settings() {
       <label className="row check">
         <input type="checkbox" checked={s.lowGraphics} onChange={(e) => updateSettings({ lowGraphics: e.target.checked })} />
         <span>Low graphics (no shadows — smoother on older devices)</span>
+      </label>
+      <label className="row check">
+        <input type="checkbox" checked={s.fastBots} onChange={(e) => updateSettings({ fastBots: e.target.checked })} />
+        <span>Fast-forward bots (short pauses; their challenges resolve quickly)</span>
       </label>
     </div>
   );

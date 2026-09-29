@@ -6,6 +6,8 @@ import {
   DEFAULT_GHOST_NAME,
   DEFAULT_MANSION_NAME,
   EVENT_TYPES,
+  TRAP_COUNT,
+  trapEligible,
   NODE_COUNT,
   ROOMS,
   TEXT_LIMITS,
@@ -13,11 +15,13 @@ import {
 } from './config';
 import type { GameState } from './types';
 import type { Session } from './engine';
+import type { BotProfile } from './bots';
 
 export const SAVE_KEY = 'one-more-room/save';
 export const PREFS_KEY = 'one-more-room/prefs';
 export const SETTINGS_KEY = 'one-more-room/settings';
-export const SAVE_SCHEMA = 1;
+/** v1 = original rules (catch-and-respawn); v2 = survival encounters and ghosts. */
+export const SAVE_SCHEMA = 2;
 
 export interface Personalization {
   mansionName: string;
@@ -62,11 +66,18 @@ export function sanitizePersonalization(input: unknown): Personalization {
   };
 }
 
+/** Who sits in a seat on this device: a person, or a bot with a profile. */
+export interface SeatSetup {
+  kind: 'human' | 'bot';
+  bot?: BotProfile;
+}
+
 export interface SaveFile {
   schema: number;
   savedAt: string;
   session: Session;
   personalization: Personalization;
+  seats?: SeatSetup[];
 }
 
 const isInt = (v: unknown, min = -Infinity, max = Infinity) => Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
@@ -76,8 +87,9 @@ export function validGame(g: unknown): g is GameState {
   const s = g as GameState;
   const chars = new Set(CHARACTERS.map((c) => c.id));
   return (
-    s.schema === 1 &&
+    s.schema === 2 &&
     isInt(s.rng, 0, 0xffffffff) &&
+    isInt(s.challengeRng, 0, 0xffffffff) &&
     Array.isArray(s.players) &&
     s.players.length >= 2 &&
     s.players.length <= 6 &&
@@ -89,6 +101,8 @@ export function validGame(g: unknown): g is GameState {
         isInt(p.node, 0, NODE_COUNT - 1) &&
         isInt(p.carried, 0) &&
         isInt(p.banked, 0) &&
+        isInt(p.bounty, 0, 99) &&
+        typeof p.alive === 'boolean' &&
         typeof p.decoyUsed === 'boolean',
     ) &&
     isInt(s.ghost, 1, NODE_COUNT - 1) &&
@@ -97,20 +111,25 @@ export function validGame(g: unknown): g is GameState {
     Array.isArray(s.deck) && Array.isArray(s.discard) && s.deck.length + s.discard.length === 18 &&
     isInt(s.round, 1, 10) &&
     isInt(s.turn, 0, s.players.length - 1) &&
-    ['turnStart', 'choose', 'event', 'ghost', 'summary', 'gameOver'].includes(s.phase) &&
-    (s.dice === null || (Array.isArray(s.dice) && s.dice.length === 2 && s.dice.every((d) => isInt(d, 1, 6)))) &&
-    (s.phase === 'turnStart' || s.phase === 'gameOver' || s.dice !== null) &&
+    ['placement', 'turnStart', 'choose', 'pick', 'event', 'challenge', 'ghost', 'summary', 'gameOver'].includes(s.phase) &&
+    (s.dice === null || (Array.isArray(s.dice) && (s.dice.length === 1 || s.dice.length === 2) && s.dice.every((d) => isInt(d, 1, 6)))) &&
+    (['placement', 'turnStart', 'gameOver'].includes(s.phase) || s.dice !== null) &&
+    Array.isArray(s.nominations) && s.nominations.length === s.players.length &&
+    Array.isArray(s.traps) &&
+    (s.phase === 'placement' ? s.traps.length === 0 : s.traps.length === TRAP_COUNT) &&
+    s.traps.every((t) => trapEligible(t.node) && typeof t.revealed === 'boolean') &&
+    (s.phase !== 'challenge' || (!!s.challenge && typeof s.challenge.id === 'string')) &&
     Array.isArray(s.log)
   );
 }
 
-export function serialize(session: Session, personalization: Personalization): string {
-  const file: SaveFile = { schema: SAVE_SCHEMA, savedAt: new Date().toISOString(), session, personalization };
+export function serialize(session: Session, personalization: Personalization, seats?: SeatSetup[]): string {
+  const file: SaveFile = { schema: SAVE_SCHEMA, savedAt: new Date().toISOString(), session, personalization, seats };
   return JSON.stringify(file);
 }
 
 export type LoadResult =
-  | { ok: true; session: Session; personalization: Personalization }
+  | { ok: true; session: Session; personalization: Personalization; seats: SeatSetup[] | null }
   | { ok: false; reason: 'missing' | 'corrupt' | 'incompatible' };
 
 export function deserialize(raw: string | null): LoadResult {
@@ -127,5 +146,10 @@ export function deserialize(raw: string | null): LoadResult {
   if (!ses || !validGame(ses.game) || !validGame(ses.turnStart) || (ses.previousTurnStart !== null && !validGame(ses.previousTurnStart))) {
     return { ok: false, reason: 'corrupt' };
   }
-  return { ok: true, session: ses, personalization: sanitizePersonalization(parsed.personalization) };
+  if (!Array.isArray(ses.known)) ses.known = [];
+  const seats =
+    Array.isArray(parsed.seats) && parsed.seats.length === ses.game.players.length
+      ? parsed.seats.map((x) => (x && x.kind === 'bot' && x.bot ? { kind: 'bot' as const, bot: x.bot } : { kind: 'human' as const }))
+      : null;
+  return { ok: true, session: ses, personalization: sanitizePersonalization(parsed.personalization), seats };
 }

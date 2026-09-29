@@ -16,7 +16,14 @@ type Sound =
   | 'drop'
   | 'creak'
   | 'fanfare'
-  | 'click';
+  | 'click'
+  | 'reaper'
+  | 'transform'
+  | 'tick'
+  | 'jump'
+  | 'miss'
+  | 'hit'
+  | 'go';
 
 class Audio {
   private ctx: AudioContext | null = null;
@@ -148,6 +155,30 @@ class Audio {
           break;
         case 'fanfare':
           [523, 659, 784, 1047, 784, 1047].forEach((f, i) => this.tone(f, 0.35, { type: 'triangle', gain: 0.12, at: i * 0.12 }));
+          break;
+        case 'reaper':
+          [55, 82.4, 110].forEach((f, i) => this.tone(f, 2.2, { type: 'sawtooth', gain: 0.05, at: i * 0.05, slide: 0.94 }));
+          this.burst(1.6, { freq: 200, sweep: 90, q: 3, gain: 0.18 });
+          this.tone(880, 1.4, { type: 'sine', gain: 0.05, at: 0.5, slide: 0.5 });
+          break;
+        case 'transform':
+          [392, 494, 587, 784, 988].forEach((f, i) => this.tone(f, 0.9, { type: 'sine', gain: 0.07, at: i * 0.09 }));
+          this.burst(1.0, { freq: 1200, sweep: 5000, q: 2, gain: 0.08 });
+          break;
+        case 'tick':
+          this.tone(1500, 0.05, { type: 'square', gain: 0.03 });
+          break;
+        case 'go':
+          this.tone(1046, 0.25, { type: 'triangle', gain: 0.1 });
+          break;
+        case 'jump':
+          this.tone(420, 0.14, { type: 'triangle', gain: 0.08, slide: 1.8 });
+          break;
+        case 'hit':
+          [784, 1175].forEach((f, i) => this.tone(f, 0.16, { type: 'triangle', gain: 0.09, at: i * 0.06 }));
+          break;
+        case 'miss':
+          this.tone(180, 0.25, { type: 'sawtooth', gain: 0.06, slide: 0.6 });
           break;
         case 'click':
           this.tone(1200, 0.04, { type: 'square', gain: 0.03 });
