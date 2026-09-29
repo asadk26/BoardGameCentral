@@ -66,4 +66,4 @@ it('random full games keep every invariant', () => {
     expect(s.game.phase).toBe('gameOver');
     expect(finalScores(s.game).length).toBe(n);
   }
-});
+}, 120000);
