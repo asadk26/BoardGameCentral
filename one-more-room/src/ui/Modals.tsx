@@ -54,7 +54,7 @@ export function RulesContent() {
       </p>
       <h3>Haunted Jump Rope</h3>
       <p>
-        Eight shared sweeps, one press per sweep — holding or mashing never counts twice. The most clean jumps wins. Tied at the top? Only
+        Eight shared sweeps that get faster every time the rope comes round (about 1.3 s apart at first, 0.8 s by the end), one press per sweep — holding or mashing never counts twice. The most clean jumps wins. Tied at the top? Only
         the tied jump up to {c.extraSweeps} sudden-death sweeps; then the steadier timing on the eight sweeps wins; an exact tie gets the
         Reaper’s seeded verdict. Exactly one piece always holds the life afterwards.
       </p>

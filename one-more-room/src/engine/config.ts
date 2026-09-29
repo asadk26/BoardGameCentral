@@ -98,15 +98,26 @@ export const CHALLENGE = {
   rope: {
     sweeps: 8,
     extraSweeps: 4,
-    periodMs: 1250,
+    /**
+     * The shared rope speeds up after every sweep: the gap before sweep k is
+     * periodMs × accel^k, never below minPeriodMs. Everyone faces the same
+     * acceleration; sudden death runs at top speed.
+     */
+    periodMs: 1300,
+    accel: 0.935,
+    minPeriodMs: 800,
     firstMs: 1100,
+    /** Random wobble on each floor pass, scaled with the current period. */
     jitterMs: 110,
     /** A press this long before the rope reaches the floor is a perfect jump. */
     idealMs: 250,
     /** Normal clearance window: lead time within ±halfWindowMs of ideal. */
     halfWindowMs: 180,
-    /** Presses are matched to a sweep within this span before / after the floor. */
-    windowMs: 700,
+    /**
+     * Presses are matched to a sweep within this span before / after the
+     * floor. Small enough that neighbouring sweeps never overlap at top speed.
+     */
+    windowMs: 560,
     lateMs: 60,
     /** Timing error charged for a missed sweep. */
     missErrorMs: 600,

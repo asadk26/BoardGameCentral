@@ -33,12 +33,24 @@ export interface RopeSchedule {
   totalMs: number;
 }
 
-/** Eight scored sweeps plus four sudden-death sweeps, identical for everyone. */
+/** The gap before sweep k (k ≥ 1): the rope speeds up after every sweep. */
+export function sweepPeriod(k: number): number {
+  const c = CHALLENGE.rope;
+  return Math.max(c.minPeriodMs, c.periodMs * Math.pow(c.accel, k - 1));
+}
+
+/** Eight scored sweeps plus four sudden-death sweeps, identical for everyone, getting faster. */
 export function ropeSchedule(seed: number): RopeSchedule {
   const r = stream(seed ^ 0x40be);
   const c = CHALLENGE.rope;
   const n = c.sweeps + c.extraSweeps;
-  const bottoms = Array.from({ length: n }, (_, i) => Math.round(c.firstMs + i * c.periodMs + (r() * 2 - 1) * c.jitterMs));
+  const bottoms: number[] = [];
+  let base = c.firstMs;
+  for (let i = 0; i < n; i++) {
+    if (i > 0) base += sweepPeriod(i);
+    const wobble = c.jitterMs * (i > 0 ? sweepPeriod(i) / c.periodMs : 1);
+    bottoms.push(Math.round(base + (r() * 2 - 1) * wobble));
+  }
   return { bottoms, sweeps: c.sweeps, extraSweeps: c.extraSweeps, mainMs: bottoms[c.sweeps - 1] + 500, totalMs: bottoms[n - 1] + 500 };
 }
 
@@ -162,10 +174,13 @@ export function botRopeInputs(seed: number, piece: number, skill: ReflexSkill): 
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   };
   const out: ChallengeInput[] = [];
-  for (const b of ropeSchedule(seed).bottoms) {
-    if (r() < skill.lapse) continue;
-    out.push({ t: Math.round(b - CHALLENGE.rope.idealMs + gauss() * skill.jitterMs) });
-  }
+  const c = CHALLENGE.rope;
+  ropeSchedule(seed).bottoms.forEach((b, i) => {
+    if (r() < skill.lapse) return;
+    // A faster rope is harder to time: error grows with the square root of the speed-up.
+    const speedUp = i === 0 ? 1 : c.periodMs / sweepPeriod(i);
+    out.push({ t: Math.round(b - c.idealMs + gauss() * skill.jitterMs * Math.sqrt(speedUp)) });
+  });
   return out;
 }
 

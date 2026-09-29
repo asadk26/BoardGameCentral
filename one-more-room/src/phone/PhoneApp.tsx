@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CHARACTERS, ROUNDS, TEXT_LIMITS, TRAP_ELIGIBLE, type CharacterId } from '../engine/config';
-import { actingPiece, finalScores, legalRoutes, livingPiece, previewMove } from '../engine/engine';
+import { actingPiece, activeController, finalScores, legalRoutes, livingPiece, previewMove } from '../engine/engine';
 import { challengeDurationMs, type ChallengeInput } from '../engine/challenges';
 import type { Action, GameState } from '../engine/types';
 import type { RoomView, ServerMsg } from '../net/protocol';
@@ -236,6 +236,7 @@ function Game({ view, client }: { view: RoomView; client: RoomClient }) {
           {curse && <div className="small pcurse">{curse}</div>}
         </div>
       </header>
+      {started && <Scoreboard g={g} me={piece} />}
       {needsAck ? (
         <NominationAck nomination={view.ownNomination!} onHide={ack} />
       ) : (
@@ -248,11 +249,29 @@ function Game({ view, client }: { view: RoomView; client: RoomClient }) {
         (acting && inControl ? (
           <MyAction g={g} send={send} />
         ) : acting ? (
-          <Watching g={g} note={`Your piece’s action — ${controllerLine(g, piece) ?? 'your teammate'} controls it this round.`} />
+          <Watching g={g} note={`Your piece’s action — ${me.controllers[activeController(g, piece)]} controls it this round.`} />
         ) : (
           <Watching g={g} />
         ))}
     </div>
+  );
+}
+
+/** Every piece's points, who holds the life, and the curse on the living piece. */
+function Scoreboard({ g, me }: { g: GameState; me: number }) {
+  return (
+    <ul className="pscores" aria-label="Scores">
+      {g.pieces.map((p, i) => (
+        <li key={p.id} className={`${p.alive ? 'alive' : ''} ${i === me ? 'me' : ''}`}>
+          <span className="pdot" style={{ background: colorOf(p.character) }}>
+            {i + 1}
+          </span>
+          <span className="pn">{p.name}</span>
+          <b>{p.score}</b>
+          {p.alive ? ' ❤' : ''}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -488,7 +507,7 @@ function PhoneChallenge({ view, client, piece }: { view: RoomView; client: RoomC
     return (
       <div className="pcard">
         <h2>{challengeTitle(ch)}</h2>
-        <p>Your piece is jumping — {controllerLine(g, piece) ?? 'your teammate'} controls it this round. Cheer them on!</p>
+        <p>Your piece is jumping — {g.pieces[piece].controllers[activeController(g, piece)]} controls it this round. Cheer them on!</p>
       </div>
     );
   if (run?.paused) return <p className="pstatus">{run.paused}</p>;

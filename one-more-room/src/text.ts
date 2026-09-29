@@ -60,7 +60,7 @@ export function challengeTitle(ch: Challenge): string {
 
 export function challengeHowTo(ch: Challenge): string {
   const who = ch.kind === 'seance' ? `All ${ch.participants.length} of you jump` : 'You both jump';
-  return `${who} the same spectral rope, eight sweeps. Press just before it reaches your feet — one press per sweep; holding or mashing never counts twice. The most clean jumps holds the life. Tied at the top? Only the tied jump up to four sudden-death sweeps, then the steadiest timing wins, and an exact tie gets the Reaper’s verdict.`;
+  return `${who} the same spectral rope, eight sweeps — and it speeds up after every sweep. Press just before it reaches your feet — one press per sweep; holding or mashing never counts twice. The most clean jumps holds the life. Tied at the top? Only the tied jump up to four sudden-death sweeps, then the steadiest timing wins, and an exact tie gets the Reaper’s verdict.`;
 }
 
 export function challengeHost(ch: Challenge, state: GameState): string {

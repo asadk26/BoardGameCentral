@@ -427,6 +427,26 @@ describe('challenges: judging, tiebreaks and idempotence', () => {
     expect(timed.lastOutcome).toMatchObject({ winner: 0, decidedBy: 'timing' });
   });
 
+  it('the shared rope speeds up every sweep, and no two sweeps’ press windows ever overlap', () => {
+    const c = CHALLENGE.rope;
+    for (let seed = 1; seed < 400; seed++) {
+      const b = ropeSchedule(seed).bottoms;
+      expect(b.length).toBe(c.sweeps + c.extraSweeps);
+      for (let i = 1; i < b.length; i++) expect(b[i] - b[i - 1]).toBeGreaterThan(c.windowMs + c.lateMs);
+    }
+    // Averaged over seeds, each gap in the scored sweeps is shorter than the one before.
+    const avgGap = (i: number) => {
+      let s = 0;
+      for (let seed = 1; seed < 400; seed++) {
+        const b = ropeSchedule(seed).bottoms;
+        s += b[i] - b[i - 1];
+      }
+      return s / 399;
+    };
+    for (let i = 2; i < c.sweeps; i++) expect(avgGap(i)).toBeLessThan(avgGap(i - 1));
+    expect(avgGap(c.sweeps)).toBeLessThan(avgGap(1) * 0.7);
+  });
+
   it('holding or mashing never creates extra jumps', () => {
     const seed = 99;
     const sch = ropeSchedule(seed);
