@@ -79,6 +79,8 @@ export interface AppState {
   editingPlayer: number;
   /** Local secret placement: which seat is behind the curtain, and what they have tapped. */
   placement: { seat: number | null; draft: number | null; confirmed: boolean };
+  /** Phone-room hosting (TV side). */
+  room: { code: string | null; joinUrl: string | null; problem: string | null; status: string; view: import('./net/protocol').RoomView | null; error: string | null } | null;
 }
 
 function safeGet(key: string): string | null {
@@ -194,6 +196,7 @@ let state: AppState = {
   hoverNode: null,
   editingPlayer: 0,
   placement: { seat: null, draft: null, confirmed: false },
+  room: null,
 };
 
 const listeners = new Set<() => void>();

@@ -2,6 +2,8 @@ import { CHALLENGE, EVENT_INFO, EVENT_TYPES, SCORING } from '../engine/config';
 import { undoInfo } from '../engine/engine';
 import { discardSave, doUndo, goToSetup, goToTitle, setState, updateSettings, useStore } from '../store';
 import { audio } from '../audio/audio';
+import { useState } from 'react';
+import { hostSend, leaveRoom } from '../net/host';
 import { Dialog } from './Dialog';
 
 export function RulesContent() {
@@ -150,10 +152,56 @@ function Settings() {
   );
 }
 
+function HostControls() {
+  const room = useStore((s) => s.room);
+  const [confirm, setConfirm] = useState(false);
+  const seats = room?.view?.seats ?? [];
+  return (
+    <div className="stack host-controls">
+      <p className="muted small">
+        Room {room?.code} — host controls. Undo is off in phone rooms; a restart starts a fresh game for everyone.
+      </p>
+      {seats
+        .filter((s) => s.kind === 'phone')
+        .map((s) => (
+          <div key={s.seat} className="row-btns">
+            <span>
+              {s.seat + 1}. {s.name} {s.connected ? '📱' : '📱 offline'}
+            </span>
+            <button className="btn tool" onClick={() => hostSend({ t: 'replaceWithBot', seat: s.seat })}>
+              Hand to a bot
+            </button>
+            <button className="btn tool" aria-pressed={!!s.localControl} onClick={() => hostSend({ t: 'localControl', seat: s.seat, on: !s.localControl })}>
+              {s.localControl ? 'Challenges on phone' : 'Challenges on TV keyboard'}
+            </button>
+          </div>
+        ))}
+      {confirm ? (
+        <div className="row-btns">
+          <button className="btn danger" onClick={() => { hostSend({ t: 'restart' }); setState({ modal: null }); }}>
+            Yes, restart for everyone
+          </button>
+          <button className="btn" onClick={() => setConfirm(false)}>
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button className="btn" onClick={() => setConfirm(true)}>
+          Restart the game…
+        </button>
+      )}
+      <button className="btn ghost" onClick={leaveRoom}>
+        Close the room
+      </button>
+    </div>
+  );
+}
+
 export function Modals() {
   const modal = useStore((s) => s.modal);
   const session = useStore((s) => s.session);
   const saveProblem = useStore((s) => s.saveProblem);
+  const mode = useStore((s) => s.mode);
   const close = () => setState({ modal: null });
   switch (modal) {
     case 'rules':
@@ -181,9 +229,11 @@ export function Modals() {
             <button className="btn" onClick={() => setState({ modal: 'settings' })}>
               Sound & motion
             </button>
-            <button className="btn" onClick={() => setState({ modal: 'confirmNew' })}>
-              New game…
-            </button>
+            {mode === 'room' ? <HostControls /> : (
+              <button className="btn" onClick={() => setState({ modal: 'confirmNew' })}>
+                New game…
+              </button>
+            )}
             <button className="btn ghost" onClick={goToTitle}>
               Back to title (game stays saved)
             </button>

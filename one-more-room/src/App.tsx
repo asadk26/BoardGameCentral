@@ -3,6 +3,7 @@ import { GameCanvas, webglAvailable } from './scene/Scene';
 import { Hud } from './ui/Hud';
 import { Modals } from './ui/Modals';
 import { Setup, Title } from './ui/Screens';
+import { RoomLobby } from './ui/RoomLobby';
 import { getState, toggleCamera, useStore } from './store';
 import { audio } from './audio/audio';
 
@@ -62,6 +63,7 @@ export function App() {
       <div className="overlay">
         {screen === 'title' && <Title />}
         {screen === 'setup' && <Setup />}
+        {screen === 'roomLobby' && <RoomLobby />}
         {screen === 'game' && <Hud />}
         <div className="landscape-hint" aria-hidden="true">
           Turn your device sideways for the best view.

@@ -18,6 +18,7 @@ import {
 import { judgeChallenge } from '../engine/engine';
 import type { Challenge, GameState } from '../engine/types';
 import { act, botInputsFor, getState, isBotSeat, KEY_SETS, setState, useStore } from '../store';
+import { hostSend, roomClient } from '../net/host';
 import { audio } from '../audio/audio';
 import { CHALLENGE_TITLES, challengeHowTo } from '../text';
 import { PlayerBadge } from './Dialog';
@@ -540,17 +541,62 @@ export function RopeGame({ ch, game, bots, pressRef, onDone, humans, spectator =
   );
 }
 
-/** Room mode on the TV: the phones play; the TV shows who and what. */
+/** Room mode on the TV: phones play; seats the host moved to the TV keyboard play here. */
 function SpectatorStage({ game }: { game: GameState }) {
   const ch = game.challenge!;
+  const room = useStore((s) => s.room);
+  const run = room?.view?.run;
+  const local = ch.participants.filter((p) => room?.view?.seats[p]?.localControl);
+  const [playing, setPlaying] = useState(false);
+  const pressRef = useRef<Press | null>(null);
+  const sent = useRef('');
+  const key = `${ch.id}:${run?.attempt ?? 0}`;
+  useEffect(() => setPlaying(false), [key]);
+  useEffect(() => {
+    if (!run?.startAt || !local.length) return;
+    const c = roomClient();
+    const ms = run.startAt - (c ? c.serverNow() : Date.now());
+    const t = window.setTimeout(() => setPlaying(true), Math.max(0, ms));
+    return () => clearTimeout(t);
+  }, [run?.startAt, local.length, key]);
+  useEffect(() => {
+    if (!playing || !local.length) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      const k = e.key.toLowerCase();
+      const who = local.length === 1 && (e.code === 'Space' || k === 'f') ? local[0] : k === 'f' ? local[0] : k === 'j' ? local[1] : undefined;
+      const dir = { arrowup: 0, arrowright: 1, arrowdown: 2, arrowleft: 3 }[k as 'arrowup'];
+      if (ch.kind === 'dance' && dir !== undefined) pressRef.current?.(local[0], dir);
+      else if (who !== undefined) pressRef.current?.(who);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [playing, local, ch.kind]);
+  const done = (inputs: Inputs) => {
+    if (sent.current === key) return;
+    sent.current = key;
+    for (const p of local) hostSend({ t: 'challengeInput', challengeId: ch.id, attempt: run?.attempt ?? 0, seat: p, inputs: inputs[p] ?? [] });
+    setPlaying(false);
+  };
+  const phones = ch.participants.filter((p) => !local.includes(p) && room?.view?.seats[p]?.kind === 'phone');
   return (
     <div className="challenge-stage spectator" role="status">
       <div className={`challenge-card kind-${ch.kind}`}>
         <span className="ch-kicker">{ch.oneSurvivor && ch.kind === 'duel' ? 'One survivor' : 'Survival challenge'}</span>
         <h2>{CHALLENGE_TITLES[ch.kind]}</h2>
         <p className="ch-host">{hostLine(ch, game)}</p>
-        <p>{challengeHowTo(ch.kind, ch.oneSurvivor)}</p>
-        <p className="muted">Playing on {ch.participants.map((p) => `${game.players[p].name}’s`).join(' and ')} {ch.participants.length > 1 ? 'phones' : 'phone'}…</p>
+        {!playing && <p>{challengeHowTo(ch.kind, ch.oneSurvivor)}</p>}
+        {run?.paused && <p className="notice">{run.paused}</p>}
+        {run?.note && <p className="muted small">{run.note}</p>}
+        {phones.length > 0 && !playing && <p className="muted">Playing on {phones.map((p) => `${game.players[p].name}’s`).join(' and ')} {phones.length > 1 ? 'phones' : 'phone'}…</p>}
+        {local.length > 0 && !playing && !run?.startAt && (
+          <button className="btn primary big" onClick={() => hostSend({ t: 'ready', challengeId: ch.id, attempt: run?.attempt ?? 0 })} disabled={local.every((p) => run?.ready.includes(p))}>
+            {local.every((p) => run?.ready.includes(p)) ? 'Ready ✓ — waiting for the others' : `Ready (TV keyboard: ${local.length > 1 ? 'F and J' : 'Space'})`}
+          </button>
+        )}
+        {playing && ch.kind === 'escape' && <EscapeGame ch={ch} bots={{}} pressRef={pressRef} onDone={done} human={local[0]} />}
+        {playing && ch.kind === 'dance' && <DanceGame ch={ch} bots={{}} pressRef={pressRef} onDone={done} human={local[0]} />}
+        {playing && (ch.kind === 'rope' || ch.kind === 'duel') && <RopeGame ch={ch} game={game} bots={{}} pressRef={pressRef} onDone={done} humans={local} />}
       </div>
     </div>
   );

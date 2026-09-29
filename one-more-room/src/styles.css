@@ -1496,3 +1496,37 @@ kbd {
   gap: 6px;
   font-size: 1.1rem;
 }
+.room-join {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.room-join .qr {
+  width: 180px;
+  height: 180px;
+  border-radius: 12px;
+}
+.room-code {
+  font-size: 3rem;
+  font-weight: 900;
+  letter-spacing: 0.2em;
+  margin: 4px 0;
+  color: var(--amber-2);
+}
+.join-url {
+  font-size: 0.85rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+.room-lobby select {
+  min-height: 44px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--ink);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 4px 8px;
+}
+.room-lobby .setup-players li {
+  grid-template-columns: auto 1fr auto;
+}

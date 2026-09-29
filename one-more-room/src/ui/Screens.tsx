@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { CHARACTERS, DEFAULT_PLAYER_NAMES, EVENT_INFO, EVENT_TYPES, MAX_PLAYERS, MIN_PLAYERS, ROOMS, TEXT_LIMITS } from '../engine/config';
 import { cleanText, defaultPersonalization } from '../engine/save';
 import { defaultBotProfile } from '../engine/bots';
+import { hostRoom } from '../net/host';
 import { goToSetup, goToTitle, resumeGame, savePrefs, setPersonalization, setState, startGame, useStore, getState } from '../store';
 import { PlayerBadge } from './Dialog';
 
@@ -24,10 +25,16 @@ export function Title() {
           <button className={`btn big ${hasSave ? '' : 'primary'}`} onClick={goToSetup}>
             {hasSave ? 'New game' : 'Play'}
           </button>
+          <button className="btn big" onClick={() => void hostRoom()}>
+            Host a phone room
+          </button>
           <button className="btn big ghost" onClick={() => setState({ modal: 'rules' })}>
             How to play
           </button>
         </div>
+        <p className="muted small">
+          Joining from a phone? Open <a href="#/join">Join on phone</a>.
+        </p>
         {problem && (
           <p className="notice" role="status">
             A saved game couldn’t be loaded.{' '}
