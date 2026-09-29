@@ -777,7 +777,7 @@ function Results({ game }: { game: GameState }) {
                   <td>{s.alive ? '—' : `+${s.bounty}`}</td>
                   <td>
                     <b>{s.total}</b>
-                    <span className="calc"> = {s.alive ? `${s.banked} + ${s.carriedHalf} + ${s.survivalBonus}` : `${s.banked} + ${s.bounty}`}</span>
+                    <span className="calc">= {s.alive ? `${s.banked} + ${s.carriedHalf} + ${s.survivalBonus}` : `${s.banked} + ${s.bounty}`}</span>
                   </td>
                 </tr>
               );

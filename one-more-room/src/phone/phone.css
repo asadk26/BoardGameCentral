@@ -216,3 +216,10 @@
 .presults li.win b {
   color: var(--amber-2);
 }
+.plink {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  margin-top: 8px;
+}

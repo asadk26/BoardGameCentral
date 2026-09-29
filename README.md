@@ -9,6 +9,12 @@ A home for board games played around one shared screen.
 `index.html` is the landing page. Each game lives in its own self-contained
 folder with its own `package.json`, tests and README.
 
+The Pages site plays One More Room on one shared screen, with any mix of
+people and bots. Phone controllers need the game's small room service, which
+Pages cannot host. Run it on a laptop on the same Wi-Fi with
+`npm run build && npm run room` inside `one-more-room/`, or deploy it with the
+included `Dockerfile`. See [`one-more-room/README.md`](one-more-room/README.md).
+
 ## Publishing
 
 `.github/workflows/pages.yml` runs the game's tests and build on every push

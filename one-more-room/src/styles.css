@@ -1045,7 +1045,7 @@ kbd {
     justify-content: flex-end;
   }
   .results {
-    width: min(600px, 50%);
+    width: min(680px, 50%);
     max-height: calc(100% - 24px);
   }
 }
@@ -1153,6 +1153,14 @@ kbd {
 
 .results td {
   white-space: nowrap;
+}
+.results th,
+.results td {
+  padding: 6px 6px;
+}
+.results .calc {
+  display: block;
+  font-size: 0.75rem;
 }
 @media (max-width: 1199px) {
   .results {

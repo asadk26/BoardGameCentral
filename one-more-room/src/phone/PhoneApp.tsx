@@ -83,6 +83,9 @@ export function PhoneApp() {
           play on one screen with the mouse, keyboard and bots.
         </p>
         <p className="muted">To use phones at a party, run the room service on the TV’s computer (see the game’s README) and scan the QR code it shows.</p>
+        <a className="pbtn primary big plink" href="./">
+          Play on this screen
+        </a>
       </Shell>
     );
 
