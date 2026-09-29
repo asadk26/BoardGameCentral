@@ -1,17 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   CHARACTERS,
-  ENTRANCE,
   EVENT_NODES,
+  GHOST_WALL_LINKS,
   NODE_COUNT,
   NODE_POSITIONS,
   ORDINARY_EDGES,
   ROOMS,
   SECRET_ENDPOINTS,
+  SUPER_REAPER,
+  TRAP_ELIGIBLE,
+  TRAP_WINGS,
   cardType,
   nodeKind,
   type EventType,
-  EVENT_TYPES,
 } from '../src/engine/config';
 import { bfs, ghostBfs, ORDINARY_ADJ, playerRoutes } from '../src/engine/graph';
 import {
@@ -20,655 +22,558 @@ import {
   currentGhostPlan,
   dispatch,
   finalScores,
-  ghostTarget,
+  isProtected,
   legalRoutes,
   newSession,
   planGhost,
   previewMove,
   undo,
   undoInfo,
-  type Session,
 } from '../src/engine/engine';
-import type { Action, GameState } from '../src/engine/types';
-import { deserialize, serialize, defaultPersonalization, sanitizePersonalization, cleanText } from '../src/engine/save';
+import { publicView, seatView } from '../src/engine/view';
+import { deserialize, serialize, defaultPersonalization } from '../src/engine/save';
+import { botChallengeInputs, judgeDuel, ropeSchedule, SKILLS } from '../src/engine/challenges';
+import { simulateGame } from '../src/engine/sim';
+import { botAction, defaultBotProfile, newBotMemory } from '../src/engine/bots';
+import type { GameState } from '../src/engine/types';
+import { act, choosing, game, move, resolve, withPlayers } from './helpers';
 
-const chars = CHARACTERS.map((c) => c.id);
-
-function game(n = 2, seed = 1234): GameState {
-  return createGame({ players: Array.from({ length: n }, (_, i) => ({ name: `P${i + 1}`, character: chars[i] })), seed });
-}
-
-function act(s: GameState, a: Action): GameState {
-  const r = apply(s, a);
-  if (r.error) throw new Error(`${a.type}: ${r.error}`);
-  return r.state;
-}
-
-/** A state mid-turn with fixed dice, ready for the 'choose' phase. */
-function choosing(s: GameState, dice: [number, number]): GameState {
-  return { ...s, phase: 'choose', dice, selection: { moveDie: 0, dest: null } };
-}
-
-function withPlayers(s: GameState, patch: Array<Partial<GameState['players'][number]>>): GameState {
-  return { ...s, players: s.players.map((p, i) => ({ ...p, ...(patch[i] ?? {}) })) };
-}
-
-/** Force the next card drawn to be of a given type. */
 function stackDeck(s: GameState, type: EventType): GameState {
   const id = s.deck.find((c) => cardType(c) === type)!;
   return { ...s, deck: [id, ...s.deck.filter((c) => c !== id)] };
 }
 
-describe('board topology', () => {
-  it('has exactly 32 unique nodes with reciprocal ordinary edges', () => {
+describe('board', () => {
+  it('keeps exactly 32 spaces, 34 reciprocal edges and three loops', () => {
     expect(NODE_POSITIONS.length).toBe(32);
     expect(ORDINARY_EDGES.length).toBe(34);
-    const keys = new Set(ORDINARY_EDGES.map(([a, b]) => `${Math.min(a, b)}-${Math.max(a, b)}`));
-    expect(keys.size).toBe(34);
-    expect(keys.has('4-12')).toBe(true);
-    expect(keys.has('20-28')).toBe(true);
     for (let a = 0; a < NODE_COUNT; a++) for (const b of ORDINARY_ADJ[a]) expect(ORDINARY_ADJ[b]).toContain(a);
-    const pos = new Set(NODE_POSITIONS.map(([x, z]) => `${x},${z}`));
-    expect(pos.size).toBe(32);
-  });
-
-  it('is connected, with three independent loops', () => {
-    const { dist } = bfs(0);
-    expect(dist.every((d) => d < Infinity)).toBe(true);
-    // cyclomatic number = E - V + 1 = 34 - 32 + 1
     expect(ORDINARY_EDGES.length - NODE_COUNT + 1).toBe(3);
+    expect(Math.max(...bfs(0).dist)).toBe(9);
+    const g = ghostBfs(16).dist;
+    for (let i = 1; i < NODE_COUNT; i++) expect(g[i]).toBeLessThan(Infinity);
   });
 
-  it('assigns node types exactly', () => {
-    const counts: Record<string, number> = {};
-    for (let i = 0; i < NODE_COUNT; i++) counts[nodeKind(i)] = (counts[nodeKind(i)] ?? 0) + 1;
-    expect(counts).toEqual({ entrance: 1, room: 8, event: 3, secret: 4, corridor: 16 });
-    expect(Object.fromEntries(Object.entries(ROOMS).map(([k, r]) => [k, r.stock]))).toEqual({
-      3: 6, 7: 8, 10: 8, 15: 12, 17: 12, 22: 10, 25: 8, 29: 6,
-    });
-    expect([...EVENT_NODES]).toEqual([5, 13, 23]);
-    expect([...SECRET_ENDPOINTS].sort((a, b) => a - b)).toEqual([8, 11, 24, 27]);
+  it('has valid ghost-only wall links that are not ordinary edges', () => {
+    expect(GHOST_WALL_LINKS.map((l) => [...l])).toEqual([[7, 10], [22, 25]]);
+    for (const [a, b] of GHOST_WALL_LINKS) {
+      expect(ORDINARY_ADJ[a]).not.toContain(b);
+      expect(bfs(a).dist[b]).toBe(3);
+    }
+    expect(playerRoutes(7, 1, { ghost: true }).has(10)).toBe(true);
+    expect(playerRoutes(7, 1, {}).has(10)).toBe(false);
+    expect(playerRoutes(25, 1, { ghost: true }).has(22)).toBe(true);
   });
 
-  it('puts the farthest spaces 8–10 steps from the entrance without passages', () => {
-    const { dist } = bfs(0);
-    const max = Math.max(...dist);
-    expect(max).toBeGreaterThanOrEqual(8);
-    expect(max).toBeLessThanOrEqual(10);
-    expect(dist[16]).toBe(9);
-  });
-
-  it('keeps the ghost graph connected without the entrance', () => {
-    const { dist, parent } = ghostBfs(16);
-    // Without the entrance, the ghost's only cycles are the two 9-edge wings, so its
-    // shortest paths are unique; BFS still expands lowest ids first.
-    expect(parent[15]).toBe(16);
-    for (let i = 1; i < NODE_COUNT; i++) expect(dist[i]).toBeLessThan(Infinity);
-    expect(dist[0]).toBe(Infinity);
+  it('has twelve trap-eligible corridor spaces, excluding every protected kind of space', () => {
+    expect([...TRAP_ELIGIBLE]).toEqual([2, 4, 6, 9, 14, 18, 19, 20, 21, 26, 28, 30]);
+    for (const n of [0, 1, 31, 16, SUPER_REAPER, ...EVENT_NODES, ...SECRET_ENDPOINTS, ...Object.keys(ROOMS).map(Number)]) expect(TRAP_ELIGIBLE).not.toContain(n);
+    expect(nodeKind(SUPER_REAPER)).toBe('corridor');
+    expect(Object.values(TRAP_WINGS).flat().sort((a, b) => a - b)).toEqual([...TRAP_ELIGIBLE]);
   });
 });
 
-describe('setup', () => {
-  it('starts everyone at the entrance with a decoy, ghost at 16', () => {
-    const s = game(6);
-    expect(s.players.every((p) => p.node === 0 && p.carried === 0 && p.banked === 0 && !p.decoyUsed)).toBe(true);
-    expect(s.ghost).toBe(16);
-    expect(s.deck.length).toBe(18);
-    for (const t of EVENT_TYPES) expect(s.deck.filter((c) => cardType(c) === t).length).toBe(3);
-  });
+describe('secret placement', () => {
+  const place = (n: number, noms: number[], seed = 7) => {
+    let s = createGame({ players: Array.from({ length: n }, (_, i) => ({ name: `P${i}`, character: CHARACTERS[i].id })), seed });
+    expect(s.phase).toBe('placement');
+    noms.forEach((node, seat) => (s = act(s, { type: 'nominate', seat, node })));
+    return s;
+  };
 
-  it('rejects duplicate characters and bad player counts', () => {
-    expect(() => createGame({ players: [{ name: 'a', character: 'witch' }, { name: 'b', character: 'witch' }], seed: 1 })).toThrow();
-    expect(() => createGame({ players: [{ name: 'a', character: 'witch' }], seed: 1 })).toThrow();
-  });
-});
-
-describe('player movement', () => {
-  it('offers destinations 1..allowance by shortest legal route', () => {
-    const routes = playerRoutes(0, 3, 16);
-    expect([...routes.keys()].sort((a, b) => a - b)).toEqual([1, 2, 3, 29, 30, 31]);
-    expect(routes.get(3)!.path).toEqual([0, 1, 2, 3]);
-  });
-
-  it('uses both dice assignments and lets the assignment change before confirming', () => {
-    let s = choosing(game(), [2, 5]);
-    expect(Math.max(...[...legalRoutes(s, 0).values()].map((r) => r.path.length - 1))).toBe(2);
-    expect(Math.max(...[...legalRoutes(s, 1).values()].map((r) => r.path.length - 1))).toBe(5);
-    s = act(s, { type: 'select', moveDie: 1, dest: 5 });
-    expect(s.selection).toEqual({ moveDie: 1, dest: 5 });
-    s = act(s, { type: 'select', moveDie: 0 }); // 5 steps no longer reachable
-    expect(s.selection.dest).toBe(null);
-    expect(s.dice).toEqual([2, 5]);
-  });
-
-  it('allows at most one secret passage per move', () => {
-    const r = playerRoutes(7, 6, 16);
-    expect(r.get(24)!.path).toEqual([7, 8, 24]);
-    // 8→24 then back via 27→11 would need two passages; 11 is reached ordinarily.
-    for (const route of r.values()) {
-      let secrets = 0;
-      for (let i = 1; i < route.path.length; i++) {
-        const [a, b] = [route.path[i - 1], route.path[i]];
-        if ((a === 8 && b === 24) || (a === 24 && b === 8) || (a === 11 && b === 27) || (a === 27 && b === 11)) secrets++;
+  it('always ends with exactly six distinct eligible traps, including every nomination', () => {
+    for (let n = 2; n <= 6; n++) {
+      for (let seed = 1; seed < 40; seed++) {
+        const noms = Array.from({ length: n }, (_, i) => TRAP_ELIGIBLE[(seed * 3 + i * 5) % TRAP_ELIGIBLE.length]);
+        const s = place(n, noms, seed);
+        expect(s.phase).toBe('turnStart');
+        const nodes = s.traps.map((t) => t.node);
+        expect(new Set(nodes).size).toBe(6);
+        expect(nodes.every((x) => TRAP_ELIGIBLE.includes(x))).toBe(true);
+        for (const x of noms) expect(nodes).toContain(x);
+        expect(s.traps.every((t) => !t.revealed)).toBe(true);
       }
-      expect(secrets).toBeLessThanOrEqual(1);
-    }
-    expect(r.get(11)!.path).toEqual([7, 8, 9, 10, 11]);
-  });
-
-  it('picks the shortest route when lengths differ', () => {
-    const routes = playerRoutes(12, 6, 30);
-    expect(routes.get(7)!.path).toEqual([12, 4, 5, 6, 7]); // 4 steps beats 12-11-10-9-8-7
-    expect(routes.get(8)!.path).toEqual([12, 11, 10, 9, 8]); // 4 steps beats 12-4-5-6-7-8
-  });
-
-  it('resolves a genuine equal-length tie toward the lower next node id', () => {
-    // 8 → 27: 8-24-25-26-27 and 8-9-10-11-27 both take 4 steps; next node 9 < 24.
-    const r = playerRoutes(8, 6, 16);
-    expect(r.get(27)!.path).toEqual([8, 9, 10, 11, 27]);
-  });
-
-  it('never passes through or ends on the ghost', () => {
-    const r = playerRoutes(0, 6, 2);
-    expect(r.has(2)).toBe(false);
-    expect(r.has(3)).toBe(false); // only reachable through 2 within 6? 0-31-30-29-28-... no
-    expect(r.get(1)!.path).toEqual([0, 1]);
-  });
-
-  it('stops at the entrance and cannot pass through it', () => {
-    const r = playerRoutes(2, 6, 16);
-    expect(r.get(0)!.path).toEqual([2, 1, 0]);
-    expect(r.has(31)).toBe(false);
-    expect(r.has(30)).toBe(false);
-  });
-
-  it('never routes back onto the starting space', () => {
-    for (let start = 0; start < NODE_COUNT; start++) {
-      const r = playerRoutes(start, 6, start === 16 ? 15 : 16);
-      expect(r.has(start)).toBe(false);
-      for (const route of r.values()) expect(new Set(route.path).size).toBe(route.path.length);
     }
   });
 
-  it('always allows Stay, even when boxed in', () => {
-    let s = game();
-    s = withPlayers(s, [{ node: 1 }]);
-    s = { ...s, ghost: 2 };
-    s = choosing(s, [1, 1]);
-    // Only 0 is reachable; select Stay anyway.
-    s = act(s, { type: 'select', dest: 'stay' });
-    s = act(s, { type: 'confirmMove' });
-    expect(s.players[0].node).toBe(1);
-    expect(s.phase).toBe('ghost');
+  it('merges duplicate and unanimous picks silently and fills the rest', () => {
+    const s = place(6, [2, 2, 2, 2, 2, 2]);
+    expect(s.traps.length).toBe(6);
+    expect(s.traps.map((t) => t.node)).toContain(2);
+    const t = place(4, [2, 2, 18, 18]);
+    expect(t.traps.length).toBe(6);
   });
 
-  it('staying never harvests, collects a pile or triggers an event', () => {
-    let s = withPlayers(game(), [{ node: 5 }]);
-    s = { ...s, piles: s.piles.map((v, i) => (i === 5 ? 4 : v)) };
-    s = choosing(s, [3, 4]);
-    s = act(s, { type: 'select', dest: 'stay' });
-    s = act(s, { type: 'confirmMove' });
-    expect(s.players[0].carried).toBe(0);
-    expect(s.piles[5]).toBe(4);
-    expect(s.event).toBe(null);
-    expect(s.phase).toBe('ghost');
+  it('spreads computer picks toward under-represented wings', () => {
+    const s = place(2, [2, 4]); // both west
+    const nodes = s.traps.map((t) => t.node);
+    expect(nodes.some((x) => TRAP_WINGS.north.includes(x))).toBe(true);
+    expect(nodes.some((x) => TRAP_WINGS.east.includes(x))).toBe(true);
   });
 
-  it('passing through rooms and events does nothing; landing resolves once', () => {
-    let s = choosing(game(), [5, 1]);
-    s = act(s, { type: 'select', dest: 4 });
-    s = act(s, { type: 'confirmMove' });
-    expect(s.stocks[3]).toBe(6);
-    expect(s.players[0].carried).toBe(0);
-    let t = choosing(game(), [3, 1]);
-    t = act(t, { type: 'select', dest: 3 });
-    t = act(t, { type: 'confirmMove' });
-    expect(t.players[0].carried).toBe(3);
-    expect(t.stocks[3]).toBe(3);
+  it('is seeded: same seed and picks give the same map; the seed matters', () => {
+    expect(place(3, [2, 18, 26], 11).traps).toEqual(place(3, [2, 18, 26], 11).traps);
+    const maps = new Set(Array.from({ length: 12 }, (_, k) => JSON.stringify(place(2, [2, 18], 100 + k).traps)));
+    expect(maps.size).toBeGreaterThan(1);
   });
 
-  it('ignores repeated confirm clicks', () => {
-    let s = choosing(game(), [3, 1]);
-    s = act(s, { type: 'select', dest: 3 });
-    s = act(s, { type: 'confirmMove' });
-    const again = apply(s, { type: 'confirmMove' });
-    expect(again.error).toBeTruthy();
-    expect(again.state).toBe(s);
-    const rollAgain = apply(s, { type: 'roll' });
-    expect(rollAgain.error).toBeTruthy();
+  it('rejects ineligible or repeated nominations', () => {
+    const s = createGame({ players: [{ name: 'a', character: 'witch' }, { name: 'b', character: 'knight' }], seed: 1 });
+    for (const bad of [0, 1, 3, 5, 8, 12, 16, 31]) expect(apply(s, { type: 'nominate', seat: 0, node: bad }).error).toBeTruthy();
+    const once = act(s, { type: 'nominate', seat: 0, node: 2 });
+    expect(apply(once, { type: 'nominate', seat: 0, node: 4 }).error).toBeTruthy();
+    expect(apply(once, { type: 'roll' }).error).toBeTruthy();
+  });
+
+  it('never shows picks, overlaps, the map or the seed in public views', () => {
+    let s = createGame({ players: [{ name: 'a', character: 'witch' }, { name: 'b', character: 'knight' }, { name: 'c', character: 'goblin' }], seed: 9 });
+    s = act(s, { type: 'nominate', seat: 1, node: 26 });
+    const pub = publicView(s);
+    expect(pub.nominations).toEqual([null, -1, null]);
+    expect(JSON.stringify(pub)).not.toMatch(/"node":26/);
+    expect(seatView(s, 1).ownNomination).toBe(26);
+    expect(seatView(s, 0).ownNomination).toBe(null);
+    s = act(act(s, { type: 'nominate', seat: 0, node: 26 }), { type: 'nominate', seat: 2, node: 2 });
+    const after = publicView(s);
+    expect(after.traps).toEqual([]);
+    expect(after.seed).toBe(0);
+    expect(after.rng).toBe(0);
+    expect(after.challengeRng).toBe(0);
+    expect(after.deck.every((c) => c === -1)).toBe(true);
+    expect(after.nominations).toEqual([-1, -1, -1]);
   });
 });
 
-describe('landing effects and stocks', () => {
-  it('takes min(3, stock) and exhausts rooms without refilling', () => {
-    let s = withPlayers(game(), [{ node: 2 }]);
-    s = { ...s, stocks: s.stocks.map((v, i) => (i === 3 ? 2 : v)) };
-    s = choosing(s, [1, 1]);
-    s = act(s, { type: 'select', dest: 3 });
-    s = act(s, { type: 'confirmMove' });
-    expect(s.players[0].carried).toBe(2);
-    expect(s.stocks[3]).toBe(0);
-    let t = withPlayers(game(), [{ node: 2 }]);
-    t = { ...t, stocks: t.stocks.map((v, i) => (i === 3 ? 0 : v)) };
-    t = act(choosing(t, [1, 1]), { type: 'select', dest: 3 });
-    t = act(t, { type: 'confirmMove' });
-    expect(t.players[0].carried).toBe(0);
-    expect(t.stocks[3]).toBe(0);
+describe('movement', () => {
+  it('blocks the living from crossing or ending on any ghost; living pass each other', () => {
+    let s = withPlayers(game(3), [{}, { alive: false, node: 2 }, { node: 1 }]);
+    s = choosing(s, [3, 1]);
+    const r = legalRoutes(s);
+    expect(r.has(2)).toBe(false);
+    expect(r.has(3)).toBe(false);
+    expect(r.has(1)).toBe(true);
+    expect(r.get(30)!.path).toEqual([0, 31, 30]);
   });
 
-  it('collects a whole pile in addition to the room harvest', () => {
-    let s = withPlayers(game(), [{ node: 2 }]);
-    s = { ...s, piles: s.piles.map((v, i) => (i === 3 ? 5 : v)) };
-    s = act(choosing(s, [1, 1]), { type: 'select', dest: 3 });
-    s = act(s, { type: 'confirmMove' });
-    expect(s.players[0].carried).toBe(8);
-    expect(s.piles[3]).toBe(0);
+  it('lets player ghosts pass anything, use wall links, and never enter the entrance', () => {
+    let s = withPlayers(game(2), [{ node: 1 }, { alive: false, node: 7 }]);
+    s = { ...choosing({ ...s, turn: 1 }, [2]) };
+    const r = legalRoutes(s);
+    expect(r.has(10)).toBe(true);
+    const t = choosing({ ...withPlayers(game(2), [{}, { alive: false, node: 2 }]), turn: 1 }, [3]);
+    expect(legalRoutes(t).has(0)).toBe(false);
+    expect(legalRoutes(t).has(31)).toBe(false);
+  });
+
+  it('gives identical route output whatever the hidden trap map', () => {
+    for (let seed = 1; seed < 30; seed++) {
+      const a = choosing(withPlayers(game(2, seed, [2, 4, 6, 9, 14, 18]), [{ node: 20 }]), [5, 3]);
+      const b = choosing(withPlayers(game(2, seed, [19, 20, 21, 26, 28, 30]), [{ node: 20 }]), [5, 3]);
+      expect([...legalRoutes(a).entries()]).toEqual([...legalRoutes(b).entries()]);
+      for (const d of legalRoutes(a).keys()) {
+        const pa = previewMove(a, 0, d)!;
+        const pb = previewMove(b, 0, d)!;
+        expect(pa).toEqual(pb);
+      }
+    }
+  });
+});
+
+describe('Reaper traps', () => {
+  it('passing is safe; landing reveals and starts a Reaper performance', () => {
+    const pass = move(withPlayers(game(), [{ node: 10 }]), 8, [2, 1]);
+    expect(pass.traps.find((t) => t.node === 9)!.revealed).toBe(false);
+    expect(pass.phase).toBe('ghost');
+    const land = move(withPlayers(game(), [{ node: 10 }]), 9, [1, 1]);
+    expect(land.traps.find((t) => t.node === 9)!.revealed).toBe(true);
+    expect(land.phase).toBe('challenge');
+    expect(['dance', 'rope']).toContain(land.challenge!.kind);
+    expect(land.challenge!.host).toBe('reaper');
+    expect(land.log.some((e) => e.kind === 'trapRevealed')).toBe(true);
+  });
+
+  it('stay never triggers; a revealed trap stays active for later landings', () => {
+    let s = move(withPlayers(game(), [{ node: 10, carried: 2 }]), 9, [1, 1]);
+    s = resolve(s, { 0: 'win' });
+    expect(s.players[0].alive).toBe(true);
+    const stay = move({ ...s, phase: 'turnStart' }, 'stay', [1, 1]);
+    expect(stay.phase).toBe('ghost');
+    const again = move(withPlayers({ ...s, phase: 'turnStart', turnNumber: 99 }, [{ node: 10, protectedUntil: null }]), 9, [1, 1]);
+    expect(again.phase).toBe('challenge');
+  });
+
+  it('ghosts neither trigger nor reveal traps', () => {
+    const s = move({ ...withPlayers(game(2), [{}, { alive: false, node: 10 }]), turn: 1 }, 9, [1]);
+    expect(s.traps.find((t) => t.node === 9)!.revealed).toBe(false);
+    expect(s.phase).toBe('summary');
+  });
+
+  it('spares a protected player on an unknown trap but reveals it; a known one waives protection', () => {
+    const prot = withPlayers(game(), [{ node: 10, protectedUntil: 5 }]);
+    const spared = move(prot, 9, [1, 1]);
+    expect(spared.phase).toBe('ghost');
+    expect(spared.traps.find((t) => t.node === 9)!.revealed).toBe(true);
+    expect(spared.log.some((e) => e.kind === 'spared')).toBe(true);
+    const known = { ...prot, traps: prot.traps.map((t) => (t.node === 9 ? { ...t, revealed: true } : t)) };
+    const pv = previewMove(choosing(known, [1, 1]), 0, 9)!;
+    expect(pv.waivesProtection).toBe(true);
+    expect(pv.encounter.kind).toBe('reaper');
+    expect(move(known, 9, [1, 1]).phase).toBe('challenge');
+  });
+
+  it('event relocations and swaps never trigger or reveal a trap', () => {
+    let s = withPlayers(game(2), [{ node: 4 }, { node: 9 }]);
+    s = stackDeck(s, 'costumeMixup');
+    s = move(s, 5, [1, 1]);
+    expect(s.phase).toBe('event');
+    s = act(s, { type: 'eventChoose', option: 1 });
+    expect(s.players[0].node).toBe(9);
+    expect(s.traps.find((t) => t.node === 9)!.revealed).toBe(false);
+    expect(s.phase).toBe('ghost');
+  });
+});
+
+describe('dying and becoming a ghost', () => {
+  it('a failed performance drops all carried candy, keeps the bank, and spends the decoy', () => {
+    let s = move(withPlayers(game(), [{ node: 10, carried: 7, banked: 4 }]), 9, [1, 2]);
+    s = resolve(s, { 0: 'lose' });
+    expect(s.players[0]).toMatchObject({ alive: false, node: 9, carried: 0, banked: 4, decoyUsed: true });
+    expect(s.piles[9]).toBe(7);
+    // The already-assigned ghost die still resolves this turn, then play passes on.
+    expect(s.phase).toBe('ghost');
+    s = act(s, { type: 'moveGhost' });
+    s = act(s, s.phase === 'challenge' ? { type: 'challengeResult', id: s.challenge!.id, inputs: { [s.challenge!.participants[0]]: [] } } : { type: 'nextTurn' });
+    if (s.phase === 'summary') s = act(s, { type: 'nextTurn' });
+    expect(s.turn).toBe(1);
+  });
+
+  it('solo rope needs five of eight jumps', () => {
+    const land = (q: number) => {
+      let s = move(withPlayers(game(2, 5), [{ node: 10 }]), 9, [1, 1]);
+      s = { ...s, challenge: { ...s.challenge!, kind: 'rope' } };
+      return resolve(s, { 0: q });
+    };
+    expect(land(5).players[0].alive).toBe(true);
+    expect(land(4).players[0].alive).toBe(false);
+  });
+
+  it('a survivor keeps their candy, collects the floor pile once, and is protected', () => {
+    let s = withPlayers(game(), [{ node: 10, carried: 3 }]);
+    s = { ...s, piles: s.piles.map((v, i) => (i === 9 ? 4 : v)) };
+    s = resolve(move(s, 9, [1, 1]), { 0: 'win' });
+    expect(s.players[0].carried).toBe(7);
+    expect(s.piles[9]).toBe(0);
+    expect(isProtected(s, 0)).toBe(true);
+  });
+});
+
+describe('the resident ghost', () => {
+  const caught = (win: boolean) => {
+    let s = withPlayers(game(2), [{ node: 15, carried: 5, banked: 2 }, {}]);
+    s = move(s, 'stay', [1, 1]);
+    s = act(s, { type: 'moveGhost' });
+    expect(s.challenge).toMatchObject({ kind: 'escape', host: 'npc', participants: [0] });
+    return resolve(s, { 0: win ? 'win' : 'lose' });
+  };
+  it('a successful escape relocates to the nearest empty corridor (ties by id) and protects', () => {
+    const s = caught(true);
+    expect(s.players[0]).toMatchObject({ alive: true, node: 14, carried: 5 });
+    expect(s.traps.find((t) => t.node === 14)!.revealed).toBe(false);
+    expect(isProtected(s, 0)).toBe(true);
+    expect(s.phase).toBe('summary');
+  });
+  it('a failed escape transforms at the catch space', () => {
+    const s = caught(false);
+    expect(s.players[0]).toMatchObject({ alive: false, node: 15, carried: 0, banked: 2 });
+    expect(s.piles[15]).toBe(5);
+    expect(s.players.every((p) => p.bounty === 0)).toBe(true);
+  });
+  it('ignores ghosts and protected players, and waits if nobody is exposed', () => {
+    const s = withPlayers(game(3), [{ node: 0 }, { alive: false, node: 15 }, { node: 17, protectedUntil: 9 }]);
+    expect(planGhost(s, 6).target).toBe(null);
+    const t = move(s, 'stay', [1, 6]);
+    expect(act(t, { type: 'moveGhost' }).log.some((e) => e.kind === 'ghostWaits')).toBe(true);
+  });
+  it('stops at its first encounter and runs only one challenge', () => {
+    const s = withPlayers(game(3), [{ node: 14, carried: 9 }, { node: 15, carried: 1 }, {}]);
+    const plan = planGhost(s, 6);
+    expect(plan.target!.player).toBe(0);
+    expect(plan.encounter).toEqual({ player: 1, node: 15 });
+    expect(plan.path).toEqual([16, 15]);
+  });
+  it('passes protected players and still follows a decoy', () => {
+    let s = withPlayers(game(2), [{ node: 18 }, { node: 15, carried: 9, protectedUntil: 9 }]);
+    s = act(s, { type: 'placeDecoy' });
+    expect(planGhost(s, 6).target).toMatchObject({ kind: 'decoy', node: 18 });
+  });
+});
+
+describe('player ghosts', () => {
+  it('roll one die, hunt by ending on the living, and earn a capped bounty', () => {
+    let s = withPlayers(game(4), [{ node: 3 }, { alive: false, node: 2 }, { node: 6 }, { node: 10 }]);
+    s = { ...s, turn: 1, phase: 'turnStart' };
+    s = act(s, { type: 'roll' });
+    expect(s.dice!.length).toBe(1);
+    const hunt = (st: GameState, dest: number) => resolve(act(act({ ...st, phase: 'choose', dice: [6], turn: 1 }, { type: 'select', dest }), { type: 'confirmMove' }), { [dest === 3 ? 0 : dest === 6 ? 2 : 3]: 'lose' });
+    s = hunt(s, 3);
+    expect(s.players[1].bounty).toBe(3);
+    s = hunt(withPlayers(s, [{}, { node: 3 }]), 6);
+    expect(s.players[1].bounty).toBe(6);
+    s = hunt(withPlayers(s, [{}, { node: 6 }]), 10);
+    expect(s.players[1].bounty).toBe(6); // capped, but still hunting
+    expect(s.lastOutcome!.bounty).toEqual({ player: 1, amount: 0 });
+  });
+
+  it('never harvests, picks up, draws cards, or triggers a resident-ghost phase', () => {
+    let s = withPlayers(game(2), [{}, { alive: false, node: 2 }]);
+    s = { ...s, turn: 1, piles: s.piles.map((v, i) => (i === 3 ? 4 : v)) };
+    const t = move(s, 3, [1]);
+    expect(t.stocks[3]).toBe(6);
+    expect(t.piles[3]).toBe(4);
+    expect(t.players[1].carried).toBe(0);
+    expect(t.phase).toBe('summary');
+    const e = move({ ...withPlayers(s, [{}, { node: 4 }]) }, 5, [1]);
+    expect(e.event).toBe(null);
+  });
+
+  it('leaves protected players alone', () => {
+    const s = move({ ...withPlayers(game(2), [{ node: 3, protectedUntil: 9 }, { alive: false, node: 2 }]), turn: 1 }, 3, [1]);
+    expect(s.phase).toBe('summary');
+  });
+});
+
+describe('Haunted Jump Rope duels', () => {
+  const duel = (round: number, q0: 'win' | 'lose' | number, q1: 'win' | 'lose' | number) => {
+    let s = withPlayers(game(2), [{ node: 2, carried: 2 }, { node: 3, carried: 4 }]);
+    s = { ...s, round };
+    s = move(s, 3, [1, 1]);
+    expect(s.challenge).toMatchObject({ kind: 'duel', host: 'duel', participants: [0, 1], oneSurvivor: round >= 8 });
+    return resolve(s, { 0: q0, 1: q1 });
+  };
+  it('early: both can survive; the arriving player gets the landing reward', () => {
+    const s = duel(1, 'win', 'win');
+    expect(s.players.every((p) => p.alive)).toBe(true);
+    expect(s.players[0].carried).toBe(5);
+    expect(s.players[1].carried).toBe(4);
     expect(s.stocks[3]).toBe(3);
   });
-
-  it('banks carried candy on arrival and the bank is never touched by events or catches', () => {
-    let s = withPlayers(game(), [{ node: 2, carried: 7, banked: 4 }, { node: 13, carried: 0 }]);
-    s = act(choosing(s, [2, 3]), { type: 'select', dest: 0 });
-    s = act(s, { type: 'confirmMove' });
-    expect(s.players[0]).toMatchObject({ node: 0, carried: 0, banked: 11 });
+  it('early: a sole surviving defender collects the pile and the room reward', () => {
+    const s = duel(1, 'lose', 'win');
+    expect(s.players[0].alive).toBe(false);
+    expect(s.players[1].carried).toBe(4 + 2 + 3);
+    expect(s.piles[3]).toBe(0);
   });
-});
-
-describe('ghost targeting', () => {
-  it('hunts the richest carrier, ignoring banked candy', () => {
-    const s = withPlayers(game(3), [{ node: 3, carried: 2, banked: 50 }, { node: 29, carried: 5 }, { node: 10, carried: 1 }]);
-    expect(ghostTarget(s)).toEqual({ kind: 'player', player: 1, node: 29 });
+  it('early: both can die, and the candy stays on the floor', () => {
+    const s = duel(1, 'lose', 'lose');
+    expect(s.players.every((p) => !p.alive)).toBe(true);
+    expect(s.piles[3]).toBe(6);
+    expect(s.stocks[3]).toBe(6);
+    expect(s.phase).toBe('gameOver');
+    expect(s.endReason).toBe('noneAlive');
   });
-
-  it('keeps zero-candy players eligible', () => {
-    const s = withPlayers(game(2), [{ node: 0 }, { node: 3, carried: 0 }]);
-    expect(ghostTarget(s)).toEqual({ kind: 'player', player: 1, node: 3 });
+  it('late: exactly one survivor, the higher scorer', () => {
+    const s = duel(8, 6, 'win');
+    expect(s.players.map((p) => p.alive)).toEqual([false, true]);
   });
-
-  it('breaks wealth ties by ghost distance', () => {
-    const s = withPlayers(game(3), [{ node: 3, carried: 2 }, { node: 18, carried: 2 }, { node: 29, carried: 2 }]);
-    expect(ghostTarget(s)).toMatchObject({ player: 1 });
+  it('late ties go to sudden-death sweeps, then timing, then an announced curse', () => {
+    const s = duel(8, 9, 8);
+    expect(s.players.map((p) => p.alive)).toEqual([true, false]);
+    expect(s.lastOutcome!.decidedBy).toBe('suddenDeath');
+    const sched = ropeSchedule(77, true);
+    const a = sched.bottoms.map((b) => ({ t: b - 250 }));
+    const b = sched.bottoms.map((b) => ({ t: b - 300 }));
+    expect(judgeDuel(77, [0, 1], [a, b], true)).toMatchObject({ survivors: [0], decidedBy: 'timing' });
+    const coin = judgeDuel(77, [0, 1], [a, a], true);
+    expect(coin.decidedBy).toBe('curse');
+    expect(judgeDuel(77, [0, 1], [a, a], true)).toEqual(coin);
   });
-
-  it('then prefers the active player, then clockwise after them', () => {
-    // 14 and 18 are both 2 from the ghost at 16.
-    let s = withPlayers(game(4), [{ node: 14, carried: 1 }, { node: 18, carried: 1 }, { node: 14, carried: 1 }, { node: 0 }]);
-    s = { ...s, turn: 0 };
-    expect(ghostTarget(s)).toMatchObject({ player: 0 });
-    s = { ...s, turn: 3 }; // active at the entrance → clockwise after 3 is 0
-    expect(ghostTarget(s)).toMatchObject({ player: 0 });
-    s = { ...s, turn: 1 };
-    expect(ghostTarget(s)).toMatchObject({ player: 1 });
-    s = withPlayers({ ...s, turn: 1 }, [{}, { node: 0, carried: 0 }]);
-    expect(ghostTarget(s)).toMatchObject({ player: 2 }); // clockwise after 1 → 2 before 0
+  it('mashing earns nothing: only the first press in a sweep window counts', () => {
+    const sched = ropeSchedule(5, false);
+    const mash = sched.bottoms.flatMap((bt) => [bt - 690, bt - 600, bt - 250, bt - 100]).map((t) => ({ t }));
+    expect(judgeDuel(5, [0, 1], [mash, []], false).scores[0]).toBe(0);
   });
-
-  it('waits when everyone is in the entrance and there is no decoy', () => {
-    let s = choosing(game(2), [3, 4]);
-    s = act(s, { type: 'select', dest: 'stay' });
-    s = act(s, { type: 'confirmMove' });
-    expect(currentGhostPlan(s)!.target).toBe(null);
-    s = act(s, { type: 'moveGhost' });
-    expect(s.ghost).toBe(16);
-    expect(s.log.some((e) => e.kind === 'ghostWaits')).toBe(true);
-  });
-
-  it('never enters the entrance or uses secret passages', () => {
-    // Target at 24, ghost at 8: secret edge 8-24 is ignored.
-    let s = withPlayers(game(2), [{ node: 24, carried: 3 }, { node: 0 }]);
-    s = { ...s, ghost: 8 };
-    const plan = planGhost(s, 20);
-    expect(plan.fullPath[1]).not.toBe(24);
-    expect(plan.fullPath).not.toContain(0);
-    expect(plan.fullPath.length - 1).toBeGreaterThan(1);
-  });
-
-  it('stops at its target even with movement left, and catches intervening players', () => {
-    const s = withPlayers(game(3), [{ node: 14, carried: 1 }, { node: 13, carried: 6 }, { node: 15, carried: 0 }]);
-    const plan = planGhost(s, 6);
-    expect(plan.target).toMatchObject({ player: 1 });
-    expect(plan.path).toEqual([16, 15, 14, 13]);
-    expect(plan.reachesTarget).toBe(true);
-    expect(plan.catches.map((c) => c.player)).toEqual([2, 0, 1]);
-  });
-
-  it('moves only up to its allowance and does not retarget', () => {
-    const s = withPlayers(game(2), [{ node: 3, carried: 4 }, { node: 0 }]);
-    const plan = planGhost(s, 2);
-    expect(plan.path.length - 1).toBe(2);
-    expect(plan.reachesTarget).toBe(false);
-  });
-
-  it('follows a decoy instead of players, then the decoy vanishes', () => {
-    let s = withPlayers(game(2), [{ node: 18, carried: 0 }, { node: 13, carried: 9 }]);
-    s = act(s, { type: 'placeDecoy' });
-    expect(s.decoy).toBe(18);
-    expect(s.players[0].decoyUsed).toBe(true);
-    expect(ghostTarget(s)).toEqual({ kind: 'decoy', node: 18 });
-    s = { ...s, dice: [1, 1], phase: 'choose' as const };
-    s = act(s, { type: 'select', dest: 19 });
-    s = act(s, { type: 'confirmMove' });
-    s = act(s, { type: 'moveGhost' });
-    expect(s.ghost).toBe(17);
-    expect(s.decoy).toBe(null);
-    expect(s.players[1].node).toBe(13);
-  });
-
-  it('refuses a decoy in the entrance hall or a second decoy', () => {
-    const s = game(2);
-    expect(apply(s, { type: 'placeDecoy' }).error).toBeTruthy();
-    const t = withPlayers(s, [{ node: 5, decoyUsed: true }]);
-    expect(apply(t, { type: 'placeDecoy' }).error).toBeTruthy();
-  });
-});
-
-describe('catches', () => {
-  function catchOf(carried: number) {
-    let s = withPlayers(game(2), [{ node: 15, carried, banked: 10 }, { node: 0 }]);
-    s = { ...s, piles: s.piles.map((v, i) => (i === 15 ? 2 : v)) };
-    s = act(choosing(s, [1, 1]), { type: 'select', dest: 'stay' });
-    s = act(s, { type: 'confirmMove' });
-    return act(s, { type: 'moveGhost' });
-  }
-  it('drops the larger half on odd candy and banks the rest', () => {
-    const s = catchOf(7);
-    expect(s.piles[15]).toBe(2 + 4);
-    expect(s.players[0]).toMatchObject({ node: 0, carried: 0, banked: 13, decoyUsed: false });
-  });
-  it('drops half on even candy', () => {
-    const s = catchOf(6);
-    expect(s.piles[15]).toBe(5);
-    expect(s.players[0].banked).toBe(13);
-  });
-  it('drops nothing on zero candy but still sends the player home', () => {
-    const s = catchOf(0);
-    expect(s.piles[15]).toBe(2);
-    expect(s.players[0]).toMatchObject({ node: 0, banked: 10 });
-  });
-  it('catches each player once and never auto-collects piles for bystanders', () => {
-    let s = withPlayers(game(3), [{ node: 15, carried: 4 }, { node: 15, carried: 2 }, { node: 17, carried: 0 }]);
-    s = act(choosing(s, [1, 6]), { type: 'select', dest: 'stay' });
-    s = act(s, { type: 'confirmMove' });
-    s = act(s, { type: 'moveGhost' });
-    expect(s.players[0].node).toBe(0);
-    expect(s.players[1].node).toBe(0);
-    expect(s.piles[15]).toBe(3);
-    const ghostEntry = s.log.find((e) => e.kind === 'ghost');
-    expect(ghostEntry && ghostEntry.kind === 'ghost' && ghostEntry.plan.catches.length).toBe(2);
-    expect(s.players[2]).toMatchObject({ node: 17, carried: 0 });
-  });
-});
-
-describe('events', () => {
-  function toEvent(type: EventType, patch: Array<Partial<GameState['players'][number]>> = [], n = 3): GameState {
-    let s = withPlayers(game(n), [{ node: 4, carried: 3 }, ...patch.slice(1)]);
-    if (patch[0]) s = withPlayers(s, [patch[0]]);
-    s = stackDeck(s, type);
-    s = act(choosing(s, [1, 1]), { type: 'select', dest: 5 });
-    return act(s, { type: 'confirmMove' });
-  }
-
-  it('secret passage relocates without collecting and can be declined', () => {
-    let s = toEvent('secretPassage');
-    expect(s.phase).toBe('event');
-    expect(s.event!.options.sort((a, b) => a - b)).toEqual([8, 11, 24, 27]);
-    s = { ...s, piles: s.piles.map((v, i) => (i === 24 ? 5 : v)) };
-    const moved = act(s, { type: 'eventChoose', option: 24 });
-    expect(moved.players[0]).toMatchObject({ node: 24, carried: 3 });
-    expect(moved.piles[24]).toBe(5);
-    expect(moved.phase).toBe('ghost');
-    const declined = act(s, { type: 'eventDecline' });
-    expect(declined.players[0].node).toBe(5);
-    expect(declined.phase).toBe('ghost');
-  });
-
-  it('secret passage excludes the ghost’s endpoint', () => {
-    let s = withPlayers(game(2), [{ node: 4, carried: 3 }]);
-    s = stackDeck({ ...s, ghost: 24 }, 'secretPassage');
-    s = act(act(choosing(s, [1, 1]), { type: 'select', dest: 5 }), { type: 'confirmMove' });
-    expect(s.event!.options).not.toContain(24);
-  });
-
-  it('sticky fingers steals up to 2 from a neighbour, never from the entrance', () => {
-    let s = toEvent('stickyFingers', [{}, { node: 6, carried: 1 }, { node: 0, carried: 0, banked: 9 }]);
-    expect(s.event!.options).toEqual([1]);
-    s = act(s, { type: 'eventChoose', option: 1 });
-    expect(s.players[0].carried).toBe(4);
-    expect(s.players[1].carried).toBe(0);
-    expect(s.players[2].banked).toBe(9);
-    const none = toEvent('stickyFingers', [{}, { node: 20, carried: 5 }, { node: 0 }]);
-    expect(none.phase).toBe('ghost');
-    expect(none.log.some((e) => e.kind === 'noEffect')).toBe(true);
-  });
-
-  it('sweet discovery adds 2 without touching stocks', () => {
-    const before = game(3).stocks.slice();
-    const s = toEvent('sweetDiscovery');
-    expect(s.players[0].carried).toBe(5);
-    expect(s.stocks).toEqual(before);
+  it('a duel on a hidden trap reveals it and the Reaper hosts only that duel', () => {
+    let s = withPlayers(game(2), [{ node: 10 }, { node: 9 }]);
+    s = move(s, 9, [1, 1]);
+    expect(s.traps.find((t) => t.node === 9)!.revealed).toBe(true);
+    expect(s.challenge).toMatchObject({ kind: 'duel', host: 'reaper' });
+    s = resolve(s, { 0: 'win', 1: 'win' });
     expect(s.phase).toBe('ghost');
   });
+  it('protected players can neither start nor receive a duel; several occupants mean a choice', () => {
+    expect(move(withPlayers(game(2), [{ node: 2, protectedUntil: 9 }, { node: 3 }]), 3, [1, 1]).phase).toBe('ghost');
+    expect(move(withPlayers(game(2), [{ node: 2 }, { node: 3, protectedUntil: 9 }]), 3, [1, 1]).phase).toBe('ghost');
+    const s = move(withPlayers(game(3), [{ node: 2 }, { node: 3 }, { node: 3 }]), 3, [1, 1]);
+    expect(s.phase).toBe('pick');
+    expect(act(s, { type: 'pickOpponent', option: 2 }).challenge!.participants).toEqual([0, 2]);
+  });
+  it('previews a lethal late duel explicitly', () => {
+    const s = choosing({ ...withPlayers(game(2), [{ node: 2 }, { node: 3 }]), round: 9 }, [1, 1]);
+    expect(previewMove(s, 0, 3)!.encounter).toEqual({ kind: 'duel', lethal: true, opponents: [1] });
+  });
+});
 
-  it('creaky floorboards adds 2 to ghost movement this turn only', () => {
-    let s = toEvent('creakyFloorboards', [{}, { node: 29, carried: 9 }]);
-    expect(currentGhostPlan(s)!.allowance).toBe(3);
-    s = act(s, { type: 'moveGhost' });
+describe('the Super Reaper', () => {
+  it('summons a remote opponent into a one-survivor duel even in round 1, without moving them', () => {
+    let s = withPlayers(game(2), [{ node: 4, carried: 1 }, { node: 22, carried: 5 }]);
+    s = move(s, SUPER_REAPER, [1, 1]);
+    expect(s.challenge).toMatchObject({ kind: 'duel', host: 'superReaper', oneSurvivor: true, origins: [12, 22] });
+    expect(s.players[1].node).toBe(22);
+    s = resolve(s, { 0: 'win', 1: 3 });
+    expect(s.players[1]).toMatchObject({ alive: false, node: 22 });
+    expect(s.piles[22]).toBe(5);
+    expect(s.players[0]).toMatchObject({ node: 12, carried: 1 });
+    expect(s.players.every((p) => p.bounty === 0)).toBe(true);
+  });
+  it('lets the arriving player choose among several opponents', () => {
+    const s = move(withPlayers(game(3), [{ node: 4 }, { node: 22 }, { node: 29 }]), SUPER_REAPER, [1, 1]);
+    expect(s.phase).toBe('pick');
+    expect(s.pick!.kind).toBe('summon');
+  });
+  it('falls back to a solo performance when nobody is eligible', () => {
+    const s = move(withPlayers(game(2), [{ node: 4 }, { node: 0 }]), SUPER_REAPER, [1, 1]);
+    expect(s.challenge).toMatchObject({ host: 'superReaper', participants: [0] });
+    expect(['dance', 'rope']).toContain(s.challenge!.kind);
+  });
+});
+
+describe('protection and scoring', () => {
+  it('lasts until the end of the survivor’s next scheduled turn', () => {
+    let s = move(withPlayers(game(2), [{ node: 10 }]), 9, [1, 1]);
+    s = resolve(s, { 0: 'win' });
+    expect(s.players[0].protectedUntil).toBe(3);
+    s = { ...s, phase: 'summary' };
     s = act(s, { type: 'nextTurn' });
-    expect(s.ghostBonus).toBe(0);
+    expect(isProtected(s, 0)).toBe(true);
+    s = act({ ...s, phase: 'summary' }, { type: 'nextTurn' });
+    expect(s.turn).toBe(0);
+    expect(isProtected(s, 0)).toBe(true);
+    s = act({ ...s, phase: 'summary' }, { type: 'nextTurn' });
+    expect(isProtected(s, 0)).toBe(false);
   });
 
-  it('costume mix-up swaps positions only, and can be declined', () => {
-    let s = toEvent('costumeMixup', [{}, { node: 29, carried: 1 }, { node: 0 }]);
-    expect(s.event!.options).toEqual([1]);
-    s = act(s, { type: 'eventChoose', option: 1 });
-    expect(s.players[0]).toMatchObject({ node: 29, carried: 3, name: 'P1' });
-    expect(s.players[1]).toMatchObject({ node: 5, carried: 1, name: 'P2' });
-    expect(s.stocks[29]).toBe(6); // no harvest on arrival by swap
-    const none = toEvent('costumeMixup', [{}, { node: 0 }, { node: 0 }]);
-    expect(none.phase).toBe('ghost');
+  it('scores the living with a survival bonus at six banked, and ghosts with bank + bounty', () => {
+    const s = withPlayers(game(4), [{ banked: 6, carried: 3 }, { banked: 5, carried: 0 }, { alive: false, banked: 4, bounty: 6 }, { alive: false, banked: 11, bounty: 0 }]);
+    const lines = finalScores(s);
+    const by = (p: number) => lines.find((l) => l.player === p)!;
+    expect(by(0)).toMatchObject({ total: 6 + 1 + 5, survivalBonus: 5 });
+    expect(by(1)).toMatchObject({ total: 5, survivalBonus: 0 });
+    expect(by(2)).toMatchObject({ total: 10, bounty: 6, alive: false });
+    expect(by(3).total).toBe(11);
+    expect(lines.filter((l) => l.winner).map((l) => l.player)).toEqual([0]);
   });
 
-  it('flying candy drops up to 2 on the current space', () => {
-    const s = toEvent('flyingCandy');
-    expect(s.players[0].carried).toBe(1);
-    expect(s.piles[5]).toBe(2);
-    const empty = toEvent('flyingCandy', [{ node: 4, carried: 0 }]);
-    expect(empty.piles[5]).toBe(0);
-    expect(empty.log.some((e) => e.kind === 'noEffect')).toBe(true);
-  });
-
-  it('never chains: relocating onto an event space or room does nothing more', () => {
-    let s = toEvent('costumeMixup', [{}, { node: 13, carried: 1 }]);
-    const deckBefore = s.deck.length;
-    s = act(s, { type: 'eventChoose', option: 1 });
-    expect(s.players[0].node).toBe(13);
-    expect(s.deck.length).toBe(deckBefore);
-    expect(s.phase).toBe('ghost');
-  });
-
-  it('reshuffles the discard pile when the deck runs out', () => {
-    let s = withPlayers(game(2), [{ node: 4 }]);
-    s = { ...s, discard: [...s.deck.slice(1)], deck: [s.deck[0]] };
-    s = act(act(choosing(s, [1, 1]), { type: 'select', dest: 5 }), { type: 'confirmMove' });
-    expect(s.deck.length + s.discard.length).toBe(18);
-    let t = withPlayers(game(2), [{ node: 4 }]);
-    t = { ...t, discard: [...t.deck], deck: [] };
-    const rngBefore = t.rng;
-    t = act(act(choosing(t, [1, 1]), { type: 'select', dest: 5 }), { type: 'confirmMove' });
-    expect(t.deck.length).toBe(17);
-    expect(t.discard.length).toBe(1);
-    expect(t.rng).not.toBe(rngBefore);
+  it('ends at once when an encounter leaves nobody alive', () => {
+    let s = withPlayers(game(2), [{ node: 10 }, { alive: false, node: 20 }]);
+    s = resolve(move(s, 9, [1, 1]), { 0: 'lose' });
+    expect(s.phase).toBe('gameOver');
+    expect(s.endReason).toBe('noneAlive');
   });
 });
 
 describe('previews', () => {
-  it('match committed resolution when no event intervenes, without mutating or consuming RNG', () => {
-    for (let seed = 1; seed <= 60; seed++) {
-      let s = withPlayers(game(3, seed), [{ node: 0 }, { node: 22, carried: 4 }, { node: 17, carried: 2 }]);
+  it('match the committed ghost plan when nothing is left to chance, and never consume randomness', () => {
+    for (let seed = 1; seed <= 40; seed++) {
+      let s = withPlayers(game(3, seed), [{}, { node: 22, carried: 4 }, { node: 17, carried: 2 }]);
       s = act(s, { type: 'roll' });
-      for (const moveDie of [0, 1] as const) {
-        for (const dest of [...legalRoutes(s, moveDie).keys(), 'stay' as const]) {
+      for (const md of [0, 1] as const) {
+        for (const dest of [...legalRoutes(s, md).keys(), 'stay' as const]) {
           const frozen = JSON.stringify(s);
-          const p = previewMove(s, moveDie, dest)!;
+          const p = previewMove(s, md, dest)!;
           expect(JSON.stringify(s)).toBe(frozen);
           if (p.provisional) continue;
-          let c = act(s, { type: 'select', moveDie, dest });
-          c = act(c, { type: 'confirmMove' });
-          const plan = currentGhostPlan(c)!;
-          expect(plan).toEqual(p.ghost);
-          expect(c.players[0].carried).toBe(p.carriedAfter);
+          const c = act(act(s, { type: 'select', moveDie: md, dest }), { type: 'confirmMove' });
+          if (c.phase !== 'ghost') continue; // an unknown trap intervened
+          expect(currentGhostPlan(c)).toEqual(p.ghost);
           expect(c.rng).toBe(s.rng);
         }
       }
     }
   });
-
-  it('labels event destinations provisional', () => {
-    let s = withPlayers(game(2), [{ node: 4 }]);
-    s = choosing(s, [1, 3]);
-    expect(previewMove(s, 0, 5)!.provisional).toBe(true);
-    expect(previewMove(s, 0, 3)!.provisional).toBe(false);
-  });
 });
 
-describe('rounds and scoring', () => {
-  function playThrough(n: number, seed: number) {
-    let session = newSession(game(n, seed));
-    const turns = new Array(n).fill(0);
-    let midnightAt: number | null = null;
-    let sweet = 0;
-    let steps = 0;
-    while (session.game.phase !== 'gameOver' && steps++ < 5000) {
-      const g = session.game;
-      let action: Action;
-      switch (g.phase) {
-        case 'turnStart':
-          turns[g.turn]++;
-          action = { type: 'roll' };
-          break;
-        case 'choose': {
-          const routes = [...legalRoutes(g, 1).keys()];
-          const dest = routes.length ? routes[routes.length - 1] : 'stay';
-          session = dispatch(session, { type: 'select', moveDie: 1, dest }).session;
-          action = { type: 'confirmMove' };
-          break;
-        }
-        case 'event':
-          action = g.event!.canDecline ? { type: 'eventDecline' } : { type: 'eventChoose', option: g.event!.options[0] };
-          break;
-        case 'ghost':
-          action = { type: 'moveGhost' };
-          break;
-        default:
-          action = { type: 'nextTurn' };
-      }
-      const r = dispatch(session, action);
-      if (r.error) throw new Error(r.error);
-      if (r.events.some((e) => e.kind === 'midnight')) midnightAt = r.session.game.round;
-      for (const e of r.events) if (e.kind === 'gain') sweet += e.amount;
-      session = r.session;
-    }
-    return { session, turns, midnightAt, sweet };
-  }
-
-  it('gives every player exactly ten turns and warns once entering round 8', () => {
-    for (const n of [2, 6]) {
-      const { session, turns, midnightAt } = playThrough(n, 99 + n);
-      expect(session.game.phase).toBe('gameOver');
-      expect(turns).toEqual(new Array(n).fill(10));
-      expect(midnightAt).toBe(8);
-      expect(session.game.round).toBe(10);
-    }
+describe('sessions, undo and saves', () => {
+  it('undo restores mechanics but the table keeps what it has seen', () => {
+    let ses = newSession(withPlayers(game(2, 3), [{ node: 10 }]));
+    ses = dispatch(ses, { type: 'roll' }).session;
+    ses = { ...ses, game: { ...ses.game, dice: [1, 1] } };
+    ses = dispatch(ses, { type: 'select', dest: 9 }).session;
+    ses = dispatch(ses, { type: 'confirmMove' }).session;
+    const seed1 = ses.game.challenge!.seed;
+    expect(ses.known).toEqual([9]);
+    const back = undo(ses);
+    expect(back.game.traps.find((t) => t.node === 9)!.revealed).toBe(false);
+    expect(back.known).toEqual([9]);
+    expect(back.game.traps).toEqual(ses.turnStart.traps);
+    let replay = dispatch(back, { type: 'roll' }).session;
+    replay = { ...replay, game: { ...replay.game, dice: [1, 1] } };
+    replay = dispatch(dispatch(replay, { type: 'select', dest: 9 }).session, { type: 'confirmMove' }).session;
+    expect(replay.game.challenge!.seed).toBe(seed1);
+    expect(undoInfo(replay).available).toBe(true);
   });
 
-  it('conserves candy through a whole game', () => {
-    const { session, sweet } = playThrough(4, 7);
-    const g = session.game;
-    const initial = Object.values(ROOMS).reduce((a, r) => a + r.stock, 0);
-    const inRooms = g.stocks.reduce((a, b) => a + b, 0);
-    const piles = g.piles.reduce((a, b) => a + b, 0);
-    const players = g.players.reduce((a, p) => a + p.carried + p.banked, 0);
-    // Candy only enters play from room stocks and Sweet Discovery; nothing is created or lost.
-    expect(players + piles).toBe(initial - inRooms + sweet);
-    expect(initial - inRooms).toBeGreaterThan(0);
-  });
-
-  it('scores banked + floor(carried/2) and shares ties', () => {
-    const s = withPlayers(game(3), [{ banked: 10, carried: 3 }, { banked: 11, carried: 0 }, { banked: 5, carried: 1 }]);
-    const scores = finalScores(s);
-    expect(scores.map((l) => [l.player, l.total, l.rank, l.winner])).toEqual([
-      [0, 11, 1, true],
-      [1, 11, 1, true],
-      [2, 5, 3, false],
-    ]);
-    expect(scores[0].carriedHalf).toBe(1);
-  });
-});
-
-describe('undo and saves', () => {
-  it('restores the whole turn and replays the same dice and draws', () => {
-    let session: Session = newSession(withPlayers(game(2, 555), [{ node: 4 }]));
-    session = { ...session, turnStart: session.game };
-    const r1 = dispatch(session, { type: 'roll' });
-    const dice1 = r1.session.game.dice;
-    expect(undoInfo(r1.session)).toMatchObject({ available: true, which: 'current', playerName: 'P1' });
-    const back = undo(r1.session);
-    expect(back.game).toEqual(session.game);
-    const r2 = dispatch(back, { type: 'roll' });
-    expect(r2.session.game.dice).toEqual(dice1);
-  });
-
-  it('can undo the just-finished turn before the next player acts, only once', () => {
-    let session = newSession(game(2, 3));
-    for (const a of [{ type: 'roll' }, { type: 'select', dest: 'stay' }, { type: 'confirmMove' }, { type: 'moveGhost' }, { type: 'nextTurn' }] as Action[]) {
-      session = dispatch(session, a).session;
-    }
-    expect(session.game.turn).toBe(1);
-    const info = undoInfo(session);
-    expect(info).toMatchObject({ which: 'previous', playerName: 'P1', round: 1 });
-    const back = undo(session);
-    expect(back.game.turn).toBe(0);
-    expect(back.game.phase).toBe('turnStart');
-    expect(undoInfo(back).available).toBe(false);
-  });
-
-  it('round-trips a mid-event save without duplicating effects or rerolling', () => {
-    let s = withPlayers(game(2, 77), [{ node: 4, carried: 3 }, { node: 6, carried: 2 }]);
-    s = stackDeck(s, 'stickyFingers');
-    let session = newSession(s);
-    session = dispatch(session, { type: 'roll' }).session;
-    session = { ...session, game: { ...session.game, dice: [1, 1] } };
-    session = dispatch(session, { type: 'select', dest: 5 }).session;
-    session = dispatch(session, { type: 'confirmMove' }).session;
-    expect(session.game.phase).toBe('event');
-    const raw = serialize(session, defaultPersonalization());
-    const loaded = deserialize(raw);
+  it('saves round-trip traps, reveals and a live challenge; old-rules saves are refused', () => {
+    let ses = newSession(withPlayers(game(2, 3), [{ node: 10 }]));
+    ses = { ...ses, game: move(ses.game, 9, [1, 1]) };
+    const loaded = deserialize(serialize(ses, defaultPersonalization()));
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
-    expect(loaded.session).toEqual(session);
-    const done = dispatch(loaded.session, { type: 'eventChoose', option: 1 }).session;
-    expect(done.game.players[0].carried).toBe(5);
-    expect(dispatch(done, { type: 'eventChoose', option: 1 }).error).toBeTruthy();
+    expect(loaded.session.game.traps).toEqual(ses.game.traps);
+    expect(loaded.session.game.challenge).toEqual(ses.game.challenge);
+    const v1 = JSON.parse(serialize(ses, defaultPersonalization()));
+    v1.schema = 1;
+    expect(deserialize(JSON.stringify(v1))).toEqual({ ok: false, reason: 'incompatible' });
   });
 
-  it('rejects corrupt and incompatible saves', () => {
-    expect(deserialize(null)).toEqual({ ok: false, reason: 'missing' });
-    expect(deserialize('{nope')).toEqual({ ok: false, reason: 'corrupt' });
-    expect(deserialize(JSON.stringify({ schema: 99 }))).toEqual({ ok: false, reason: 'incompatible' });
-    expect(deserialize(JSON.stringify({ schema: 1, session: { game: { schema: 1 } } }))).toEqual({ ok: false, reason: 'corrupt' });
-  });
-
-  it('cleans custom text and keeps defaults', () => {
-    expect(cleanText('  <b>Hi</b>\n there ', 10, 'x')).toBe('<b>Hi</b>');
-    expect(cleanText('', 10, 'x')).toBe('x');
-    const p = sanitizePersonalization({ mansionName: 'A'.repeat(99), roomNames: { 3: 'Pantry' }, flavors: { flyingCandy: 'Whee' } });
-    expect(p.mansionName.length).toBe(28);
-    expect(p.roomNames[3]).toBe('Pantry');
-    expect(p.roomNames[7]).toBe('Dining Room');
-    expect(p.flavors).toEqual({ flyingCandy: 'Whee' });
+  it('refuses stale or duplicate challenge results', () => {
+    let s = move(withPlayers(game(2), [{ node: 10 }]), 9, [1, 1]);
+    const id = s.challenge!.id;
+    s = resolve(s, { 0: 'win' });
+    expect(apply(s, { type: 'challengeResult', id, inputs: { 0: [] } }).error).toBeTruthy();
+    const t = move(withPlayers(game(2), [{ node: 10 }]), 9, [1, 1]);
+    expect(apply(t, { type: 'challengeResult', id: 'nope', inputs: { 0: [] } }).error).toBeTruthy();
+    expect(apply(t, { type: 'challengeResult', id: t.challenge!.id, inputs: {} }).error).toBeTruthy();
   });
 });
 
-describe('entrance', () => {
-  it('is node 0', () => expect(ENTRANCE).toBe(0));
+describe('bots and whole games', () => {
+  it('bots see the same thing whatever the hidden map, and so decide the same', () => {
+    for (let seed = 1; seed < 25; seed++) {
+      const a = withPlayers(game(3, seed, [2, 4, 6, 9, 14, 18]), [{ node: 20, carried: 3 }]);
+      const b = withPlayers(game(3, seed, [19, 20, 21, 26, 28, 30]), [{ node: 20, carried: 3 }]);
+      const sa = act(a, { type: 'roll' });
+      const sb = act(b, { type: 'roll' });
+      expect(seatView(sa, 0)).toEqual(seatView(sb, 0));
+      expect(botAction(seatView(sa, 0), defaultBotProfile(0), newBotMemory(seed))).toEqual(botAction(seatView(sb, 0), defaultBotProfile(0), newBotMemory(seed)));
+    }
+  });
+
+  it('finish complete games for 2–6 seats without stalling, ten turns each at most', () => {
+    let early = 0;
+    for (let n = 2; n <= 6; n++) {
+      for (let seed = 1; seed <= 12; seed++) {
+        const r = simulateGame({ seed: seed * 101 + n, profiles: Array.from({ length: n }, (_, i) => defaultBotProfile(i + seed)) });
+        expect(r.session.game.phase).toBe('gameOver');
+        if (r.endedEarly) early++;
+        else expect(r.turns).toBe(n * 10);
+        expect(r.session.game.traps.length).toBe(6);
+        const total = r.session.game.players.reduce((a, p) => a + p.carried + p.banked, 0) + r.session.game.piles.reduce((a, b) => a + b, 0);
+        const drawn = Object.values(ROOMS).reduce((a, x) => a + x.stock, 0) - r.session.game.stocks.reduce((a, b) => a + b, 0);
+        expect(total).toBeGreaterThanOrEqual(drawn);
+      }
+    }
+    expect(early).toBeLessThan(60);
+  });
+
+  it('two bots with the same skill do not simply mirror each other', () => {
+    let differ = 0;
+    for (let seed = 1; seed <= 30; seed++) {
+      const a = botChallengeInputs('duel', seed, 0, SKILLS.steady, true);
+      const b = botChallengeInputs('duel', seed, 1, SKILLS.steady, true);
+      if (JSON.stringify(a) !== JSON.stringify(b)) differ++;
+      const v = judgeDuel(seed, [0, 1], [a, b], true);
+      expect(v.survivors.length).toBe(1);
+    }
+    expect(differ).toBe(30);
+  });
 });

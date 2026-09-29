@@ -169,22 +169,44 @@ class Director {
           const dur = gstep * (pts.length - 1);
           this.segs.push({ actor: 'ghost', t0: t, t1: t + dur, kind: 'glide', points: pts });
           cue('ghost', t);
-          const caughtAt = new Map<number, number>();
-          plan.catches.forEach((c) => caughtAt.set(c.player, plan.path.indexOf(c.node)));
           let latest = t + dur;
-          for (const c of plan.catches) {
-            const idx = caughtAt.get(c.player)!;
-            const tc = t + gstep * idx;
+          if (plan.encounter) {
+            const c = plan.encounter;
+            const tc = t + dur;
             const from = this.start(c.player, playerSlot(before, c.player));
-            this.segs.push({ actor: c.player, t0: tc - 0.05, t1: tc + 0.55, kind: 'fright', points: [from, from] });
-            this.segs.push({ actor: c.player, t0: tc + 0.55, t1: tc + 1.35, kind: 'arc', points: [from, playerSlot(after, c.player)] });
+            this.segs.push({ actor: c.player, t0: tc - 0.05, t1: tc + 0.6, kind: 'fright', points: [from, from] });
             cue('catch', tc);
-            cue('bank', tc + 1.35);
-            this.popup(nodePos(c.node, 1.5), c.dropped > 0 ? `Caught! Dropped ${c.dropped}` : 'Caught!', '#7ff5e6', tc - now());
-            latest = Math.max(latest, tc + 1.35);
+            this.popup(nodePos(c.node, 1.6), 'Caught! Break the curse…', '#7ff5e6', tc - now());
+            latest = tc + 0.6;
           }
           t = latest;
           this.ghostUntil = t + 0.8;
+          break;
+        }
+        case 'trapRevealed':
+          cue('reaper', t);
+          this.popup(nodePos(e.node, 1.9), 'The Reaper rises!', '#d6a6ff', t - now());
+          t += 0.9 / this.speed;
+          break;
+        case 'spared':
+          this.popup(nodePos(e.node, 1.4), 'Protected — spared this time', '#9fe8ff', t - now());
+          break;
+        case 'outcome': {
+          const o = e.outcome;
+          for (const d of o.deaths) {
+            const from = this.start(d.player, playerSlot(before, d.player));
+            this.segs.push({ actor: d.player, t0: t, t1: t + 1.1 / this.speed, kind: 'fright', points: [from, playerSlot(after, d.player)] });
+            this.popup(nodePos(d.node, 1.7), 'Became a ghost!', '#7ff5e6', t - now());
+            cue('transform', t);
+          }
+          for (const r of o.relocations) {
+            const from = this.start(r.player, playerSlot(before, r.player));
+            this.segs.push({ actor: r.player, t0: t, t1: t + 0.8 / this.speed, kind: 'arc', points: [from, playerSlot(after, r.player)] });
+            this.popup(nodePos(r.from, 1.5), 'Escaped!', '#b8ffb0', t - now());
+          }
+          if (!o.deaths.length && !o.relocations.length) this.popup(nodePos(o.participants.length ? after.players[o.participants[0]].node : 0, 1.6), 'Survived!', '#b8ffb0', t - now());
+          if (o.bounty && o.bounty.amount) this.popup(playerSlot(after, o.bounty.player).map((v, i) => (i === 1 ? v + 1.4 : v)) as V3, `+${o.bounty.amount} bounty`, '#7ff5e6', t - now() + 0.4);
+          t += (o.deaths.length ? 1.2 : 0.8) / this.speed;
           break;
         }
         case 'ghostWaits':

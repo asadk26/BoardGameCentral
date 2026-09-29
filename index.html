@@ -21,6 +21,7 @@
   p { color: var(--muted); line-height: 1.5; }
   .doors { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
   a { display: inline-flex; align-items: center; min-height: 48px; padding: 10px 20px; border-radius: 12px; font-weight: 700; text-decoration: none; color: #2a1204; background: linear-gradient(180deg, #ffcf6b, #f0a52e); }
+  .note { font-size: .9rem; margin: 14px 0 0; }
   a.quiet { color: var(--ink); background: rgba(70, 46, 104, .9); border: 1px solid rgba(255, 220, 160, .3); }
 </style>
 </head>
@@ -29,12 +30,16 @@
   <h1>Board Game Central</h1>
   <section class="game">
     <h2>One More Room</h2>
-    <p>A Halloween board game for two to six players around one screen. Grab
-      candy from a haunted mansion, bank it at the door, and decide which die
-      moves the ghost. Ten rounds until midnight.</p>
+    <p>A Halloween board game for two to six players or bots around one screen.
+      Grab candy from a haunted mansion, bank it at the door, and survive the
+      Reapers — or come back as a ghost and haunt your friends. Ten rounds until
+      midnight.</p>
     <div class="doors">
       <a href="one-more-room/">Play on this screen</a>
+      <a class="quiet" href="one-more-room/#/join">Join on phone</a>
     </div>
+    <p class="note">Phones join a room hosted by the TV’s computer (see the README); on this
+      public site, one-screen play with mouse, keyboard and bots works everywhere.</p>
   </section>
 </main>
 </body>

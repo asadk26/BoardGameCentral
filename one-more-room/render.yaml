@@ -1,0 +1,13 @@
+# Optional: a Render Blueprint for hosting the room service publicly.
+# Not deployed by this repository's workflow — creating the service needs a
+# Render account and an explicit choice of plan by the repository owner.
+services:
+  - type: web
+    name: one-more-room-rooms
+    runtime: docker
+    rootDir: one-more-room
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://asadk26.github.io
