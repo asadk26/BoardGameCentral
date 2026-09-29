@@ -19,7 +19,7 @@ export function hostSend(msg: ClientMsg) {
 }
 
 function seatsOf(view: RoomView): SeatSetup[] {
-  return view.seats.map((s) => (s.kind === 'bot' ? { kind: 'bot', bot: s.bot } : { kind: 'human' }));
+  return view.pieces.map((s) => (s.kind === 'bot' ? { kind: 'bot', bot: s.bot } : { kind: 'human' }));
 }
 
 export async function hostRoom() {

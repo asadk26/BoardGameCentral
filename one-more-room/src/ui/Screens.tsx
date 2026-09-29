@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { CHARACTERS, DEFAULT_PLAYER_NAMES, EVENT_INFO, EVENT_TYPES, MAX_PLAYERS, MIN_PLAYERS, ROOMS, TEXT_LIMITS } from '../engine/config';
+import { CHARACTERS, DEFAULT_PLAYER_NAMES, MAX_PIECES, MIN_PIECES, ROOMS, TEXT_LIMITS } from '../engine/config';
 import { cleanText, defaultPersonalization } from '../engine/save';
 import { defaultBotProfile } from '../engine/bots';
 import { hostRoom } from '../net/host';
-import { goToSetup, goToTitle, resumeGame, savePrefs, setPersonalization, setState, startGame, useStore, getState } from '../store';
+import { goToSetup, goToTitle, resumeGame, savePrefs, setPersonalization, setState, startGame, useStore, getState, type SetupPiece } from '../store';
 import { PlayerBadge } from './Dialog';
 
 export function Title() {
@@ -13,9 +13,9 @@ export function Title() {
   return (
     <div className="title-screen">
       <div className="title-card">
-        <p className="kicker">A Halloween board game for 2–6 players · {mansion}</p>
+        <p className="kicker">A Halloween board game for 2–4 pieces, up to 8 people · {mansion}</p>
         <h1>One More Room</h1>
-        <p className="tag">Grab candy. Bank it. Outwit the ghost before midnight.</p>
+        <p className="tag">One life in the mansion. Everyone else is a ghost trying to steal it. Hold it when the bell rings.</p>
         <div className="title-btns">
           {hasSave && (
             <button className="btn primary big" onClick={resumeGame}>
@@ -23,7 +23,7 @@ export function Title() {
             </button>
           )}
           <button className={`btn big ${hasSave ? '' : 'primary'}`} onClick={goToSetup}>
-            {hasSave ? 'New game' : 'Play'}
+            {hasSave ? 'New game' : 'Play on this screen'}
           </button>
           <button className="btn big" onClick={() => void hostRoom()}>
             Host a phone room
@@ -33,7 +33,8 @@ export function Title() {
           </button>
         </div>
         <p className="muted small">
-          Joining from a phone? Open <a href="#/join">Join on phone</a>.
+          Joining from a phone? Open <a href="#/join">Join on phone</a>. Phone rooms need the room service running on a computer on
+          your Wi-Fi — see the README.
         </p>
         {problem && (
           <p className="notice" role="status">
@@ -48,43 +49,53 @@ export function Title() {
   );
 }
 
+const fallbackName = (i: number, k: number) => DEFAULT_PLAYER_NAMES[(i * 2 + k) % DEFAULT_PLAYER_NAMES.length];
+
 export function Setup() {
-  const players = useStore((s) => s.setupPlayers);
+  const pieces = useStore((s) => s.setupPieces);
+  const mode = useStore((s) => s.setupMode);
   const pz = useStore((s) => s.personalization);
   const editing = useStore((s) => s.editingPlayer);
   const hasSave = useStore((s) => s.hasSave);
   const [showCustom, setShowCustom] = useState(false);
   const [confirmReplace, setConfirmReplace] = useState(false);
 
-  const setPlayers = (next: typeof players) => {
-    setState({ setupPlayers: next });
+  const setPieces = (next: SetupPiece[]) => {
+    setState({ setupPieces: next });
     savePrefs();
   };
+  const update = (i: number, patch: Partial<SetupPiece>) => setPieces(pieces.map((q, j) => (j === i ? { ...q, ...patch } : q)));
+  const setMode = (m: 'ffa' | 'teams') => {
+    setState({ setupMode: m });
+    if (m === 'ffa') setPieces(pieces.map((p) => ({ ...p, names: p.names.slice(0, 1) })));
+    else savePrefs();
+  };
   const setCount = (n: number) => {
-    const next = players.slice(0, n);
+    const next = pieces.slice(0, n);
     while (next.length < n) {
       const used = new Set(next.map((p) => p.character));
       const free = CHARACTERS.find((c) => !used.has(c.id))!;
-      next.push({ name: DEFAULT_PLAYER_NAMES[next.length], character: free.id, kind: 'bot', bot: defaultBotProfile(next.length) });
+      next.push({ names: [fallbackName(next.length, 0)], character: free.id, kind: 'bot', bot: defaultBotProfile(next.length) });
     }
     setState({ editingPlayer: Math.min(getState().editingPlayer, n - 1) });
-    setPlayers(next);
+    setPieces(next);
   };
   const pick = (i: number, id: (typeof CHARACTERS)[number]['id']) => {
-    const next = players.map((p) => ({ ...p }));
+    const next = pieces.map((p) => ({ ...p }));
     const other = next.findIndex((p) => p.character === id);
     if (other >= 0 && other !== i) next[other].character = next[i].character;
     next[i].character = id;
     setState({ editingPlayer: i });
-    setPlayers(next);
+    setPieces(next);
   };
   const begin = () => {
     if (hasSave && !confirmReplace) {
       setConfirmReplace(true);
       return;
     }
-    startGame(players.map((p, i) => ({ ...p, name: cleanText(p.name, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[i]) })));
+    startGame(pieces.map((p, i) => ({ ...p, names: p.names.map((n, k) => cleanText(n, TEXT_LIMITS.playerName, fallbackName(i, k))) })));
   };
+  const people = pieces.reduce((a, p) => a + (p.kind === 'human' ? p.names.length : 0), 0);
 
   return (
     <div className="setup-screen">
@@ -97,41 +108,72 @@ export function Setup() {
       >
         <div className="setup-head">
           <h2>Who’s going in?</h2>
-          <div className="stepper" role="group" aria-label="Number of players">
-            <button type="button" className="icon-btn" onClick={() => setCount(Math.max(MIN_PLAYERS, players.length - 1))} disabled={players.length <= MIN_PLAYERS} aria-label="Fewer players">
+          <div className="stepper" role="group" aria-label="Number of pieces">
+            <button type="button" className="icon-btn" onClick={() => setCount(Math.max(MIN_PIECES, pieces.length - 1))} disabled={pieces.length <= MIN_PIECES} aria-label="Fewer pieces">
               −
             </button>
-            <span aria-live="polite">{players.length} players</span>
-            <button type="button" className="icon-btn" onClick={() => setCount(Math.min(MAX_PLAYERS, players.length + 1))} disabled={players.length >= MAX_PLAYERS} aria-label="More players">
+            <span aria-live="polite">{pieces.length} pieces</span>
+            <button type="button" className="icon-btn" onClick={() => setCount(Math.min(MAX_PIECES, pieces.length + 1))} disabled={pieces.length >= MAX_PIECES} aria-label="More pieces">
               +
             </button>
           </div>
         </div>
-        <p className="hint">Pick a costume for each player or team — tap a figure on the steps, or use the buttons. Everyone has the same abilities. Any seat can be a person or a bot; one person plus bots works fine.</p>
+        <div className="seat-kind" role="radiogroup" aria-label="Mode">
+          <button type="button" role="radio" aria-checked={mode === 'ffa'} className={`chip ${mode === 'ffa' ? 'on' : ''}`} onClick={() => setMode('ffa')}>
+            Free-for-all
+          </button>
+          <button type="button" role="radio" aria-checked={mode === 'teams'} className={`chip ${mode === 'teams' ? 'on' : ''}`} onClick={() => setMode('teams')}>
+            Team Battle
+          </button>
+          <span className="muted small">
+            {mode === 'ffa'
+              ? 'One person (or a bot) per piece.'
+              : 'Up to two people share a piece: the first plays odd rounds, the second even rounds. Uneven teams are fine.'}
+          </span>
+        </div>
+        <p className="hint">
+          Up to four pieces on the board; every costume plays the same. Any piece can be a bot. {people} {people === 1 ? 'person' : 'people'} playing.
+        </p>
         <ol className="setup-players">
-          {players.map((p, i) => {
+          {pieces.map((p, i) => {
             const color = CHARACTERS.find((c) => c.id === p.character)!.color;
+            const human = p.kind === 'human';
             return (
               <li key={i} className={editing === i ? 'editing' : ''} onFocus={() => setState({ editingPlayer: i })} onClick={() => setState({ editingPlayer: i })}>
                 <PlayerBadge n={i + 1} color={color} />
-                <input
-                  aria-label={`Player ${i + 1} name`}
-                  value={p.name}
-                  maxLength={TEXT_LIMITS.playerName}
-                  onChange={(e) => setPlayers(players.map((q, j) => (j === i ? { ...q, name: e.target.value } : q)))}
-                  onBlur={(e) => setPlayers(players.map((q, j) => (j === i ? { ...q, name: cleanText(e.target.value, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[i]) } : q)))}
-                />
-                <div className="seat-kind" role="group" aria-label={`Player ${i + 1} is played by`}>
+                <div className="names">
+                  {(human ? p.names : p.names.slice(0, 1)).map((n, k) => (
+                    <input
+                      key={k}
+                      aria-label={`Piece ${i + 1} ${human && p.names.length > 1 ? (k === 0 ? 'odd-round person' : 'even-round person') : 'name'}`}
+                      value={n}
+                      maxLength={TEXT_LIMITS.playerName}
+                      onChange={(e) => update(i, { names: p.names.map((x, j) => (j === k ? e.target.value : x)) })}
+                      onBlur={(e) => update(i, { names: p.names.map((x, j) => (j === k ? cleanText(e.target.value, TEXT_LIMITS.playerName, fallbackName(i, k)) : x)) })}
+                    />
+                  ))}
+                  {mode === 'teams' && human && p.names.length === 1 && (
+                    <button type="button" className="chip" onClick={() => update(i, { names: [...p.names, fallbackName(i, 1)] })}>
+                      + teammate
+                    </button>
+                  )}
+                  {mode === 'teams' && human && p.names.length === 2 && (
+                    <button type="button" className="chip" onClick={() => update(i, { names: p.names.slice(0, 1) })} aria-label={`Remove the second person from piece ${i + 1}`}>
+                      − teammate
+                    </button>
+                  )}
+                </div>
+                <div className="seat-kind" role="group" aria-label={`Piece ${i + 1} is played by`}>
                   <button
                     type="button"
-                    className={`chip ${p.kind === 'human' ? 'on' : ''}`}
-                    aria-pressed={p.kind === 'human'}
+                    className={`chip ${human ? 'on' : ''}`}
+                    aria-pressed={human}
                     onClick={(e) => {
                       e.stopPropagation();
-                      setPlayers(players.map((q, j) => (j === i ? { ...q, kind: 'human', bot: undefined } : q)));
+                      update(i, { kind: 'human', bot: undefined });
                     }}
                   >
-                    Person
+                    {mode === 'teams' ? 'People' : 'Person'}
                   </button>
                   {(['greedy', 'cautious', 'mischievous'] as const).map((pers) => (
                     <button
@@ -141,7 +183,7 @@ export function Setup() {
                       aria-pressed={p.kind === 'bot' && p.bot?.personality === pers}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setPlayers(players.map((q, j) => (j === i ? { ...q, kind: 'bot', bot: { personality: pers, skill: q.bot?.skill ?? 'steady' } } : q)));
+                        update(i, { kind: 'bot', names: p.names.slice(0, 1), bot: { personality: pers, skill: p.bot?.skill ?? 'steady' } });
                       }}
                     >
                       🤖 {pers}
@@ -149,9 +191,9 @@ export function Setup() {
                   ))}
                   {p.kind === 'bot' && (
                     <select
-                      aria-label={`Player ${i + 1} bot reflexes`}
+                      aria-label={`Piece ${i + 1} bot reflexes`}
                       value={p.bot?.skill ?? 'steady'}
-                      onChange={(e) => setPlayers(players.map((q, j) => (j === i ? { ...q, bot: { personality: q.bot?.personality ?? 'greedy', skill: e.target.value as 'steady' } } : q)))}
+                      onChange={(e) => update(i, { bot: { personality: p.bot?.personality ?? 'greedy', skill: e.target.value as 'steady' } })}
                     >
                       <option value="shaky">shaky reflexes</option>
                       <option value="steady">steady reflexes</option>
@@ -159,9 +201,9 @@ export function Setup() {
                     </select>
                   )}
                 </div>
-                <div className="char-pick" role="radiogroup" aria-label={`Player ${i + 1} costume`}>
+                <div className="char-pick" role="radiogroup" aria-label={`Piece ${i + 1} costume`}>
                   {CHARACTERS.map((c) => {
-                    const owner = players.findIndex((q) => q.character === c.id);
+                    const owner = pieces.findIndex((q) => q.character === c.id);
                     const mine = owner === i;
                     return (
                       <button
@@ -175,7 +217,7 @@ export function Setup() {
                           e.stopPropagation();
                           pick(i, c.id);
                         }}
-                        title={owner >= 0 && !mine ? `Swap with player ${owner + 1}` : c.blurb}
+                        title={owner >= 0 && !mine ? `Swap with piece ${owner + 1}` : c.blurb}
                       >
                         {c.name}
                         {owner >= 0 && !mine && <small> ({owner + 1})</small>}
@@ -197,7 +239,7 @@ export function Setup() {
           />
         </label>
         <button type="button" className="link" aria-expanded={showCustom} onClick={() => setShowCustom((v) => !v)}>
-          {showCustom ? '▾' : '▸'} Personalize rooms, ghost and cards (optional)
+          {showCustom ? '▾' : '▸'} Rename the rooms (optional)
         </button>
         {showCustom && <Customize />}
         {confirmReplace && (
@@ -225,7 +267,7 @@ function Customize() {
   const commit = () => setPersonalization(cleanAll(getState().personalization));
   return (
     <div className="customize">
-      <p className="hint">Names and flavour text only — the rules never change.</p>
+      <p className="hint">Names only — the rules never change.</p>
       <div className="grid2">
         {Object.keys(ROOMS).map((idStr) => {
           const id = Number(idStr);
@@ -243,27 +285,9 @@ function Customize() {
             </label>
           );
         })}
-        <label className="field">
-          <span>Ghost name</span>
-          <input value={pz.ghostName} maxLength={TEXT_LIMITS.ghostName} onChange={(e) => setLocal({ ...pz, ghostName: e.target.value })} onBlur={commit} />
-        </label>
       </div>
-      {EVENT_TYPES.map((t) => (
-        <label className="field" key={t}>
-          <span>
-            {EVENT_INFO[t].title} flavour <em>(effect: {EVENT_INFO[t].effect})</em>
-          </span>
-          <input
-            value={pz.flavors[t] ?? ''}
-            placeholder={EVENT_INFO[t].flavors[0]}
-            maxLength={TEXT_LIMITS.flavor}
-            onChange={(e) => setLocal({ ...pz, flavors: { ...pz.flavors, [t]: e.target.value } })}
-            onBlur={commit}
-          />
-        </label>
-      ))}
       <button type="button" className="btn ghost" onClick={() => setPersonalization({ ...d })}>
-        Reset names & text to defaults
+        Reset room names
       </button>
     </div>
   );
@@ -273,15 +297,5 @@ function cleanAll(p: ReturnType<typeof defaultPersonalization>) {
   const d = defaultPersonalization();
   const roomNames: Record<number, string> = {};
   for (const id of Object.keys(ROOMS).map(Number)) roomNames[id] = cleanText(p.roomNames[id], TEXT_LIMITS.roomName, d.roomNames[id]);
-  const flavors: typeof p.flavors = {};
-  for (const t of EVENT_TYPES) {
-    const f = cleanText(p.flavors[t], TEXT_LIMITS.flavor, '');
-    if (f) flavors[t] = f;
-  }
-  return {
-    mansionName: cleanText(p.mansionName, TEXT_LIMITS.mansionName, d.mansionName),
-    ghostName: cleanText(p.ghostName, TEXT_LIMITS.ghostName, d.ghostName),
-    roomNames,
-    flavors,
-  };
+  return { mansionName: cleanText(p.mansionName, TEXT_LIMITS.mansionName, d.mansionName), roomNames };
 }

@@ -1,18 +1,19 @@
 // The phone controller (…/#/join). No 3D here — the TV shows the mansion.
 // The phone only ever receives its seat view: the public state plus its own
-// trap nomination.
+// piece's trap nomination. In a pair, only this round's controller can act;
+// the other phone follows along.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CHARACTERS, EVENT_INFO, SCORING, TEXT_LIMITS, TRAP_ELIGIBLE, cardType, type CharacterId } from '../engine/config';
-import { canPlaceDecoy, currentGhostPlan, finalScores, ghostAllowance, isProtected, legalRoutes, previewMove } from '../engine/engine';
+import { CHARACTERS, ROUNDS, TEXT_LIMITS, TRAP_ELIGIBLE, type CharacterId } from '../engine/config';
+import { actingPiece, activeController, finalScores, legalRoutes, livingPiece, previewMove } from '../engine/engine';
 import { challengeDurationMs, type ChallengeInput } from '../engine/challenges';
 import type { Action, GameState } from '../engine/types';
 import type { RoomView, ServerMsg } from '../net/protocol';
 import { findService, newActionId, RoomClient, tokenStore } from '../net/client';
-import { cardFlavor, CHALLENGE_TITLES, challengeHowTo, encounterWarning, ghostSummary, logLine, nodeName, outcomeLines, placeName, previewSummary } from '../text';
+import { challengeHost, challengeHowTo, challengeTitle, controllerLine, curseLine, logLine, nodeName, outcomeLines, previewSummary, rollLine, superReaperLine } from '../text';
 import { defaultPersonalization } from '../engine/save';
 import { MiniMap } from '../ui/MiniMap';
-import { DanceGame, EscapeGame, RopeGame } from '../ui/Challenges';
+import { RopeGame } from '../ui/Challenges';
 import { audio } from '../audio/audio';
 import './phone.css';
 
@@ -68,7 +69,7 @@ export function PhoneApp() {
     setClient(cl);
   }, [service, code, name]);
 
-  // Auto-rejoin a room this phone was already in (refresh keeps the seat).
+  // Auto-rejoin a room this phone was already in (refresh keeps the piece).
   useEffect(() => {
     if (!client && service !== 'finding' && service !== 'none' && code && tokenStore.get(code.toUpperCase())) join();
   }, [client, service, code, join]);
@@ -82,7 +83,7 @@ export function PhoneApp() {
           Phone rooms need the One More Room room service, and this copy of the game is not connected to one. You can still
           play on one screen with the mouse, keyboard and bots.
         </p>
-        <p className="muted">To use phones at a party, run the room service on the TV’s computer (see the game’s README) and scan the QR code it shows.</p>
+        <p className="muted">To use phones at a party, run the room service on a computer on your Wi-Fi (see the game’s README), open the address it prints on the TV, and scan the QR code it shows.</p>
         <a className="pbtn primary big plink" href="./">
           Play on this screen
         </a>
@@ -112,6 +113,8 @@ export function PhoneApp() {
     <Shell>
       {status && <p className="pstatus">{status}</p>}
       {!view.hostConnected && <p className="pstatus">The TV is disconnected — the room is paused.</p>}
+      {view.paused && <p className="pstatus">The host paused the game.</p>}
+      {view.notice && !view.paused && <p className="pnote">{view.notice}</p>}
       {error && (
         <p className="perr" onClick={() => setError(null)}>
           {error}
@@ -127,21 +130,31 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 function Lobby({ view, client, defaultName }: { view: RoomView; client: RoomClient; defaultName: string }) {
-  const mySeat = view.you?.seat ?? null;
-  const [name, setName] = useState(mySeat !== null ? view.seats[mySeat].name : defaultName);
-  const claim = (character: CharacterId) => client.send({ t: 'claimSeat', character, name: name || 'Player' });
+  const my = view.you?.piece ?? null;
+  const [name, setName] = useState(view.you?.name ?? defaultName);
+  const claim = (character: CharacterId) =>
+    my === null ? client.send({ t: 'claimPiece', character, name: name || 'Player' }) : client.send({ t: 'setCharacter', character });
+  const openTeams = view.mode === 'teams' ? view.pieces.filter((p) => p.kind === 'phone' && p.members.length === 1 && p.piece !== my) : [];
+  const myPiece = my !== null ? view.pieces[my] : null;
   return (
     <div className="pstack">
       <h1>Room {view.code}</h1>
+      <p className="muted small">{view.mode === 'ffa' ? 'Free-for-all: one phone per piece.' : 'Team Battle: up to two phones per piece.'}</p>
       <label className="pf">
         Your name
         <input value={name} maxLength={TEXT_LIMITS.playerName} onChange={(e) => setName(e.target.value)} />
       </label>
-      <p>{mySeat === null ? 'Pick your costume:' : 'Your costume (tap another to switch):'}</p>
+      {myPiece && (
+        <p className="pnote">
+          You play <b>{CHARACTERS.find((c) => c.id === myPiece.character)!.name}</b>
+          {myPiece.members.length > 1 ? ` with ${myPiece.members.filter((m) => m.participantId !== view.you!.participantId).map((m) => m.name).join('')} — ${view.you!.slots.includes(0) ? 'you play odd rounds and confirm the trap' : 'you play even rounds'}` : ''}.
+        </p>
+      )}
+      <p>{my === null ? 'Pick a costume for a new piece:' : 'Your costume (tap another free one to switch):'}</p>
       <div className="pchars">
         {CHARACTERS.map((c) => {
-          const owner = view.seats.find((s) => s.character === c.id);
-          const mine = mySeat !== null && view.seats[mySeat]?.character === c.id;
+          const owner = view.pieces.find((s) => s.character === c.id);
+          const mine = !!owner && owner.piece === my;
           return (
             <button key={c.id} className={`pchar ${mine ? 'on' : ''}`} style={{ borderColor: c.color }} disabled={!!owner && !mine} onClick={() => claim(c.id)}>
               <b>{c.name}</b>
@@ -150,13 +163,28 @@ function Lobby({ view, client, defaultName }: { view: RoomView; client: RoomClie
           );
         })}
       </div>
+      {openTeams.length > 0 && (
+        <div className="pstack">
+          <p>Or join a team:</p>
+          {openTeams.map((t) => (
+            <button key={t.piece} className="pbtn" onClick={() => client.send({ t: 'joinTeam', piece: t.piece, name: name || 'Player' })}>
+              Join {t.name}’s {CHARACTERS.find((c) => c.id === t.character)!.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {my !== null && (
+        <button className="pbtn ghost" onClick={() => client.send({ t: 'leaveSeat' })}>
+          Leave my piece
+        </button>
+      )}
       <ul className="pseats">
-        {view.seats.map((s) => (
-          <li key={s.seat}>
+        {view.pieces.map((s) => (
+          <li key={s.piece}>
             <span className="pdot" style={{ background: colorOf(s.character) }}>
-              {s.seat + 1}
+              {s.piece + 1}
             </span>{' '}
-            {s.name} {s.kind === 'bot' ? '🤖' : s.connected ? '' : '(offline)'}
+            {s.name} {s.kind === 'bot' ? '🤖' : s.members.some((m) => !m.connected) ? '(someone offline)' : ''}
           </li>
         ))}
       </ul>
@@ -167,9 +195,9 @@ function Lobby({ view, client, defaultName }: { view: RoomView; client: RoomClie
 
 function Game({ view, client }: { view: RoomView; client: RoomClient }) {
   const g = view.game!;
-  const seat = view.you?.seat ?? null;
+  const piece = view.you?.piece ?? null;
   const send = useCallback((action: Action) => client.send({ t: 'action', id: newActionId(), rev: view.rev, action }), [client, view.rev]);
-  const ackKey = `one-more-room/ack/${view.code}/${seat}/${g.players.length}`;
+  const ackKey = `one-more-room/ack/${view.code}/${piece}/${view.ownNomination}`;
   const [acked, setAcked] = useState(() => {
     try {
       return localStorage.getItem(ackKey) === '1';
@@ -177,62 +205,98 @@ function Game({ view, client }: { view: RoomView; client: RoomClient }) {
       return false;
     }
   });
-  const ack = (v: boolean) => {
-    setAcked(v);
+  const ack = () => {
+    setAcked(true);
     try {
-      localStorage.setItem(ackKey, v ? '1' : '0');
+      localStorage.setItem(ackKey, '1');
     } catch {
       /* ignore */
     }
   };
-  if (seat === null) return <p>You are watching. Seats were fixed when the game started.</p>;
+  if (piece === null) return <Watching g={g} note="You are watching. The host can hand you a piece if a controller drops out." />;
   // The private confirmation stays up until hidden — even if the game has moved on.
-  const needsAck = view.ownNomination !== null && !acked && g.round === 1 && g.turnNumber <= g.players.length;
-  const me = g.players[seat];
-  const myTurn = g.turn === seat;
+  const needsAck = view.ownNomination !== null && !acked && g.round === 1 && (g.phase === 'placement' || g.phase === 'lifeRoll' || g.actionNumber <= g.pieces.length);
+  const me = g.pieces[piece];
+  const inControl = !!view.you?.inControl;
+  const acting = actingPiece(g) === piece;
+  const started = g.phase !== 'placement' && g.phase !== 'lifeRoll';
+  const curse = me.alive ? curseLine(me.streak) : null;
   return (
     <div className="pstack">
-      <header className="phead" style={{ borderColor: colorOf(me.character) }}>
+      <header className={`phead ${started && me.alive ? 'living' : ''}`} style={{ borderColor: colorOf(me.character) }}>
         <span className="pdot" style={{ background: colorOf(me.character) }}>
-          {seat + 1}
+          {piece + 1}
         </span>
         <div>
-          <b>{me.name}</b> {me.alive ? '' : '👻'}
+          <b>{me.name}</b> {started ? (me.alive ? '❤ alive' : '👻 ghost') : ''}
           <div className="muted small">
-            Round {g.round}/10 •{' '}
-            {me.alive
-              ? `banked ${me.banked} • carrying ${me.carried}${isProtected(g, seat) ? ' • 🛡 protected' : ''}${me.banked >= SCORING.survivalBonusMinBanked ? ` • +${SCORING.survivalBonus} if alive ✓` : ''}`
-              : `ghost • banked ${me.banked} • bounty ${me.bounty}/${SCORING.bountyCap}`}
+            Round {g.round}/{ROUNDS} • {me.score} point{me.score === 1 ? '' : 's'}
+            {controllerLine(g, piece) ? ` • ${controllerLine(g, piece)}${inControl ? ' (you)' : ''}` : ''}
           </div>
+          {curse && <div className="small pcurse">{curse}</div>}
         </div>
       </header>
+      {started && <Scoreboard g={g} me={piece} />}
       {needsAck ? (
-        <NominationAck nomination={view.ownNomination!} onHide={() => ack(true)} />
+        <NominationAck nomination={view.ownNomination!} onHide={ack} />
       ) : (
-        g.phase === 'placement' && <Placement view={view} send={send} seat={seat} />
+        g.phase === 'placement' && <Placement view={view} send={send} piece={piece} />
       )}
-      {!needsAck && g.phase === 'challenge' && <PhoneChallenge view={view} client={client} seat={seat} />}
+      {!needsAck && g.phase === 'lifeRoll' && <p className="pnote">Everyone rolls for life… watch the TV.</p>}
+      {!needsAck && g.phase === 'challenge' && <PhoneChallenge view={view} client={client} piece={piece} />}
       {!needsAck && g.phase === 'gameOver' && <PhoneResults g={g} />}
-      {!needsAck && !['placement', 'challenge', 'gameOver'].includes(g.phase) && (myTurn ? <MyTurn g={g} send={send} /> : <Watching g={g} />)}
+      {!needsAck && started && !['challenge', 'gameOver'].includes(g.phase) &&
+        (acting && inControl ? (
+          <MyAction g={g} send={send} />
+        ) : acting ? (
+          <Watching g={g} note={`Your piece’s action — ${me.controllers[activeController(g, piece)]} controls it this round.`} />
+        ) : (
+          <Watching g={g} />
+        ))}
     </div>
   );
 }
 
-function Placement({ view, send, seat }: { view: RoomView; send: (a: Action) => void; seat: number }) {
+/** Every piece's points, who holds the life, and the curse on the living piece. */
+function Scoreboard({ g, me }: { g: GameState; me: number }) {
+  return (
+    <ul className="pscores" aria-label="Scores">
+      {g.pieces.map((p, i) => (
+        <li key={p.id} className={`${p.alive ? 'alive' : ''} ${i === me ? 'me' : ''}`}>
+          <span className="pdot" style={{ background: colorOf(p.character) }}>
+            {i + 1}
+          </span>
+          <span className="pn">{p.name}</span>
+          <b>{p.score}</b>
+          {p.alive ? ' ❤' : ''}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Placement({ view, send, piece }: { view: RoomView; send: (a: Action) => void; piece: number }) {
   const g = view.game!;
   const [draft, setDraft] = useState<number | null>(null);
   const eligible = useMemo(() => new Set(TRAP_ELIGIBLE), []);
   if (view.ownNomination !== null) {
-    const waiting = g.players.filter((_, i) => g.nominations[i] === null).map((p) => p.name);
-    return <p>Waiting for {waiting.join(', ') || 'the house'} to curse a corridor…</p>;
+    const waiting = g.pieces.filter((_, i) => g.nominations[i] === null).map((p) => p.name);
+    return <p>Waiting for {waiting.join(', ') || 'the house'} to set a trap…</p>;
+  }
+  if (!view.you?.selector) {
+    const selector = view.pieces[piece]?.members[0]?.name ?? 'your teammate';
+    return <p className="pnote">{selector} confirms your team’s trap. You’ll both see it once it is set.</p>;
   }
   return (
     <div className="pstack">
-      <h2>Curse one corridor — secretly</h2>
-      <p className="muted small">Only glowing spaces are allowed. Nobody else will see your pick.</p>
-      <MiniMap pickable={eligible} selected={draft} onPick={setDraft} label="Choose a corridor to curse" />
-      <button className="pbtn primary" disabled={draft === null} onClick={() => draft !== null && send({ type: 'nominate', seat, node: draft })}>
-        {draft === null ? 'Tap a glowing space' : `Curse space ${draft}`}
+      <h2>Set a trap — secretly</h2>
+      <p className="muted small">
+        Only glowing spaces are allowed. Nobody else sees your pick (a teammate does). The game deals the effects: you choose the place, not
+        what it does, and it works on you too.
+      </p>
+      <MiniMap pickable={eligible} selected={draft} onPick={setDraft} label="Choose a corridor for your trap" />
+      <button className="pbtn primary" disabled={draft === null} onClick={() => draft !== null && send({ type: 'nominate', piece, node: draft })}>
+        {draft === null ? 'Tap a glowing space' : `Set the trap on space ${draft}`}
       </button>
     </div>
   );
@@ -241,9 +305,10 @@ function Placement({ view, send, seat }: { view: RoomView; send: (a: Action) => 
 function NominationAck({ nomination, onHide }: { nomination: number; onHide: () => void }) {
   return (
     <div className="pcard">
-      <h2>Your curse is set</h2>
+      <h2>Your trap is set</h2>
       <p>
-        A Reaper waits at <b>space {nomination}</b>. It will not be shown again — remember it. You are not immune.
+        A hidden trap waits at <b>space {nomination}</b>. It will not be shown again — remember it. Nobody knows its effect, and you are not
+        immune.
       </p>
       <button className="pbtn primary" onClick={onHide}>
         Hide it
@@ -252,108 +317,83 @@ function NominationAck({ nomination, onHide }: { nomination: number; onHide: () 
   );
 }
 
-function Watching({ g }: { g: GameState }) {
-  const p = g.players[g.turn];
+function Watching({ g, note }: { g: GameState; note?: string }) {
+  const acting = actingPiece(g);
+  const p = acting >= 0 ? g.pieces[acting] : null;
+  const living = livingPiece(g);
   const lines = g.log.map((e) => logLine(e, g, pz)).filter(Boolean).slice(-4) as string[];
   return (
     <div className="pstack">
-      <p>
-        <b>{p.name}</b>’s {p.alive ? 'turn' : 'ghost turn'}…
-      </p>
+      {note && <p className="pnote">{note}</p>}
+      {p && (
+        <p>
+          <b>{p.name}</b> {p.alive ? '(alive)' : '(ghost)'} is acting • {living >= 0 ? `${g.pieces[living].name} holds the life` : ''}
+        </p>
+      )}
+      {g.schedule.length > 0 && (
+        <p className="muted small">
+          Order: {g.schedule.map((i, k) => `${k < g.slot ? '✓ ' : k === g.slot ? '▶ ' : ''}${g.pieces[i].name}`).join(' → ')}
+        </p>
+      )}
       <ul className="plog">
         {lines.map((l, i) => (
           <li key={i}>{l}</li>
         ))}
       </ul>
-      <MiniMap game={g} revealed={g.traps.map((t) => t.node)} label="Mansion map" />
+      <MiniMap game={g} revealed={g.traps} label="Mansion map" />
     </div>
   );
 }
 
-function MyTurn({ g, send }: { g: GameState; send: (a: Action) => void }) {
-  const me = g.players[g.turn];
-  const [decoyAsk, setDecoyAsk] = useState(false);
-  const revealed = g.traps.map((t) => t.node);
+function MyAction({ g, send }: { g: GameState; send: (a: Action) => void }) {
+  const me = g.pieces[actingPiece(g)];
   if (g.phase === 'turnStart')
     return (
       <div className="pstack">
-        {!me.alive && <p className="pnote">Ghost turn: one die; end on an unprotected living player to haunt them ({SCORING.bountyPerKill} bounty each, max {SCORING.bountyCap}).</p>}
+        <p className="pnote">
+          {me.alive
+            ? 'You hold the life. Move up to your roll, or stay — ghosts act after you.'
+            : `You are a ghost: you drift at least 3 spaces. End on ${g.pieces[livingPiece(g)].name}’s space or next to it to challenge.`}
+        </p>
         <button className="pbtn primary big" onClick={() => send({ type: 'roll' })}>
-          {me.alive ? 'Roll the dice 🎲' : 'Roll the ghost die 🎲'}
+          Roll the die 🎲
         </button>
-        {canPlaceDecoy(g) &&
-          (decoyAsk ? (
-            <div className="pcard">
-              <p>This turn the resident ghost heads for a sweet on your space instead of anyone’s candy. It still challenges the first unprotected player on its path. Once per game.</p>
-              <button className="pbtn" onClick={() => send({ type: 'placeDecoy' })}>
-                Place decoy
-              </button>
-              <button className="pbtn ghost" onClick={() => setDecoyAsk(false)}>
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <button className="pbtn" onClick={() => setDecoyAsk(true)}>
-              Use decoy…
-            </button>
-          ))}
       </div>
     );
-  if (g.phase === 'choose') return <PhoneChoose g={g} send={send} revealed={revealed} />;
-  if (g.phase === 'pick') {
-    const pk = g.pick!;
+  if (g.phase === 'choose') return <PhoneChoose g={g} send={send} />;
+  if (g.phase === 'pick')
     return (
       <div className="pstack">
         <p>
-          <b>{pk.kind === 'summon' ? 'The Super Reaper demands an opponent' : pk.kind === 'duel' ? 'Choose who to duel' : 'Choose who to haunt'}</b>
+          <b>Reaper’s Challenge:</b> pick a ghost to duel for the life.
         </p>
-        {pk.options.map((o) => (
+        {g.pick!.options.map((o) => (
           <button key={o} className="pbtn" onClick={() => send({ type: 'pickOpponent', option: o })}>
-            {g.players[o].name} • carrying {g.players[o].carried}
+            {g.pieces[o].name} • {g.pieces[o].score} pts
           </button>
         ))}
       </div>
     );
-  }
-  if (g.phase === 'event') {
-    const ev = g.event!;
-    const info = EVENT_INFO[cardType(ev.cardId)];
+  if (g.phase === 'hunt') {
+    const living = g.pieces[livingPiece(g)];
     return (
       <div className="pstack">
-        <div className="pcard ecard">
-          <small>Trick or Treat</small>
-          <h2>{info.title}</h2>
-          <p className="muted">“{cardFlavor(ev.cardId, pz)}”</p>
-          <p>
-            <b>{info.effect}</b>
-          </p>
-        </div>
-        {ev.options.map((o) => (
-          <button key={o} className="pbtn" onClick={() => send({ type: 'eventChoose', option: o })}>
-            {ev.type === 'secretPassage' ? `Go to ${placeName(o, pz)}` : ev.type === 'stickyFingers' ? `Steal from ${g.players[o].name}` : `Swap with ${g.players[o].name}`}
-          </button>
-        ))}
-        {ev.canDecline && (
-          <button className="pbtn ghost" onClick={() => send({ type: 'eventDecline' })}>
-            No thanks
-          </button>
-        )}
-      </div>
-    );
-  }
-  if (g.phase === 'ghost') {
-    const plan = currentGhostPlan(g);
-    return (
-      <div className="pstack">
-        {plan && <p className="pnote">👻 {ghostSummary(plan, g, pz)}</p>}
-        <button className="pbtn primary big" onClick={() => send({ type: 'moveGhost' })}>
-          {plan?.target ? 'Move the ghost' : 'The ghost waits — continue'}
+        <p>
+          <b>{living.name}</b> is within reach. Challenge for the life?
+        </p>
+        {curseLine(living.streak) && <p className="muted small">{living.name}: {curseLine(living.streak)}</p>}
+        <button className="pbtn primary big risky" onClick={() => send({ type: 'hunt' })}>
+          Challenge 👻
+        </button>
+        <button className="pbtn" onClick={() => send({ type: 'declineHunt' })}>
+          Let it pass
         </button>
       </div>
     );
   }
   if (g.phase === 'summary') {
     const lines = [...(g.log.map((e) => (e.kind === 'outcome' ? null : logLine(e, g, pz))).filter(Boolean) as string[]), ...(g.lastOutcome ? outcomeLines(g.lastOutcome, g, pz) : [])];
+    const last = g.slot === g.schedule.length - 1;
     return (
       <div className="pstack">
         <ul className="plog">
@@ -362,7 +402,7 @@ function MyTurn({ g, send }: { g: GameState; send: (a: Action) => void }) {
           ))}
         </ul>
         <button className="pbtn primary big" onClick={() => send({ type: 'nextTurn' })}>
-          End my turn ▸
+          {last ? 'Ring the bell ▸' : 'Done ▸'}
         </button>
       </div>
     );
@@ -370,62 +410,53 @@ function MyTurn({ g, send }: { g: GameState; send: (a: Action) => void }) {
   return null;
 }
 
-function PhoneChoose({ g, send, revealed }: { g: GameState; send: (a: Action) => void; revealed: number[] }) {
-  const me = g.players[g.turn];
+function PhoneChoose({ g, send }: { g: GameState; send: (a: Action) => void }) {
+  const me = g.pieces[actingPiece(g)];
   const routes = [...legalRoutes(g).values()].sort((a, b) => a.path.length - b.path.length || a.dest - b.dest);
   const sel = g.selection.dest;
-  const pv = sel !== null ? previewMove(g, g.selection.moveDie, sel) : null;
-  const warn = pv ? encounterWarning(pv.encounter, g, pv.waivesProtection) : null;
-  const dice = g.dice!;
+  const pv = sel !== null ? previewMove(g, sel) : null;
+  const minigame = pv && (pv.known === 'reaper' || pv.known === 'seance');
   return (
     <div className="pstack">
-      {me.alive ? (
-        <div className="pdice">
-          {[0, 1].map((i) => (
-            <button key={i} className={`pdie ${g.selection.moveDie === i ? 'move' : 'ghost'}`} disabled={dice[0] === dice[1]} onClick={() => send({ type: 'select', moveDie: i as 0 | 1 })}>
-              <b>{dice[i]}</b>
-              <small>{g.selection.moveDie === i ? 'you move' : 'ghost moves'}</small>
-            </button>
-          ))}
-        </div>
-      ) : (
-        <p className="pnote">Your ghost may drift up to {dice[0]} spaces (no resident-ghost move on your turn).</p>
-      )}
-      {me.alive && <p className="muted small">☠ Unknown corridors may hide a Reaper. Only where you stop counts.</p>}
-      <MiniMap game={g} revealed={revealed} pickable={new Set(routes.map((r) => r.dest))} selected={typeof sel === 'number' ? sel : null} onPick={(d) => send({ type: 'select', dest: d })} path={pv?.path} showWallLinks={!me.alive} label="Tap where to go" />
+      <p className="pnote">{rollLine(g)}</p>
+      <p className="muted small">☠ Six hidden traps: only where a move ends counts. {superReaperLine(g)}.</p>
+      <MiniMap game={g} revealed={g.traps} pickable={new Set(routes.map((r) => r.dest))} selected={typeof sel === 'number' ? sel : null} onPick={(d) => send({ type: 'select', dest: d })} path={pv?.path} showWallLinks={!me.alive} label="Tap where to go" />
       <div className="pdests">
         <button className={`pdest ${sel === 'stay' ? 'on' : ''}`} onClick={() => send({ type: 'select', dest: 'stay' })}>
           Stay
         </button>
-        {routes.map((r) => (
-          <button key={r.dest} className={`pdest ${sel === r.dest ? 'on' : ''}`} onClick={() => send({ type: 'select', dest: r.dest })}>
-            {nodeName(r.dest, pz)} <small>#{r.dest}</small>
-          </button>
-        ))}
+        {routes.map((r) => {
+          const p = previewMove(g, r.dest)!;
+          return (
+            <button key={r.dest} className={`pdest ${sel === r.dest ? 'on' : ''}`} onClick={() => send({ type: 'select', dest: r.dest })}>
+              {p.canChallenge ? '👻 ' : p.known === 'reaper' || p.known === 'seance' || p.superReaper ? '☠ ' : ''}
+              {nodeName(r.dest, pz)} <small>#{r.dest}</small>
+            </button>
+          );
+        })}
       </div>
       {pv && (
         <div className="pcard">
-          {warn && <p className="pwarn">⚠ {warn}.</p>}
+          {minigame && <p className="pwarn">☠ This ends your action with a Haunted Jump Rope.</p>}
           <p>➜ {previewSummary(pv, g, pz)}</p>
-          {pv.ghost && <p className="muted small">👻 {ghostSummary(pv.ghost, g, pz)}{pv.provisional ? ' (forecast only)' : ''}</p>}
         </div>
       )}
-      <button className={`pbtn primary big ${warn ? 'risky' : ''}`} disabled={sel === null} onClick={() => send({ type: 'confirmMove' })}>
-        {sel === null ? 'Choose where to go' : warn ? 'Risk it' : 'Confirm move'}
+      <button className={`pbtn primary big ${minigame ? 'risky' : ''}`} disabled={sel === null} onClick={() => send({ type: 'confirmMove' })}>
+        {sel === null ? 'Choose where to go' : minigame ? 'Risk it' : 'Confirm'}
       </button>
-      {me.alive && <p className="muted small">The ghost will move up to {ghostAllowance(g)}.</p>}
     </div>
   );
 }
 
-function PhoneChallenge({ view, client, seat }: { view: RoomView; client: RoomClient; seat: number }) {
+function PhoneChallenge({ view, client, piece }: { view: RoomView; client: RoomClient; piece: number }) {
   const g = view.game!;
   const ch = g.challenge!;
   const run = view.run;
-  const mine = ch.participants.includes(seat);
+  const mine = ch.participants.includes(piece);
+  const inControl = !!view.you?.inControl;
   const [phase, setPhase] = useState<'wait' | 'count' | 'play' | 'sent'>('wait');
   const [left, setLeft] = useState(3);
-  const pressRef = useRef<((p: number, d?: number) => void) | null>(null);
+  const pressRef = useRef<((p: number) => void) | null>(null);
   const sentKey = useRef('');
   const key = `${ch.id}:${run?.attempt ?? 0}`;
   const warned = useRef(false);
@@ -435,7 +466,7 @@ function PhoneChallenge({ view, client, seat }: { view: RoomView; client: RoomCl
   }, [key]);
 
   useEffect(() => {
-    if (!mine || !run?.startAt || run.paused) return;
+    if (!mine || !inControl || !run?.startAt || run.paused) return;
     if (!warned.current && client.rtt > 500 && Number.isFinite(client.rtt)) {
       warned.current = true;
       client.send({ t: 'syncPoor', rttMs: client.rtt });
@@ -453,33 +484,43 @@ function PhoneChallenge({ view, client, seat }: { view: RoomView; client: RoomCl
     };
     let timer = window.setTimeout(tick, 0);
     return () => clearTimeout(timer);
-  }, [mine, run?.startAt, run?.paused, client, key]);
+  }, [mine, inControl, run?.startAt, run?.paused, client, key]);
 
   const done = useCallback(
     (inputs: Record<number, ChallengeInput[]>) => {
       if (sentKey.current === key) return;
       sentKey.current = key;
-      client.send({ t: 'challengeInput', challengeId: ch.id, attempt: run?.attempt ?? 0, inputs: inputs[seat] ?? [] });
+      client.send({ t: 'challengeInput', challengeId: ch.id, attempt: run?.attempt ?? 0, inputs: inputs[piece] ?? [] });
       setPhase('sent');
     },
-    [client, ch.id, run?.attempt, seat, key],
+    [client, ch.id, run?.attempt, piece, key],
   );
 
   if (!mine)
     return (
       <div className="pcard">
-        <h2>{CHALLENGE_TITLES[ch.kind]}</h2>
-        <p>{ch.participants.map((p) => g.players[p].name).join(' vs ')} — watch the TV!</p>
+        <h2>{challengeTitle(ch)}</h2>
+        <p>{challengeHost(ch, g)} Watch the TV!</p>
+      </div>
+    );
+  if (!inControl)
+    return (
+      <div className="pcard">
+        <h2>{challengeTitle(ch)}</h2>
+        <p>Your piece is jumping — {g.pieces[piece].controllers[activeController(g, piece)]} controls it this round. Cheer them on!</p>
       </div>
     );
   if (run?.paused) return <p className="pstatus">{run.paused}</p>;
-  const ready = run?.ready.includes(seat);
+  const ready = run?.ready.includes(piece);
+  const k = ch.participants.indexOf(piece);
   if (!ready)
     return (
       <div className="pcard">
-        <small>{ch.oneSurvivor && ch.kind === 'duel' ? 'One survivor' : 'Survival challenge'}</small>
-        <h2>{CHALLENGE_TITLES[ch.kind]}</h2>
-        <p>{challengeHowTo(ch.kind, ch.oneSurvivor)}</p>
+        <small>{ch.kind === 'seance' ? `Séance · ${ch.participants.length} jumpers` : 'For the life'}</small>
+        <h2>{challengeTitle(ch)}</h2>
+        <p>{challengeHost(ch, g)}</p>
+        <p>{challengeHowTo(ch)}</p>
+        {ch.multipliers[k] < 1 && <p className="pwarn">{curseLine(g.pieces[piece].streak)}</p>}
         {run?.note && <p className="pnote">{run.note}</p>}
         <button
           className="pbtn primary big"
@@ -493,37 +534,31 @@ function PhoneChallenge({ view, client, seat }: { view: RoomView; client: RoomCl
         </button>
       </div>
     );
-  if (phase === 'wait') return <p>Waiting for {ch.participants.filter((p) => !run?.ready.includes(p)).map((p) => g.players[p].name).join(' and ') || 'the start'}…</p>;
+  if (phase === 'wait') return <p>Waiting for {ch.participants.filter((p) => !run?.ready.includes(p)).map((p) => g.pieces[p].name).join(' and ') || 'the start'}…</p>;
   if (phase === 'count') return <div className="pcount">{left}</div>;
   if (phase === 'sent') return <p>Sent! Waiting for the verdict on the TV…</p>;
-  const props = { ch, bots: {}, pressRef, onDone: done };
   return (
     <div className="pchallenge" key={key}>
-      <h2>{CHALLENGE_TITLES[ch.kind]}</h2>
-      {ch.kind === 'escape' && <EscapeGame {...props} human={seat} />}
-      {ch.kind === 'dance' && <DanceGame {...props} human={seat} />}
-      {(ch.kind === 'rope' || ch.kind === 'duel') && <RopeGame {...props} game={g} humans={[seat]} />}
-      <p className="muted small">Ends in about {Math.round(challengeDurationMs(ch.kind, ch.seed, ch.oneSurvivor) / 1000)} s.</p>
+      <h2>{challengeTitle(ch)}</h2>
+      <RopeGame ch={ch} game={g} bots={{}} pressRef={pressRef} onDone={done} humans={[piece]} knownLanes={[piece]} />
+      <p className="muted small">Ends in about {Math.round(challengeDurationMs(ch.seed) / 1000)} s (the last four sweeps count only on a tie).</p>
     </div>
   );
 }
 
 function PhoneResults({ g }: { g: GameState }) {
   const rows = finalScores(g);
+  const winners = rows.filter((r) => r.winner).map((r) => g.pieces[r.piece].name);
   return (
     <div className="pstack">
-      <h2>{g.endReason === 'noneAlive' ? 'Nobody survived the night' : 'Midnight!'}</h2>
+      <h2>{winners.length === 1 ? `${winners[0]} wins!` : `${winners.join(' & ')} share the win!`}</h2>
       <ol className="presults">
         {rows.map((r) => (
-          <li key={r.player} className={r.winner ? 'win' : ''}>
-            <b>{g.players[r.player].name}</b> {r.total}{' '}
-            <small className="muted">
-              ({r.alive ? `${r.banked} + ${r.carriedHalf} + ${r.survivalBonus}` : `${r.banked} + bounty ${r.bounty}`})
-            </small>
+          <li key={r.piece} className={r.winner ? 'win' : ''}>
+            <b>{g.pieces[r.piece].name}</b> {r.score} point{r.score === 1 ? '' : 's'} <small className="muted">{r.alive ? '❤ alive at the end' : '👻'}</small>
           </li>
         ))}
       </ol>
     </div>
   );
 }
-

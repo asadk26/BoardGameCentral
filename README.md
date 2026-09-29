@@ -4,16 +4,18 @@ A home for board games played around one shared screen.
 
 | Game | Play | Source |
 |---|---|---|
-| **One More Room** — a Halloween board game in a 3D haunted mansion | [asadk26.github.io/BoardGameCentral/one-more-room/](https://asadk26.github.io/BoardGameCentral/one-more-room/) | [`one-more-room/`](one-more-room/) |
+| **One More Room** — one life in a 3D haunted mansion; everyone else is a ghost trying to steal it | [asadk26.github.io/BoardGameCentral/one-more-room/](https://asadk26.github.io/BoardGameCentral/one-more-room/) | [`one-more-room/`](one-more-room/) |
 
 `index.html` is the landing page. Each game lives in its own self-contained
 folder with its own `package.json`, tests and README.
 
 The Pages site plays One More Room on one shared screen, with any mix of
 people and bots. Phone controllers need the game's small room service, which
-Pages cannot host. Run it on a laptop on the same Wi-Fi with
-`npm run build && npm run room` inside `one-more-room/`, or deploy it with the
-included `Dockerfile`. See [`one-more-room/README.md`](one-more-room/README.md).
+Pages cannot host and which is not hosted anywhere publicly: run it on a
+laptop on your home Wi-Fi (`cd one-more-room && npm ci && npm run build &&
+npm run room`), open the address it prints on the TV, and let phones scan the
+QR code. See [`one-more-room/README.md`](one-more-room/README.md) for the
+full procedure and Wi-Fi/firewall tips.
 
 ## Publishing
 

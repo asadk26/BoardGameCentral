@@ -2,11 +2,11 @@
 // game state: by the time it runs, the outcome is committed and saved, so
 // skipping (or reloading mid-animation) simply shows the final positions.
 
-import { ENTRANCE } from './engine/config';
+import { SUPER_REAPER } from './engine/config';
 import type { GameState, LogEntry } from './engine/types';
 import { nodePos, playerSlot, type V3 } from './scene/layout';
 
-export type Actor = number | 'ghost';
+export type Actor = number;
 
 interface Segment {
   actor: Actor;
@@ -53,7 +53,6 @@ class Director {
   popups: Popup[] = [];
   private popupId = 1;
   private end = 0;
-  private ghostUntil = 0;
   private timer: number | null = null;
   private listeners = new Set<Listener>();
   /** Last rendered position of each actor, written by the scene each frame. */
@@ -77,11 +76,6 @@ class Director {
     }
   }
 
-  /** Is the camera meant to watch the ghost right now? */
-  watchingGhost(): boolean {
-    return now() < this.ghostUntil;
-  }
-
   private start(actor: Actor, fallback: V3): V3 {
     return this.rendered.get(actor) ?? fallback;
   }
@@ -95,125 +89,108 @@ class Director {
     const step = 0.26 / this.speed;
     let t = Math.max(now(), this.end);
     const cue = (sound: string, at: number) => this.cues.push({ t: at, sound });
+    const above = (piece: number, h = 1.5): V3 => {
+      const p = playerSlot(after, piece);
+      return [p[0], p[1] + h, p[2]];
+    };
+    const arc = (piece: number, dur: number) => {
+      const from = this.start(piece, playerSlot(before, piece));
+      this.segs.push({ actor: piece, t0: t, t1: t + dur, kind: 'arc', points: [from, playerSlot(after, piece)] });
+    };
 
     for (const e of events) {
       switch (e.kind) {
+        case 'lifeRoll':
+          cue('dice', t);
+          t += (0.6 + 0.4 * e.rolls.length) / this.speed;
+          break;
+        case 'spawn':
+          arc(e.piece, 0.7 / this.speed);
+          if (e.alive) {
+            this.popup(above(e.piece, 1.8), `${after.pieces[e.piece].name} holds the life!`, '#ffd36b', t - now() + 0.4);
+            cue('transform', t + 0.4);
+          }
+          break;
+        case 'roundStart':
+          t += 0.2 / this.speed;
+          break;
         case 'roll':
           cue('dice', t);
           t += 0.75 / this.speed;
           break;
-        case 'decoy':
-          cue('decoy', t);
-          this.popup(nodePos(e.node, 1.1), 'Decoy placed', '#ff9ad5', t - now());
-          break;
         case 'move': {
-          const pts = e.path.map((n) => nodePos(n));
-          pts[0] = this.start(e.player, playerSlot(before, e.player));
-          pts[pts.length - 1] = playerSlot(after, e.player);
-          const dur = step * (pts.length - 1);
-          this.segs.push({ actor: e.player, t0: t, t1: t + dur, kind: 'walk', points: pts });
-          for (let i = 1; i < pts.length; i++) cue('step', t + step * i - 0.05);
+          const ghost = !before.pieces[e.piece].alive;
+          const pts = e.path.map((n) => nodePos(n, ghost ? GHOST_HOVER * 0.5 : undefined));
+          pts[0] = this.start(e.piece, playerSlot(before, e.piece));
+          pts[pts.length - 1] = playerSlot({ ...after, pieces: after.pieces.map((p, i) => (i === e.piece ? { ...p, node: e.path[e.path.length - 1] } : p)) }, e.piece);
+          const dur = (ghost ? step * 1.1 : step) * (pts.length - 1);
+          this.segs.push({ actor: e.piece, t0: t, t1: t + dur, kind: ghost ? 'glide' : 'walk', points: pts });
+          for (let i = 1; i < pts.length; i++) cue(ghost ? 'ghost' : 'step', t + (dur / (pts.length - 1)) * i - 0.05);
+          if (e.usesWall) this.popup(nodePos(e.path[e.path.length - 1], 1.4), 'Through the wall!', '#7ff5e6', t + dur - now());
           t += dur;
           break;
         }
         case 'stay':
           break;
-        case 'harvest':
-          cue('candy', t);
-          this.popup(nodePos(e.node, 1.2), e.amount > 0 ? `+${e.amount} candy` : 'Room is empty', '#ffd36b', t - now());
-          break;
-        case 'pile':
-          cue('candy', t + 0.1);
-          this.popup(nodePos(e.node, 1.5), `+${e.amount} dropped candy`, '#ffb36b', t - now() + 0.25);
-          break;
-        case 'bank':
-          cue('bank', t);
-          this.popup(nodePos(ENTRANCE, 1.4), e.amount > 0 ? `Banked ${e.amount}` : 'Safe', '#ffe08a', t - now());
-          break;
-        case 'card':
-          cue('card', t);
-          t += 0.3;
-          break;
-        case 'relocate':
-        case 'swap': {
-          const movers: number[] = e.kind === 'swap' ? [e.player, e.other] : [e.player];
-          cue('whoosh', t);
-          for (const pl of movers) {
-            const from = this.start(pl, playerSlot(before, pl));
-            const to = playerSlot(after, pl);
-            this.segs.push({ actor: pl, t0: t, t1: t + 0.7 / this.speed, kind: 'arc', points: [from, to] });
-          }
-          t += 0.7 / this.speed;
-          break;
-        }
-        case 'steal':
-          cue('candy', t);
-          this.popup(playerSlot(after, e.player).map((v, i) => (i === 1 ? v + 1.2 : v)) as V3, `Stole ${e.amount}`, '#ffd36b', t - now());
-          break;
-        case 'gain':
-          cue('candy', t);
-          this.popup(playerSlot(after, e.player).map((v, i) => (i === 1 ? v + 1.2 : v)) as V3, `+${e.amount} candy`, '#ffd36b', t - now());
-          break;
-        case 'drop':
-          cue('drop', t);
-          this.popup(nodePos(e.node, 1.2), `Dropped ${e.amount}`, '#ff8a6b', t - now());
-          break;
-        case 'ghostBonus':
-          cue('creak', t);
-          break;
-        case 'ghost': {
-          const plan = e.plan;
-          const gstep = 0.34 / this.speed;
-          const pts = plan.path.map((n) => nodePos(n, GHOST_HOVER));
-          pts[0] = this.start('ghost', nodePos(before.ghost, GHOST_HOVER));
-          const dur = gstep * (pts.length - 1);
-          this.segs.push({ actor: 'ghost', t0: t, t1: t + dur, kind: 'glide', points: pts });
-          cue('ghost', t);
-          let latest = t + dur;
-          if (plan.encounter) {
-            const c = plan.encounter;
-            const tc = t + dur;
-            const from = this.start(c.player, playerSlot(before, c.player));
-            this.segs.push({ actor: c.player, t0: tc - 0.05, t1: tc + 0.6, kind: 'fright', points: [from, from] });
-            cue('catch', tc);
-            this.popup(nodePos(c.node, 1.6), 'Caught! Break the curse…', '#7ff5e6', tc - now());
-            latest = tc + 0.6;
-          }
-          t = latest;
-          this.ghostUntil = t + 0.8;
-          break;
-        }
-        case 'trapRevealed':
-          cue('reaper', t);
-          this.popup(nodePos(e.node, 1.9), 'The Reaper rises!', '#d6a6ff', t - now());
+        case 'trapRevealed': {
+          const label = e.effect === 'reaper' ? 'A Reaper rises!' : e.effect === 'seance' ? 'Séance!' : 'Poltergeist!';
+          cue(e.effect === 'poltergeist' ? 'whoosh' : 'reaper', t);
+          this.popup(nodePos(e.node, 1.9), label, e.effect === 'reaper' ? '#d6a6ff' : e.effect === 'seance' ? '#ff9fb4' : '#a9dcff', t - now());
           t += 0.9 / this.speed;
           break;
-        case 'spared':
-          this.popup(nodePos(e.node, 1.4), 'Protected — spared this time', '#9fe8ff', t - now());
+        }
+        case 'seanceDormant':
+          this.popup(nodePos(e.node, 1.6), 'The candles are cold — no Séances left', '#c9bdd6', t - now());
+          t += 0.6 / this.speed;
           break;
-        case 'outcome': {
-          const o = e.outcome;
-          for (const d of o.deaths) {
-            const from = this.start(d.player, playerSlot(before, d.player));
-            this.segs.push({ actor: d.player, t0: t, t1: t + 1.1 / this.speed, kind: 'fright', points: [from, playerSlot(after, d.player)] });
-            this.popup(nodePos(d.node, 1.7), 'Became a ghost!', '#7ff5e6', t - now());
-            cue('transform', t);
+        case 'superReaper':
+          cue('reaper', t);
+          this.popup(nodePos(SUPER_REAPER, 2.0), e.effect === 'seance' ? 'Super Reaper: Séance!' : 'Super Reaper: Reaper’s Challenge!', '#ff7b98', t - now());
+          t += 0.9 / this.speed;
+          break;
+        case 'poltergeist':
+          cue('whoosh', t);
+          arc(e.piece, 0.9 / this.speed);
+          t += 0.9 / this.speed;
+          break;
+        case 'challenge': {
+          const c = e.challenge;
+          if (c.host === 'contact') {
+            cue('catch', t);
+            const def = c.livingAtStart;
+            const from = this.start(def, playerSlot(before, def));
+            this.segs.push({ actor: def, t0: t, t1: t + 0.6, kind: 'fright', points: [from, from] });
+            this.popup(nodePos(c.node, 1.7), 'Challenge!', '#ff8a9a', t - now());
+            t += 0.6;
+          } else if (c.kind === 'seance') {
+            this.popup(nodePos(c.node, 2.2), 'Everyone to the Séance!', '#ff9fb4', t - now());
+            t += 0.4;
           }
-          for (const r of o.relocations) {
-            const from = this.start(r.player, playerSlot(before, r.player));
-            this.segs.push({ actor: r.player, t0: t, t1: t + 0.8 / this.speed, kind: 'arc', points: [from, playerSlot(after, r.player)] });
-            this.popup(nodePos(r.from, 1.5), 'Escaped!', '#b8ffb0', t - now());
-          }
-          if (!o.deaths.length && !o.relocations.length) this.popup(nodePos(o.participants.length ? after.players[o.participants[0]].node : 0, 1.6), 'Survived!', '#b8ffb0', t - now());
-          if (o.bounty && o.bounty.amount) this.popup(playerSlot(after, o.bounty.player).map((v, i) => (i === 1 ? v + 1.4 : v)) as V3, `+${o.bounty.amount} bounty`, '#7ff5e6', t - now() + 0.4);
-          t += (o.deaths.length ? 1.2 : 0.8) / this.speed;
           break;
         }
-        case 'ghostWaits':
-          this.popup(nodePos(before.ghost, 1.6), 'The ghost waits', '#7ff5e6', t - now());
+        case 'outcome': {
+          const o = e.outcome;
+          for (const m of o.moves) {
+            const from = this.start(m.piece, playerSlot(before, m.piece));
+            this.segs.push({ actor: m.piece, t0: t, t1: t + 0.8 / this.speed, kind: m.reason === 'claim' ? 'glide' : 'arc', points: [from, playerSlot(after, m.piece)] });
+          }
+          if (!o.transferred) this.popup(above(o.winner, 1.9), 'Defended!', '#b8ffb0', t - now());
+          t += 0.8 / this.speed;
           break;
-        case 'midnight':
-          break; // announced by the store directly, so skipping can't lose it
+        }
+        case 'lifeTransfer':
+          cue('transform', t);
+          this.popup(above(e.to, 2.0), `${after.pieces[e.to].name} steals the life!`, '#ffd36b', t - now());
+          t += 0.9 / this.speed;
+          break;
+        case 'huntDeclined':
+          this.popup(above(e.piece, 1.6), 'Lets it pass', '#7ff5e6', t - now());
+          break;
+        case 'roundEnd':
+          cue('bell', t);
+          this.popup(above(e.piece, 2.1), `+1 point · round ${e.round}`, '#ffe08a', t - now());
+          t += 1.1 / this.speed;
+          break;
         case 'gameOver':
           cue('fanfare', t);
           break;
@@ -238,7 +215,6 @@ class Director {
     this.segs = [];
     this.cues = [];
     this.end = now();
-    this.ghostUntil = 0;
     this.popups = this.popups.filter((p) => p.t0 <= now());
     this.setBusy(false);
   }

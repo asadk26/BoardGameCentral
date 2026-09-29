@@ -1,6 +1,6 @@
 // Graph queries shared by the rules, the previews and the renderer.
 
-import { ENTRANCE, GHOST_WALL_LINKS, NODE_COUNT, ORDINARY_EDGES, SECRET_EDGES } from './config';
+import { GHOST_WALL_LINKS, NODE_COUNT, ORDINARY_EDGES, SECRET_EDGES } from './config';
 
 function buildAdjacency(edges: ReadonlyArray<readonly [number, number]>): number[][] {
   const adj: number[][] = Array.from({ length: NODE_COUNT }, () => []);
@@ -14,25 +14,25 @@ function buildAdjacency(edges: ReadonlyArray<readonly [number, number]>): number
 
 /** Ordinary neighbours, ascending by id. */
 export const ORDINARY_ADJ: readonly (readonly number[])[] = buildAdjacency(ORDINARY_EDGES);
-/** Secret-passage neighbours (players only). */
+/** Secret-passage neighbours (every piece, at most one per move). */
 export const SECRET_ADJ: readonly (readonly number[])[] = buildAdjacency(SECRET_EDGES);
-/** Ghost-only links straight through a wall (player ghosts only). */
+/** Ghost-only links straight through a wall. */
 export const WALL_ADJ: readonly (readonly number[])[] = buildAdjacency(GHOST_WALL_LINKS);
 
 export function isSecretEdge(a: number, b: number): boolean {
   return SECRET_ADJ[a].includes(b);
 }
 
+export function isWallEdge(a: number, b: number): boolean {
+  return WALL_ADJ[a].includes(b);
+}
+
 /**
- * Breadth-first search over ordinary edges, optionally skipping blocked nodes.
- * Neighbours are expanded in ascending id order, so the first path found to a
- * node is its shortest path with the lower-next-node-id tie-break applied at
- * every step (lexicographically smallest among the shortest).
+ * Breadth-first search over ordinary edges. Neighbours are expanded in
+ * ascending id order, so the first path found to a node is its shortest path
+ * with the lower-next-node-id tie-break applied at every step.
  */
-export function bfs(
-  start: number,
-  opts: { blocked?: (n: number) => boolean } = {},
-): { dist: number[]; parent: number[] } {
+export function bfs(start: number): { dist: number[]; parent: number[] } {
   const dist = new Array<number>(NODE_COUNT).fill(Infinity);
   const parent = new Array<number>(NODE_COUNT).fill(-1);
   dist[start] = 0;
@@ -41,7 +41,6 @@ export function bfs(
     const n = queue[qi];
     for (const m of ORDINARY_ADJ[n]) {
       if (dist[m] !== Infinity) continue;
-      if (opts.blocked?.(m)) continue;
       dist[m] = dist[n] + 1;
       parent[m] = n;
       queue.push(m);
@@ -50,31 +49,16 @@ export function bfs(
   return { dist, parent };
 }
 
-export function pathFromParents(parent: number[], start: number, target: number): number[] | null {
-  if (start === target) return [start];
-  if (parent[target] === -1) return null;
-  const path = [target];
-  let n = target;
-  while (n !== start) {
-    n = parent[n];
-    if (n === -1) return null;
-    path.push(n);
-  }
-  return path.reverse();
+const DIST: number[][] = Array.from({ length: NODE_COUNT }, (_, i) => bfs(i).dist);
+
+/** Ordinary-edge distance: what attack range, retreats and Poltergeists measure. */
+export function ordinaryDistance(a: number, b: number): number {
+  return DIST[a][b];
 }
 
-/** The ghost never enters the entrance hall and ignores secret passages. */
-export function ghostBfs(start: number) {
-  return bfs(start, { blocked: (n) => n === ENTRANCE });
-}
-
-export function ghostPath(start: number, target: number): number[] | null {
-  const { parent } = ghostBfs(start);
-  return pathFromParents(parent, start, target);
-}
-
-export function ghostDistance(a: number, b: number): number {
-  return ghostBfs(a).dist[b];
+/** A ghost may challenge from the living piece's space or one ordinary edge away. */
+export function inAttackRange(a: number, b: number): boolean {
+  return DIST[a][b] <= 1;
 }
 
 export interface PlayerRoute {
@@ -82,6 +66,7 @@ export interface PlayerRoute {
   /** Full node sequence including the start node. */
   path: number[];
   usesSecret: boolean;
+  usesWall: boolean;
 }
 
 function lexLess(a: number[], b: number[]): boolean {
@@ -91,73 +76,46 @@ function lexLess(a: number[], b: number[]): boolean {
   return a.length < b.length;
 }
 
-export interface RouteOptions {
-  /** Nodes that may be neither entered nor passed (hostile ghosts, for the living). */
-  blocked?: ReadonlySet<number>;
-  /** Player ghosts: may use the ghost-only wall links and may never enter the entrance. */
-  ghost?: boolean;
-}
-
 /**
- * Every legal destination for a move of 1..allowance steps, each with its
+ * Every destination reachable in 1..allowance steps, each with its
  * deterministic route: the shortest legal route, lower next-node id first on
- * ties. Legal routes are simple paths that avoid blocked nodes, use at most
- * one secret-passage edge, and (for the living) stop on entering the entrance
- * hall. Player ghosts may also cross the ghost-only wall links and never
- * enter the entrance. Routes are enumerated exhaustively (the graph is tiny),
- * which makes both the shortest-route and tie-break rules easy to trust.
+ * ties. Routes are simple paths using at most one secret-passage edge; ghosts
+ * may also cross the wall links (one step each). Pieces never block one
+ * another and the entrance is an ordinary space. Routes are enumerated
+ * exhaustively (the graph is tiny).
  *
- * Hidden Reaper traps are deliberately not an input: route output can never
- * depend on where they are.
+ * Hidden traps are deliberately not an input: route output can never depend
+ * on where they are.
  */
-export function playerRoutes(start: number, allowance: number, blockedOrGhostNode: number | RouteOptions = {}): Map<number, PlayerRoute> {
-  const opts: RouteOptions = typeof blockedOrGhostNode === 'number' ? { blocked: new Set([blockedOrGhostNode]) } : blockedOrGhostNode;
-  const blocked = opts.blocked ?? new Set<number>();
+export function pieceRoutes(start: number, allowance: number, ghost: boolean): Map<number, PlayerRoute> {
   const best = new Map<number, PlayerRoute>();
   const path = [start];
   const onPath = new Set([start]);
 
-  const visit = (usedSecret: boolean) => {
+  const visit = (usedSecret: boolean, usedWall: boolean) => {
     const here = path[path.length - 1];
     if (path.length > 1) {
       const current = best.get(here);
       const candidate = path.slice();
-      if (
-        !current ||
-        candidate.length < current.path.length ||
-        (candidate.length === current.path.length && lexLess(candidate, current.path))
-      ) {
-        best.set(here, { dest: here, path: candidate, usesSecret: usedSecret });
+      if (!current || candidate.length < current.path.length || (candidate.length === current.path.length && lexLess(candidate, current.path))) {
+        best.set(here, { dest: here, path: candidate, usesSecret: usedSecret, usesWall: usedWall });
       }
-      if (here === ENTRANCE) return; // arriving at the entrance ends movement
     }
     if (path.length - 1 >= allowance) return;
-    const steps: Array<[number, boolean]> = [];
-    for (const m of ORDINARY_ADJ[here]) steps.push([m, false]);
-    if (opts.ghost) for (const m of WALL_ADJ[here]) steps.push([m, false]);
-    if (!usedSecret) for (const m of SECRET_ADJ[here]) steps.push([m, true]);
+    const steps: Array<[number, 'o' | 's' | 'w']> = [];
+    for (const m of ORDINARY_ADJ[here]) steps.push([m, 'o']);
+    if (ghost) for (const m of WALL_ADJ[here]) steps.push([m, 'w']);
+    if (!usedSecret) for (const m of SECRET_ADJ[here]) steps.push([m, 's']);
     steps.sort((a, b) => a[0] - b[0]);
-    for (const [m, secret] of steps) {
-      if (blocked.has(m) || onPath.has(m)) continue;
-      if (opts.ghost && m === ENTRANCE) continue;
+    for (const [m, kind] of steps) {
+      if (onPath.has(m)) continue;
       path.push(m);
       onPath.add(m);
-      visit(usedSecret || secret);
+      visit(usedSecret || kind === 's', usedWall || kind === 'w');
       path.pop();
       onPath.delete(m);
     }
   };
-  visit(false);
-  return best;
-}
-
-/** Shortest distance over ordinary edges, avoiding the entrance (for relocation). */
-export function nearestWhere(start: number, ok: (n: number) => boolean): number | null {
-  const { dist } = bfs(start, { blocked: (n) => n === ENTRANCE });
-  let best: number | null = null;
-  for (let n = 0; n < NODE_COUNT; n++) {
-    if (n === start || dist[n] === Infinity || !ok(n)) continue;
-    if (best === null || dist[n] < dist[best] || (dist[n] === dist[best] && n < best)) best = n;
-  }
+  visit(false, false);
   return best;
 }

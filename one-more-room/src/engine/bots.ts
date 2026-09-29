@@ -1,12 +1,11 @@
 // Ordinary rule-based bots. They decide from a SeatView — the public state
-// plus their own trap nomination — never from the authority's full state or
-// its RNG. Personality (what they value) is separate from reflex skill (how
-// well they press buttons in survival games).
+// plus their own piece's trap nomination — never from the authority's full
+// state or its RNG. Personality (what they value) is separate from reflex
+// skill (how well they jump in Haunted Jump Rope).
 
-import { ENTRANCE, ROUNDS, SCORING, TRAP_COUNT, TRAP_ELIGIBLE } from './config';
-import { ghostDistance } from './graph';
-import { canPlaceDecoy, isExposed, isProtected, legalRoutes, previewMove, scoreOf } from './engine';
-import { bfs } from './graph';
+import { curseMultiplier, SUPER_REAPER, TRAP_COUNT, TRAP_ELIGIBLE } from './config';
+import { inAttackRange, ordinaryDistance, pieceRoutes } from './graph';
+import { actingPiece, knownEffectAt, legalRoutes, livingPiece, movementAllowance, previewMove } from './engine';
 import { nextFloat } from './rng';
 import type { Action, GameState, MovePreview } from './types';
 import type { SeatView } from './view';
@@ -23,18 +22,23 @@ export interface BotProfile {
 export interface BotMemory {
   /** The bot's own stream: nothing to do with the game's RNG. */
   rng: number;
-  /** The move decided for the current turn, so select → confirm never wavers. */
-  plan?: { key: string; md: 0 | 1; dest: number | 'stay' };
+  /** The move decided for the current action, so select → confirm never wavers. */
+  plan?: { key: string; dest: number | 'stay' };
 }
 
 export function newBotMemory(seed: number): BotMemory {
   return { rng: seed >>> 0 };
 }
 
-const WEIGHTS: Record<Personality, { gain: number; risk: number; bank: number; mischief: number; unknown: number }> = {
-  cautious: { gain: 0.8, risk: 1.4, bank: 1.3, mischief: 0.1, unknown: 1.3 },
-  greedy: { gain: 1.3, risk: 0.7, bank: 0.9, mischief: 0.3, unknown: 0.7 },
-  mischievous: { gain: 1.0, risk: 0.9, bank: 1.0, mischief: 1.2, unknown: 0.9 },
+/**
+ * cautious: the living piece runs far; ghosts chase directly.
+ * greedy: ghosts go for known Reaper tiles and any duel they can reach.
+ * mischievous: happy to trigger Séances and gamble on unknown corridors.
+ */
+const WEIGHTS: Record<Personality, { danger: number; unknown: number; remote: number; chaos: number }> = {
+  cautious: { danger: 1.4, unknown: 1.2, remote: 0.8, chaos: 0.2 },
+  greedy: { danger: 1.0, unknown: 0.8, remote: 1.3, chaos: 0.5 },
+  mischievous: { danger: 0.8, unknown: 0.5, remote: 1.0, chaos: 1.2 },
 };
 
 export function reflexOf(profile: BotProfile): ReflexSkill {
@@ -47,113 +51,138 @@ function rand(mem: BotMemory): number {
   return v;
 }
 
-const homeDist = bfs(ENTRANCE).dist;
+// Where a ghost standing on `node` can end its move, for each possible roll.
+const reachCache = new Map<number, Array<Set<number>>>();
+function ghostReach(node: number): Array<Set<number>> {
+  let r = reachCache.get(node);
+  if (!r) {
+    r = [1, 2, 3, 4, 5, 6].map((die) => {
+      const set = new Set<number>([node, ...pieceRoutes(node, movementAllowance(die, false), true).keys()]);
+      return set;
+    });
+    reachCache.set(node, r);
+  }
+  return r;
+}
 
-/** Rough chance an unrevealed, eligible corridor hides a trap, from public facts only. */
+/** Chance (0–1) that a ghost on `ghostNode` can end its next move within ordinary range of `target`. */
+export function threatChance(ghostNode: number, target: number): number {
+  const reach = ghostReach(ghostNode);
+  let hits = 0;
+  for (const set of reach) {
+    for (const n of set) {
+      if (inAttackRange(n, target)) {
+        hits++;
+        break;
+      }
+    }
+  }
+  return hits / 6;
+}
+
+/** Chance an unrevealed, eligible corridor hides a trap, from public facts only. */
 function unknownTrapOdds(s: GameState, ownNomination: number | null, node: number): number {
-  if (!TRAP_ELIGIBLE.includes(node)) return 0;
-  if (s.traps.some((t) => t.node === node)) return 0; // revealed: handled as a known Reaper
+  if (!TRAP_ELIGIBLE.includes(node) || s.traps.some((t) => t.node === node)) return 0;
   if (node === ownNomination) return 1;
-  const hidden = TRAP_COUNT - s.traps.length - (ownNomination !== null && !s.traps.some((t) => t.node === ownNomination) ? 1 : 0);
+  const ownHidden = ownNomination !== null && !s.traps.some((t) => t.node === ownNomination) ? 1 : 0;
+  const hidden = TRAP_COUNT - s.traps.length - ownHidden;
   const candidates = TRAP_ELIGIBLE.filter((n) => !s.traps.some((t) => t.node === n) && n !== ownNomination).length;
   return candidates > 0 ? Math.max(0, hidden) / candidates : 0;
 }
 
-function evaluateLiving(view: SeatView, pv: MovePreview, profile: BotProfile, mem: BotMemory): number {
-  const s = view.state;
-  const me = s.players[view.seat];
-  const w = WEIGHTS[profile.personality];
-  const roundsLeft = ROUNDS - s.round;
-  let v = 0;
-  const gain = pv.harvest + pv.pile;
-  v += gain * w.gain;
-  // Banking is worth more as midnight nears, and the survival bonus rewards a real bank.
-  if (pv.bank > 0) {
-    v += pv.bank * w.bank * (1 + (roundsLeft < 3 ? 0.8 : 0));
-    if (me.banked < SCORING.survivalBonusMinBanked && me.banked + pv.bank >= SCORING.survivalBonusMinBanked) v += SCORING.survivalBonus * w.bank;
-  }
-  if (pv.dest === 'stay' && me.node === ENTRANCE) v -= 0.5; // camping earns nothing
-  // Carrying far from home late is risky.
-  const destNode = pv.dest === 'stay' ? me.node : pv.dest;
-  v -= (pv.carriedAfter * homeDist[destNode] * (roundsLeft < 2 ? 0.25 : 0.06)) * w.risk;
-  // Known encounters.
-  const deathCost = 6 + pv.carriedAfter + (me.banked >= SCORING.survivalBonusMinBanked ? SCORING.survivalBonus : 0);
-  const enc = pv.encounter;
-  if (enc.kind === 'reaper') v -= 0.45 * deathCost * w.risk;
-  if (enc.kind === 'duel') {
-    const foe = Math.max(...enc.opponents.map((o) => s.players[o].carried));
-    v -= (enc.lethal ? 0.5 : 0.3) * deathCost * w.risk;
-    v += (enc.lethal ? 0.5 : 0.3) * foe * w.mischief;
-  }
-  if (enc.kind === 'superReaper') {
-    const foes = enc.opponents.map((o) => scoreOf(s.players[o]).total);
-    v -= 0.5 * deathCost * w.risk;
-    if (foes.length) v += 0.5 * Math.max(...foes) * 0.4 * w.mischief;
-  }
-  // Hidden traps: a generic risk on unrevealed corridor spaces.
-  if (pv.dest !== 'stay' && pv.dest !== ENTRANCE) v -= unknownTrapOdds(s, view.ownNomination, pv.dest) * 0.4 * deathCost * w.unknown;
-  // The resident ghost's forecast.
-  const g = pv.ghost;
-  if (g?.encounter) {
-    if (g.encounter.player === view.seat) v -= 0.4 * deathCost * w.risk;
-    else v += 0.3 * s.players[g.encounter.player].carried * w.mischief;
-  }
-  return v + rand(mem) * 0.3; // a little noise so bots are not clockwork
+/** A ghost's rough chance of winning a duel against the living piece. */
+function duelOdds(s: GameState): number {
+  const living = livingPiece(s);
+  return Math.min(0.8, 0.5 + (1 - curseMultiplier(s.pieces[living].streak)) * 0.8);
 }
 
-/** Choose the next action for `view.seat`, or null if it has nothing to do right now. */
+/** Ghosts who still have an action this round after the current one. */
+function huntersStillToAct(s: GameState, except: number): number[] {
+  return s.schedule.slice(s.slot + 1).filter((i) => i !== except && !s.pieces[i].alive);
+}
+
+function evaluateLiving(view: SeatView, pv: MovePreview, profile: BotProfile, mem: BotMemory): number {
+  const s = view.state;
+  const me = s.pieces[view.piece];
+  const w = WEIGHTS[profile.personality];
+  const end = pv.dest === 'stay' ? me.node : pv.dest;
+  const n = s.pieces.length;
+  const loseDuel = duelOdds(s);
+  let risk = 0;
+  // Everyone still to act this round can try to reach us.
+  for (const g of huntersStillToAct(s, view.piece)) risk += threatChance(s.pieces[g].node, end) * loseDuel;
+  // Next round's hunters too, a little.
+  for (let g = 0; g < n; g++) if (g !== view.piece && !huntersStillToAct(s, view.piece).includes(g)) risk += 0.25 * threatChance(s.pieces[g].node, end) * loseDuel;
+  let v = -risk * w.danger;
+  if (pv.known === 'reaper') v -= loseDuel * 1.2;
+  if (pv.known === 'seance') v -= ((n - 1) / n) * (1.2 - w.chaos * 0.3);
+  if (pv.dest !== 'stay') {
+    const odds = unknownTrapOdds(s, view.ownNomination, end);
+    // Two in six effects are Séances, two are Reaper duels; Poltergeists just move us.
+    v -= odds * ((2 / 6) * ((n - 1) / n) + (2 / 6) * loseDuel) * w.unknown;
+  }
+  // Keep away from the old lair and dead ends where ghosts cluster.
+  for (let g = 0; g < n; g++) if (g !== view.piece) v += Math.min(4, ordinaryDistance(s.pieces[g].node, end)) * 0.03;
+  return v + rand(mem) * 0.05;
+}
+
+function evaluateGhost(view: SeatView, pv: MovePreview, profile: BotProfile, mem: BotMemory): number {
+  const s = view.state;
+  const me = s.pieces[view.piece];
+  const w = WEIGHTS[profile.personality];
+  const living = livingPiece(s);
+  const end = pv.dest === 'stay' ? me.node : pv.dest;
+  const n = s.pieces.length;
+  const win = duelOdds(s);
+  let v = 0;
+  if (pv.known === 'reaper') v = win * w.remote;
+  else if (pv.known === 'seance') v = (1 / n) * (0.8 + w.chaos * 0.4);
+  else if (pv.known === 'poltergeist') v = 0.05;
+  else if (pv.canChallenge) v = win;
+  else v = 0.15 / (1 + ordinaryDistance(end, s.pieces[living].node));
+  // An unknown corridor might hide something; for a ghost that is mostly upside.
+  if (pv.dest !== 'stay' && !pv.canChallenge && !pv.known) v += unknownTrapOdds(s, view.ownNomination, end) * 0.2 * w.chaos;
+  return v + rand(mem) * 0.04;
+}
+
+function planMove(view: SeatView, profile: BotProfile, mem: BotMemory): number | 'stay' {
+  const s = view.state;
+  const me = s.pieces[view.piece];
+  let best: { dest: number | 'stay'; v: number } | null = null;
+  for (const dest of [...legalRoutes(s).keys(), 'stay' as const]) {
+    const pv = previewMove(s, dest);
+    if (!pv) continue;
+    const v = me.alive ? evaluateLiving(view, pv, profile, mem) : evaluateGhost(view, pv, profile, mem);
+    if (!best || v > best.v) best = { dest, v };
+  }
+  return best ? best.dest : 'stay';
+}
+
+/** Choose the next action for `view.piece`, or null if it has nothing to do right now. */
 export function botAction(view: SeatView, profile: BotProfile, mem: BotMemory): Action | null {
   const s = view.state;
-  const seat = view.seat;
+  const me = view.piece;
   if (s.phase === 'placement') {
-    if (s.nominations[seat] !== null) return null;
-    return { type: 'nominate', seat, node: TRAP_ELIGIBLE[Math.floor(rand(mem) * TRAP_ELIGIBLE.length)] };
+    if (s.nominations[me] !== null) return null;
+    return { type: 'nominate', piece: me, node: TRAP_ELIGIBLE[Math.floor(rand(mem) * TRAP_ELIGIBLE.length)] };
   }
-  if (s.turn !== seat || s.phase === 'gameOver' || s.phase === 'challenge') return null;
-  const me = s.players[seat];
-  const w = WEIGHTS[profile.personality];
-
+  if (actingPiece(s) !== me) return null;
   switch (s.phase) {
-    case 'turnStart': {
-      if (canPlaceDecoy(s)) {
-        const threat = ghostDistance(s.ghost, me.node) <= 7 && me.carried >= (profile.personality === 'cautious' ? 3 : 5);
-        if (threat && !isProtected(s, seat)) return { type: 'placeDecoy' };
-      }
+    case 'turnStart':
       return { type: 'roll' };
-    }
     case 'choose': {
-      const key = `${s.turnNumber}:${s.dice!.join(',')}`;
-      if (mem.plan?.key !== key) mem.plan = { key, ...(me.alive ? planLiving(view, profile, mem) : planGhostMove(view, profile, mem)) };
-      const plan = mem.plan;
-      if (me.alive && s.selection.moveDie !== plan.md) return { type: 'select', moveDie: plan.md, dest: plan.dest };
-      if (s.selection.dest !== plan.dest) return { type: 'select', dest: plan.dest };
+      const key = `${s.actionNumber}:${s.die}`;
+      if (mem.plan?.key !== key) mem.plan = { key, dest: planMove(view, profile, mem) };
+      if (s.selection.dest !== mem.plan.dest) return { type: 'select', dest: mem.plan.dest };
       return { type: 'confirmMove' };
     }
     case 'pick': {
-      const pk = s.pick!;
-      const byCarried = pk.options.slice().sort((a, b) => s.players[b].carried - s.players[a].carried || scoreOf(s.players[b]).total - scoreOf(s.players[a]).total);
-      return { type: 'pickOpponent', option: byCarried[0] };
+      // Pick the ghost whose win would hurt least: the one with the fewest points.
+      const opts = s.pick!.options.slice().sort((a, b) => s.pieces[a].score - s.pieces[b].score || a - b);
+      return { type: 'pickOpponent', option: opts[0] };
     }
-    case 'event': {
-      const ev = s.event!;
-      if (ev.type === 'secretPassage') {
-        const best = ev.options.slice().sort((a, b) => homeDist[a] - homeDist[b])[0];
-        if (me.carried >= 3 && homeDist[best] < homeDist[me.node]) return { type: 'eventChoose', option: best };
-        return ev.canDecline ? { type: 'eventDecline' } : { type: 'eventChoose', option: ev.options[0] };
-      }
-      if (ev.type === 'stickyFingers') {
-        const victim = ev.options.slice().sort((a, b) => s.players[b].carried - s.players[a].carried)[0];
-        return { type: 'eventChoose', option: victim };
-      }
-      if (ev.type === 'costumeMixup') {
-        const closer = ev.options.filter((o) => homeDist[s.players[o].node] + 1 < homeDist[me.node]);
-        if (closer.length && (me.carried >= 3 || rand(mem) < w.mischief * 0.4)) return { type: 'eventChoose', option: closer[0] };
-        return { type: 'eventDecline' };
-      }
-      return ev.canDecline ? { type: 'eventDecline' } : { type: 'eventChoose', option: ev.options[0] };
-    }
-    case 'ghost':
-      return { type: 'moveGhost' };
+    case 'hunt':
+      return { type: 'hunt' };
     case 'summary':
       return { type: 'nextTurn' };
     default:
@@ -161,48 +190,13 @@ export function botAction(view: SeatView, profile: BotProfile, mem: BotMemory): 
   }
 }
 
-function planLiving(view: SeatView, profile: BotProfile, mem: BotMemory): { md: 0 | 1; dest: number | 'stay' } {
-  const s = view.state;
-  const dice = s.dice!;
-  let best: { md: 0 | 1; dest: number | 'stay'; v: number } | null = null;
-  for (const md of (dice[0] === dice[1] ? [0] : [0, 1]) as Array<0 | 1>) {
-    for (const dest of [...legalRoutes(s, md).keys(), 'stay' as const]) {
-      const pv = previewMove(s, md, dest);
-      if (!pv) continue;
-      const v = evaluateLiving(view, pv, profile, mem);
-      if (!best || v > best.v) best = { md, dest, v };
-    }
-  }
-  return best ? { md: best.md, dest: best.dest } : { md: 0, dest: 'stay' };
-}
-
-function planGhostMove(view: SeatView, profile: BotProfile, mem: BotMemory): { md: 0 | 1; dest: number | 'stay' } {
-  const s = view.state;
-  const me = s.players[view.seat];
-  const routes = [...legalRoutes(s).values()];
-  const living = s.players.map((_, i) => i).filter((i) => i !== view.seat && isExposed(s, i));
-  let bestDest: number | 'stay' = 'stay';
-  let bestV = -Infinity;
-  for (const r of routes) {
-    const here = living.filter((i) => s.players[i].node === r.dest);
-    let v = 0;
-    if (here.length) v = 10 + Math.max(...here.map((i) => s.players[i].carried)) + (me.bounty < SCORING.bountyCap ? 4 : 0);
-    else if (living.length) {
-      // Head for the richest reachable prey.
-      const dist = bfs(r.dest, { blocked: (n) => n === ENTRANCE }).dist;
-      v = Math.max(...living.map((i) => (s.players[i].carried + 1) / (1 + dist[s.players[i].node])));
-    }
-    v += rand(mem) * (profile.personality === 'mischievous' ? 0.6 : 0.3);
-    if (v > bestV) {
-      bestV = v;
-      bestDest = r.dest;
-    }
-  }
-  return { md: 0, dest: bestDest };
-}
-
 export function defaultBotProfile(i: number): BotProfile {
   const personalities: Personality[] = ['greedy', 'cautious', 'mischievous'];
   const skills: SkillLevel[] = ['steady', 'shaky', 'sharp'];
   return { personality: personalities[i % 3], skill: skills[(i + 1) % 3] };
+}
+
+// Exposed for balance tooling: whether the Super Reaper or a known tile is reachable.
+export function reachableKnownTiles(s: GameState): number[] {
+  return [...legalRoutes(s).keys()].filter((d) => d === SUPER_REAPER || knownEffectAt(s, d) !== null);
 }

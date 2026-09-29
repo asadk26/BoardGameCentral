@@ -21,6 +21,14 @@ const ARGS = ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignor
 const SAVE_KEY = 'one-more-room/save';
 const ONLY = process.env.ONLY ? process.env.ONLY.split(',').map(Number) : null;
 const run = (n) => !ONLY || ONLY.includes(n);
+const TRAPS = [
+  { node: 9, effect: 'reaper', revealed: false, spent: false },
+  { node: 14, effect: 'seance', revealed: false, spent: false },
+  { node: 19, effect: 'poltergeist', revealed: false, spent: false },
+  { node: 21, effect: 'reaper', revealed: false, spent: false },
+  { node: 26, effect: 'seance', revealed: false, spent: false },
+  { node: 30, effect: 'poltergeist', revealed: false, spent: false },
+];
 
 let server = null;
 let URL = process.env.URL;
@@ -48,10 +56,12 @@ async function newPage(viewport = { width: 1440, height: 900 }, opts = {}) {
 const S = (page) =>
   page.evaluate(() => {
     const s = window.__omr.getState();
-    return { screen: s.screen, busy: s.busy, cameraMode: s.cameraMode, settings: s.settings, game: s.session?.game ?? null, known: s.session?.known ?? [], modal: s.modal };
+    return { screen: s.screen, busy: s.busy, cameraMode: s.cameraMode, settings: s.settings, game: s.session?.game ?? null, known: s.session?.known ?? [], modal: s.modal, seats: s.seats };
   });
+const living = (g) => g.pieces.findIndex((p) => p.alive);
+const acting = (g) => g.schedule[g.slot];
 async function settle(page) {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 80; i++) {
     if (!(await S(page)).busy) return;
     const skip = page.getByRole('button', { name: /Skip animation/ });
     if (i > 2 && (await skip.count())) await skip.click().catch(() => {});
@@ -66,423 +76,380 @@ async function clearStorage(page, query = '') {
   await page.reload();
 }
 
-/** Set up seats in the setup screen: kinds is e.g. ['human','human','bot']. */
-async function setupSeats(page, kinds) {
-  await page.getByRole('button', { name: 'Play', exact: true }).click();
+/** Set up pieces on the setup screen: kinds like ['human','bot'], optional costumes. */
+async function setupPieces(page, kinds, costumes = []) {
+  await page.getByRole('button', { name: /Play on this screen|New game/ }).first().click();
   const count = async () => Number((await page.locator('.stepper span').innerText()).split(' ')[0]);
-  while ((await count()) > kinds.length) await page.getByRole('button', { name: 'Fewer players' }).click();
-  while ((await count()) < kinds.length) await page.getByRole('button', { name: 'More players' }).click();
+  while ((await count()) > kinds.length) await page.getByRole('button', { name: 'Fewer pieces' }).click();
+  while ((await count()) < kinds.length) await page.getByRole('button', { name: 'More pieces' }).click();
   for (let i = 0; i < kinds.length; i++) {
-    const group = page.getByRole('group', { name: `Player ${i + 1} is played by` });
-    await group.getByRole('button', { name: kinds[i] === 'human' ? 'Person' : /greedy/ }).click();
+    const group = page.getByRole('group', { name: `Piece ${i + 1} is played by` });
+    await group.getByRole('button', { name: kinds[i] === 'human' ? /^(Person|People)$/ : /greedy/ }).click();
+    if (costumes[i]) await page.getByRole('radiogroup', { name: `Piece ${i + 1} costume` }).getByRole('radio', { name: new RegExp(`^${costumes[i]}`) }).click();
   }
 }
 
-/** Pass-and-play secret placement for every human seat. */
+/** Pass-and-play secret placement for every human piece. */
 async function placeAll(page) {
-  for (let k = 0; k < 6; k++) {
-    const show = page.getByRole('button', { name: /show me the map/ });
+  for (let k = 0; k < 4; k++) {
+    const show = page.getByRole('button', { name: /show the map/ });
     if (!(await show.count())) break;
     await show.click();
-    const node = [18, 26, 2, 30, 6, 21][k];
-    await page.getByRole('button', { name: `Space ${node}` }).click();
-    await page.getByRole('button', { name: /Curse space/ }).click();
+    const node = [18, 26, 2, 30][k];
+    await page.getByRole('button', { name: `Space ${node}`, exact: true }).click();
+    await page.getByRole('button', { name: /Set a trap/ }).click();
     await page.getByRole('button', { name: /Hide it/ }).click();
   }
   await page.waitForTimeout(400);
 }
 
-/** Rewrite the saved game, reload and resume through the real UI. */
-async function loadScenario(page, mutate) {
-  const save = JSON.parse(await page.evaluate((k) => localStorage.getItem(k), SAVE_KEY));
-  const g = save.session.game;
-  Object.assign(g, { phase: 'turnStart', turn: 0, dice: null, selection: { moveDie: 0, dest: null }, event: null, pick: null, challenge: null, lastOutcome: null, decoy: null, ghostBonus: 0, log: [], ghost: 16, round: 2, turnNumber: 5 });
-  g.players.forEach((p) => Object.assign(p, { node: 0, carried: 0, alive: true, protectedUntil: null, decoyUsed: false, facingFrom: null, bounty: 0 }));
-  g.piles = g.piles.map(() => 0);
-  mutate(g);
-  g.turnDirty = false;
-  save.session.turnStart = g;
-  save.session.previousTurnStart = null;
-  save.session.known = g.traps.filter((t) => t.revealed).map((t) => t.node);
-  await page.evaluate(([k, v]) => localStorage.setItem(k, v), [SAVE_KEY, JSON.stringify(save)]);
-  await page.reload();
-  await page.getByRole('button', { name: 'Resume game' }).click();
-  await page.waitForTimeout(500);
-  await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
-}
-
-/** Plays the on-screen survival game like a person would: by watching the screen. */
-async function autoplay(page) {
-  await page.evaluate(() => {
+/**
+ * Plays Haunted Jump Rope like a person watching the screen: presses a lane's
+ * Jump button when its marker reaches the middle of that lane's green zone.
+ * `lanes` limits which lanes (by position) are played; the others never jump.
+ */
+async function autoplay(page, lanes = null) {
+  await page.evaluate((lanes) => {
     const stop = { v: false };
     window.__autoplayStop = stop;
-    const key = (k, code) => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: code ?? k }));
-    let lastRope = 1;
-    let seen = [];
-    let lastArrow = null;
+    const state = new Map();
     const loop = () => {
       if (stop.v) return;
-      const ring = document.querySelector('.escape-game svg');
-      if (ring) {
-        const zone = ring.querySelector('path');
-        const marker = ring.querySelector('circle[fill="#fff1b8"]');
-        if (zone && marker) {
-          const d = zone.getAttribute('d').match(/M([\d.-]+),([\d.-]+) A[\d.]+,[\d.]+ 0 0 1 ([\d.-]+),([\d.-]+)/);
-          const ang = (x, y) => (Math.atan2(x - 110, 110 - y) * 180) / Math.PI;
-          const a1 = ang(+d[1], +d[2]);
-          const a2 = ang(+d[3], +d[4]);
-          let z = (a1 + a2) / 2;
-          if (Math.abs(a1 - a2) > 180) z += 180;
-          const m = ang(+marker.getAttribute('cx'), +marker.getAttribute('cy'));
-          const diff = Math.abs(((m - z + 540) % 360) - 180);
-          if (diff < 14) key(' ', 'Space');
+      document.querySelectorAll('.rope-lane').forEach((lane, k) => {
+        if (lanes && !lanes.includes(k)) return;
+        const zone = lane.querySelector('.meter .zone');
+        const marker = lane.querySelector('.meter .marker');
+        const btn = lane.querySelector('.press-btn');
+        if (!zone || !marker || !btn) return;
+        const zl = parseFloat(zone.style.left);
+        const zw = parseFloat(zone.style.width);
+        const m = parseFloat(marker.style.left);
+        const st = state.get(k) ?? { armed: true, last: 0 };
+        if (m < st.last - 20) st.armed = true; // a new sweep
+        if (st.armed && m >= zl + zw * 0.45 && m <= zl + zw) {
+          btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+          st.armed = false;
         }
-      }
-      const show = document.querySelector('.dance-show .big-arrow:not(.dim)');
-      if (show && show.textContent !== lastArrow) {
-        lastArrow = show.textContent;
-        seen.push(show.textContent);
-      }
-      if (!show) lastArrow = null;
-      const pad = document.querySelector('.dance-pad .pad:not([disabled])');
-      if (pad && seen.length >= 4) {
-        const map = { '⬆': 'ArrowUp', '➡': 'ArrowRight', '⬇': 'ArrowDown', '⬅': 'ArrowLeft' };
-        const moves = seen.slice(-4);
-        seen = [];
-        moves.forEach((a, i) => setTimeout(() => key(map[a]), 150 + i * 250));
-      }
-      const rope = document.querySelector('.rope-game path');
-      if (rope) {
-        const c = +rope.getAttribute('d').match(/Q[\d.]+,(-?[\d.]+)/)[1];
-        const h = (200 - (c + 110) / 2) / 170;
-        if (h < 0.42 && h < lastRope) key(' ', 'Space');
-        lastRope = h;
-      }
+        st.last = m;
+        state.set(k, st);
+      });
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
-  });
+  }, lanes);
 }
 async function stopAutoplay(page) {
   await page.evaluate(() => window.__autoplayStop && (window.__autoplayStop.v = true)).catch(() => {});
 }
 
-/** Wait for a challenge to resolve (phase leaves 'challenge'). */
-async function waitChallengeDone(page, ms = 60000) {
+/** Local challenge: press every Ready, play the given lanes, wait until it is over. */
+async function playLocalChallenge(page, lanes = null, ms = 90000) {
+  await autoplay(page, lanes);
   const t0 = Date.now();
+  let st = await S(page);
   while (Date.now() - t0 < ms) {
-    const st = await S(page);
-    if (st.game?.phase !== 'challenge') return st;
-    const ready = page.getByRole('button', { name: /^Ready$/ });
-    if (await ready.count()) await ready.first().click().catch(() => {});
-    await page.waitForTimeout(250);
+    st = await S(page);
+    if (st.game?.phase !== 'challenge') break;
+    const ready = page.locator('.ch-participants button', { hasText: /^Ready$/ });
+    for (let i = (await ready.count()) - 1; i >= 0; i--) await ready.nth(i).click().catch(() => {});
+    await page.waitForTimeout(300);
   }
+  await stopAutoplay(page);
+  await settle(page);
   return S(page);
 }
 
+/**
+ * Rewrite the saved game into a crafted position and resume it through the
+ * real UI. `set` gives pieces (alive/node/streak/score), schedule, acting
+ * piece, and optionally a die (to start in 'choose').
+ */
+async function scenario(page, set) {
+  const save = JSON.parse(await page.evaluate((k) => localStorage.getItem(k), SAVE_KEY));
+  const g = save.session.game;
+  g.pieces.forEach((p, i) => Object.assign(p, { alive: i === set.living, node: set.nodes[i], streak: set.streaks?.[i] ?? 0, score: set.scores?.[i] ?? 0, facingFrom: null }));
+  const n = g.pieces.length;
+  g.round = set.round ?? 2;
+  g.schedule = set.schedule ?? [set.living, ...Array.from({ length: n }, (_, k) => k).filter((k) => k !== set.living)];
+  g.slot = g.schedule.indexOf(set.acting ?? set.living);
+  g.traps = (set.traps ?? TRAPS).map((t) => ({ ...t }));
+  g.seancesUsed = set.seancesUsed ?? 0;
+  Object.assign(g, { challenge: null, pick: null, lastOutcome: null, minigameUsed: false, log: [], turnDirty: false, origin: set.nodes[set.acting ?? set.living], selection: { dest: null } });
+  if (set.die) {
+    const me = g.pieces[g.schedule[g.slot]];
+    Object.assign(g, { phase: 'choose', die: set.die, allowance: me.alive ? set.die : Math.max(3, set.die) });
+  } else Object.assign(g, { phase: set.phase ?? 'turnStart', die: null, allowance: 0 });
+  save.session.game = g;
+  save.session.turnStart = { ...g, phase: 'turnStart', die: null, allowance: 0 };
+  save.session.previousTurnStart = null;
+  save.session.known = g.traps.filter((t) => t.revealed).map((t) => ({ node: t.node, effect: t.effect }));
+  await page.evaluate(([k, v]) => localStorage.setItem(k, v), [SAVE_KEY, JSON.stringify(save)]);
+  await page.reload();
+  await page.getByRole('button', { name: 'Resume game' }).click();
+  await page.waitForTimeout(600);
+  await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
+  await settle(page);
+}
+
+async function confirmMove(page, dest) {
+  if (dest === 'stay') await page.getByRole('option', { name: /Stay here/ }).click();
+  else await page.getByRole('option', { name: new RegExp(`#${dest} `) }).click();
+  await page.locator('.bottom .btn.primary.big').click();
+  await settle(page);
+}
+
 try {
-  // ── 1. Local: setup, secret placement, both cameras ──────────────────
+  // ── 1. Local: setup, placement, life roll, a full two-piece game ─────
   if (run(1)) {
     const page = await newPage();
     await clearStorage(page);
     await page.evaluate(() => localStorage.setItem('unrelated-key', 'keep-me'));
     await page.waitForTimeout(800);
     await page.screenshot({ path: `${OUT}/01-title.png` });
-    check('title offers Play, Host a phone room, How to play', (await page.getByRole('button', { name: 'Play', exact: true }).count()) === 1 && (await page.getByRole('button', { name: 'Host a phone room' }).count()) === 1);
+    check('title pitches One Life and offers local play, a phone room and the rules', /One life in the mansion/.test(await page.locator('.title-card').innerText()) && (await page.getByRole('button', { name: /Host a phone room/ }).count()) === 1);
     await page.getByRole('button', { name: 'How to play' }).click();
-    const rules = (await page.locator('.rules').innerText()).toLowerCase();
-    check('rules cover curses, survival games, protection, ghosts, bounties and scoring', ['curse the mansion', 'break the curse', 'dance for death', 'super reaper', 'protection', 'becoming a ghost', 'bounty', 'survival bonus'].every((w) => rules.includes(w)));
-    check('rules no longer promise the old half-bag catch', !/drop half/.test(rules));
+    const rules = await page.locator('.rules').innerText();
+    check('rules explain one life, rounds, curse, traps and teams', /one life/i.test(rules) && /curse/i.test(rules) && /Séance/.test(rules) && /Poltergeist/.test(rules) && /Team Battle/.test(rules));
+    check('rules contain no candy-game leftovers', !/candy|bank|bounty|decoy|protected|Trick or Treat/i.test(rules));
     await page.keyboard.press('Escape');
-
-    await setupSeats(page, ['human', 'human', 'bot']);
-    await page.getByLabel('Player 1 name').fill('<b>Ana</b>');
+    await setupPieces(page, ['human', 'bot'], ['Vampire', 'Skeleton']);
     await page.screenshot({ path: `${OUT}/02-setup.png` });
     await page.getByRole('button', { name: /Start game/ }).click();
-    await page.waitForTimeout(500);
-    await page.screenshot({ path: `${OUT}/03-placement-curtain.png` });
-    const curtain = await page.locator('.curtain-card').innerText();
-    check('placement curtain asks others to look away', /look away/.test(curtain));
-    await page.getByRole('button', { name: /show me the map/ }).click();
-    await page.getByRole('button', { name: 'Space 18' }).click();
-    await page.screenshot({ path: `${OUT}/04-placement-map.png` });
-    await page.getByRole('button', { name: /Curse space 18/ }).click();
-    check('a brief private confirmation names the pick', /space 18/.test(await page.locator('.curtain-card').innerText()));
-    await page.getByRole('button', { name: /Hide it/ }).click();
-    check('after hiding, the next curtain never shows the previous pick', !/18/.test(await page.locator('.curtain-card').innerText()));
-    await placeAll(page);
-    let st = await S(page);
-    check('placement ends with six hidden traps and play begins', st.game.phase === 'turnStart' && st.game.traps.length === 6 && st.game.traps.every((t) => !t.revealed));
-    check('the human pick is among the six', st.game.traps.some((t) => t.node === 18));
-    check('custom name renders as text', (await page.locator('.pname', { hasText: '<b>Ana</b>' }).count()) > 0);
-    await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
-
-    await page.getByRole('button', { name: /Roll dice/ }).click();
-    await settle(page);
-    check('a generic reminder about unknown corridors is shown', (await page.locator('.reminder').count()) === 1);
-    const hiddenNodes = st.game.traps.map((t) => t.node);
-    const destText = await page.locator('.dest-list').innerText();
-    check('destination list never flags an unrevealed trap', !/Reaper/.test(destText.replace(/Super Reaper/g, '')), hiddenNodes.join(','));
-    const dest = await page.evaluate(() => {
-      const ids = [...document.querySelectorAll('.dest .dmeta')].map((e) => Number(e.textContent.match(/#(\d+)/)[1]));
-      for (const id of ids.reverse()) {
-        const p = window.__omr.project(id);
-        if (p.visible && p.x > 300 && p.x < 1000 && p.y > 120 && p.y < 860) return { id, ...p };
-      }
-      return null;
-    });
-    if (dest) {
-      await page.mouse.click(dest.x, dest.y);
-      await page.waitForTimeout(200);
-      st = await S(page);
-      check('clicking a glowing 3D space in follow view selects it', st.game.selection.dest === dest.id, `node ${dest.id}`);
-    }
-    await page.screenshot({ path: `${OUT}/05-follow-preview.png` });
-    await page.keyboard.press('v');
-    await page.waitForTimeout(900);
-    st = await S(page);
-    check('V switches to the overview', st.cameraMode === 'overview');
-    await page.waitForTimeout(1200);
-    const offFrame = await page.evaluate(() => Array.from({ length: 32 }, (_, i) => [i, window.__omr.project(i)]).filter(([, p]) => !p.visible).map(([i]) => i));
-    check('the overview frames all 32 spaces', offFrame.length === 0, offFrame.join(','));
-    await page.screenshot({ path: `${OUT}/06-overview.png` });
-    await page.getByRole('button', { name: /^(Confirm|Risk)/ }).click();
-    await settle(page);
-    st = await S(page);
-    if (st.game.phase === 'challenge') {
-      await autoplay(page);
-      st = await waitChallengeDone(page);
-      await stopAutoplay(page);
-    }
-    check('overview choice persists after the move', st.cameraMode === 'overview');
-    await page.keyboard.press('v');
-    check('saving never touched unrelated storage', (await page.evaluate(() => localStorage.getItem('unrelated-key'))) === 'keep-me');
-    check('no console errors (local setup)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
-    await page.context().close();
-  }
-
-  // ── 2. Encounters through crafted saves ──────────────────────────────
-  if (run(2)) {
-    const page = await newPage({ width: 1440, height: 900 });
-    await clearStorage(page, '?quality=low');
-    await setupSeats(page, ['human', 'human', 'bot']);
-    await page.getByRole('button', { name: /Start game/ }).click();
-    await placeAll(page);
-    const TRAPS = (nodes) => nodes.map((node) => ({ node, revealed: false }));
-
-    // Escape: the resident ghost catches player 1 in the attic.
-    await loadScenario(page, (g) => {
-      g.players[0].node = 15;
-      g.players[0].carried = 5;
-      g.traps = TRAPS([2, 4, 6, 9, 19, 21]);
-    });
-    await page.getByRole('button', { name: /Roll dice/ }).click();
-    await settle(page);
-    await page.getByRole('option', { name: /Stay put/ }).click();
-    check('forecast previews a survival challenge, not an automatic loss', /escape challenge/.test(await page.locator('.forecast').innerText()));
-    await page.getByRole('button', { name: /^Confirm/ }).click();
-    await settle(page);
-    await page.locator('.ghost-btn').click();
-    await settle(page);
-    let st = await S(page);
-    check('the ghost starts Break the Curse', st.game.phase === 'challenge' && st.game.challenge.kind === 'escape');
-    await page.getByRole('button', { name: /^Ready$/ }).click();
-    await autoplay(page);
-    await page.waitForTimeout(4300);
-    await page.screenshot({ path: `${OUT}/10-escape-ring.png` });
-    st = await waitChallengeDone(page);
-    await stopAutoplay(page);
-    await settle(page);
-    const p0 = st.game.players[0];
-    if (p0.alive) check('a successful escape keeps candy, moves away and protects', p0.carried === 5 && p0.node !== 15 && p0.protectedUntil !== null, `node ${p0.node}`);
-    else check('a failed escape drops all carried candy and transforms', p0.carried === 0 && st.game.piles[15] === 5);
-    await page.screenshot({ path: `${OUT}/11-after-escape.png` });
-
-    // A failed escape → spectral ghost with its own objective.
-    await loadScenario(page, (g) => {
-      g.players[0].node = 15;
-      g.players[0].carried = 4;
-      g.players[0].banked = 3;
-      g.traps = TRAPS([2, 4, 6, 9, 19, 21]);
-    });
-    await page.getByRole('button', { name: /Roll dice/ }).click();
-    await settle(page);
-    await page.getByRole('option', { name: /Stay put/ }).click();
-    await page.getByRole('button', { name: /^Confirm/ }).click();
-    await settle(page);
-    await page.locator('.ghost-btn').click();
-    await settle(page);
-    await page.getByRole('button', { name: /^Ready$/ }).click();
-    st = await waitChallengeDone(page); // no presses → fails
-    await settle(page);
-    check('no press: transformed, bank kept, all carried candy dropped', !st.game.players[0].alive && st.game.players[0].banked === 3 && st.game.piles[15] === 4);
-    check('the summary explains the changed objective', /haunt/.test(await page.locator('.action').innerText()));
-    await page.waitForTimeout(1200);
-    await page.screenshot({ path: `${OUT}/12-transformed.png` });
-    await page.locator('.phase .btn.primary').click();
-    await page.waitForTimeout(400);
-    st = await S(page);
-    check('no immediate bonus ghost turn: play passes to the next seat', st.game.turn === 1);
-
-    // Ghost turn: one die, wall links.
-    await loadScenario(page, (g) => {
-      g.players[0].alive = false;
-      g.players[0].node = 7;
-      g.players[1].node = 3;
-      g.traps = TRAPS([2, 4, 6, 9, 19, 21]);
-    });
-    await page.getByRole('button', { name: /Roll the ghost die/ }).click();
-    await settle(page);
-    st = await S(page);
-    check('a player ghost rolls one die', st.game.dice.length === 1);
-    check('the ghost-only wall link to the conservatory is offered', (await page.getByRole('option', { name: /Conservatory/ }).count()) > 0);
-    await page.screenshot({ path: `${OUT}/13-ghost-turn.png` });
-
-    // Hidden trap: land, reveal, perform; reload keeps the same challenge; undo keeps knowledge.
-    await loadScenario(page, (g) => {
-      g.players[0].node = 10;
-      g.players[0].carried = 2;
-      g.traps = TRAPS([9, 2, 4, 19, 21, 30]);
-    });
-    await page.getByRole('button', { name: /Roll dice/ }).click();
-    await settle(page);
-    await page.getByRole('option', { name: /#9 / }).click();
-    const pv = await page.locator('.forecast').innerText();
-    check('the preview does not reveal the hidden trap', !/Reaper/.test(pv));
-    await page.getByRole('button', { name: /^Confirm/ }).click();
-    await settle(page);
-    st = await S(page);
-    check('landing reveals the trap and starts a Reaper performance', st.game.traps.find((t) => t.node === 9).revealed && st.game.phase === 'challenge' && ['dance', 'rope'].includes(st.game.challenge.kind));
-    await page.waitForTimeout(1500);
-    await page.screenshot({ path: `${OUT}/14-reaper-reveal.png` });
-    const chId = st.game.challenge?.id;
-    await page.reload();
-    await page.getByRole('button', { name: 'Resume game' }).click();
-    await page.waitForTimeout(500);
-    st = await S(page);
-    check('reload during a challenge resumes the same challenge', st.game.phase === 'challenge' && st.game.challenge.id === chId);
-    await page.getByRole('button', { name: /^Ready$/ }).click();
-    await autoplay(page);
-    await page.waitForTimeout(6000);
-    await page.screenshot({ path: `${OUT}/15-reaper-game.png` });
-    st = await waitChallengeDone(page, 90000);
-    await stopAutoplay(page);
-    await settle(page);
-    await page.screenshot({ path: `${OUT}/16-after-reaper.png` });
-    await page.getByRole('button', { name: /^Undo/ }).click();
-    await page.getByRole('button', { name: /^Undo to/ }).click();
-    st = await S(page);
-    check('undo restores the mechanics but the table keeps the reveal', !st.game.traps.find((t) => t.node === 9).revealed && st.known.includes(9));
     await page.waitForTimeout(800);
-    await page.screenshot({ path: `${OUT}/17-undo-keeps-reveal.png` });
-
-    // Two humans on one keyboard: ready keys, then a duel.
-    await loadScenario(page, (g) => {
-      g.players[0].node = 2;
-      g.players[0].carried = 1;
-      g.players[1].node = 3;
-      g.players[1].carried = 2;
-      g.traps = TRAPS([4, 6, 9, 19, 21, 30]);
-    });
-    await page.getByRole('button', { name: /Roll dice/ }).click();
+    check('the placement curtain asks others to look away', /look away/.test(await page.locator('.curtain-card').innerText()));
+    await page.screenshot({ path: `${OUT}/03-placement-curtain.png` });
+    await page.getByRole('button', { name: /show the map/ }).click();
+    await page.getByRole('button', { name: 'Space 18', exact: true }).click();
+    await page.screenshot({ path: `${OUT}/04-placement-map.png` });
+    await page.getByRole('button', { name: /Set a trap/ }).click();
+    check('the private confirmation names the space but not an effect', /space 18/.test(await page.locator('.curtain-card').innerText()) && !/Poltergeist|Séance|Reaper’s/.test(await page.locator('.curtain-card').innerText()));
+    await page.getByRole('button', { name: /Hide it/ }).click();
+    await page.waitForTimeout(800);
+    let st = await S(page);
+    check('placement ends with six hidden traps; nobody is alive before the roll', st.game.phase === 'lifeRoll' && st.game.traps.length === 6 && st.game.pieces.every((p) => !p.alive));
+    await page.screenshot({ path: `${OUT}/05-life-roll.png` });
+    await page.getByRole('button', { name: /Roll for life/ }).click();
     await settle(page);
-    await page.getByRole('option', { name: /#3 / }).click();
-    check('a duel is warned before confirming', /Duel with/.test(await page.locator('.forecast').innerText()));
-    await page.getByRole('button', { name: /^Risk it/ }).click();
-    await settle(page);
-    const intro = await page.locator('.challenge-card').innerText();
-    check('the duel shows two key mappings and waits for both', /key F\b/i.test(intro) && /key J\b/i.test(intro), intro.replace(/\s+/g, ' ').slice(0, 200));
-    await page.screenshot({ path: `${OUT}/18-duel-ready.png` });
-    await page.keyboard.press('f');
-    await page.keyboard.press('j');
-    await page.waitForTimeout(4500);
-    await page.screenshot({ path: `${OUT}/19-duel-rope.png` });
-    st = await waitChallengeDone(page, 60000);
-    check('without jumps both duelists fail the early threshold', !st.game.players[0].alive && !st.game.players[1].alive);
-    await settle(page);
-
-    // Super Reaper warning.
-    await loadScenario(page, (g) => {
-      g.players[0].node = 4;
-      g.players[1].node = 22;
-      g.traps = TRAPS([2, 6, 9, 19, 21, 30]);
-    });
-    await page.getByRole('button', { name: /Roll dice/ }).click();
-    await settle(page);
-    await page.getByRole('option', { name: /Super Reaper/ }).click();
-    check('the Super Reaper warns that the arriving player risks death', /Super Reaper/.test(await page.locator('.forecast .warn').innerText()));
-    await page.screenshot({ path: `${OUT}/20-super-reaper-warning.png` });
-
-    // Results breakdown.
-    await loadScenario(page, (g) => {
-      g.round = 10;
-      g.turn = 2;
-      g.phase = 'summary';
-      g.dice = [1, 1];
-      g.players[0].banked = 7;
-      g.players[0].carried = 3;
-      g.players[0].node = 3;
-      g.players[1].alive = false;
-      g.players[1].banked = 4;
-      g.players[1].bounty = 6;
-      g.players[1].node = 20;
-      g.players[2].banked = 5;
-    });
-    // Seat 3 is a bot, so it may close its own summary; otherwise click through.
-    if ((await S(page)).game.phase === 'summary') await page.locator('.phase .btn.primary').click({ timeout: 5000 }).catch(() => {});
-    await page.waitForFunction(() => window.__omr.getState().session?.game?.phase === 'gameOver', null, { timeout: 20000 });
-    await page.waitForTimeout(1500);
-    const rows = await page.locator('.results tbody tr').allInnerTexts();
-    check('results show survival bonus and bounty with the right totals', rows.some((r) => /\+5/.test(r) && /13/.test(r)) && rows.some((r) => /\+6/.test(r) && /10/.test(r)), rows.join(' / '));
-    const fit = await page.locator('.results').evaluate((el) => el.scrollWidth - el.clientWidth);
-    check('the results table fits its panel without sideways scrolling', fit <= 1, `${fit}px`);
-    await page.screenshot({ path: `${OUT}/21-results.png` });
-    check('no console errors (encounters)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
-    await page.context().close();
-  }
-
-  // ── 3. One human with five bots, to the end ──────────────────────────
-  if (run(3)) {
-    const page = await newPage({ width: 1280, height: 800 }, { reducedMotion: 'reduce' });
-    await clearStorage(page, '?quality=low');
-    await page.evaluate(() => localStorage.setItem('one-more-room/settings', JSON.stringify({ fastBots: true, reducedMotion: true, lowGraphics: true })));
-    await page.reload();
-    await setupSeats(page, ['human', 'bot', 'bot', 'bot', 'bot', 'bot']);
-    await page.getByRole('button', { name: /Start game/ }).click();
-    await placeAll(page);
     await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
+    st = await S(page);
+    check('the life roll leaves exactly one living piece at the entrance, ghosts elsewhere', living(st.game) >= 0 && st.game.pieces.filter((p) => p.alive).length === 1 && st.game.pieces[living(st.game)].node === 0 && st.game.pieces.filter((p) => !p.alive).every((p) => [8, 16, 24].includes(p.node)));
+    check('the living piece acts first and the order is shown', acting(st.game) === living(st.game) && (await page.locator('.topbar .order .ord').count()) === 2);
+    await page.screenshot({ path: `${OUT}/06-first-action.png` });
+    await page.keyboard.press('v');
+    await page.waitForTimeout(1500);
+    const off = await page.evaluate(() => Array.from({ length: 32 }, (_, i) => [i, window.__omr.project(i)]).filter(([, p]) => !p.visible).map(([i]) => i));
+    check('the overview frames all 32 spaces', off.length === 0, off.join(','));
+    await page.screenshot({ path: `${OUT}/07-overview.png` });
+    // Play the whole game: the person through the real UI, the bot by itself.
+    let transfers = 0;
+    let challenges = 0;
+    let shotDest = false;
     const t0 = Date.now();
-    let sawChallenge = false;
-    for (let i = 0; i < 4000; i++) {
-      const st = await S(page);
-      if (!st.game || st.game.phase === 'gameOver') break;
-      if (Date.now() - t0 > 25 * 60 * 1000) break;
-      if (st.game.phase === 'challenge') {
-        sawChallenge = true;
-        const ready = page.getByRole('button', { name: /^Ready$/ });
-        if (await ready.count()) await ready.first().click().catch(() => {});
-        await page.waitForTimeout(300);
+    while (Date.now() - t0 < 900000) {
+      st = await S(page);
+      const g = st.game;
+      if (g.phase === 'gameOver') break;
+      if (st.busy) {
+        await page.waitForTimeout(150);
         continue;
       }
-      if (st.game.turn === 0 && !st.busy) {
-        if (st.game.phase === 'choose') {
-          const o = page.getByRole('option');
-          if ((await o.count()) > 1 && st.game.selection.dest === null) await o.nth(1).click().catch(() => {});
-        }
-        if (st.game.phase === 'event' || st.game.phase === 'pick') await page.locator('.choices button').first().click().catch(() => {});
-        const b = page.locator('.action .btn.primary.big').first();
-        if ((await b.count()) && (await b.isEnabled())) await b.click().catch(() => {});
+      const me = acting(g);
+      const human = st.seats[me]?.kind === 'human';
+      if (g.phase === 'challenge') {
+        challenges++;
+        const before = living(g);
+        const lane = g.challenge.participants.indexOf(g.pieces.findIndex((_, i) => st.seats[i]?.kind === 'human'));
+        if (challenges === 1) await page.waitForTimeout(400), await page.screenshot({ path: `${OUT}/08-challenge-intro.png` });
+        const after = await playLocalChallenge(page, lane >= 0 ? [lane] : []);
+        if (living(after.game) !== before) transfers++;
+        continue;
       }
-      await page.waitForTimeout(150);
+      if (!human) {
+        await page.waitForTimeout(250);
+        continue;
+      }
+      if (g.phase === 'turnStart') await page.getByRole('button', { name: /Roll the die/ }).click();
+      else if (g.phase === 'choose') {
+        const opts = page.locator('.dest-list [role=option]');
+        const hunt = page.locator('.dest-list [role=option].haunt');
+        const pickIdx = (await hunt.count()) ? -1 : Math.min(2, (await opts.count()) - 1);
+        if (pickIdx < 0) await hunt.first().click();
+        else await opts.nth(pickIdx).click();
+        if (!shotDest) {
+          shotDest = true;
+          await page.screenshot({ path: `${OUT}/09-choose.png` });
+        }
+        await page.locator('.bottom .btn.primary.big').click();
+      } else if (g.phase === 'hunt') await page.getByRole('button', { name: /Challenge for the life/ }).click();
+      else if (g.phase === 'pick') await page.locator('.choices .btn').first().click();
+      else if (g.phase === 'summary') await page.locator('.bottom .btn.primary.big').click();
+      await settle(page);
+      if ((await S(page)).cameraMode !== 'overview') {
+        check('the chosen camera survives life changing hands', false, `round ${g.round}`);
+        await page.keyboard.press('v');
+      }
     }
+    st = await S(page);
+    check('a full two-piece game reaches the results', st.game.phase === 'gameOver', `${Math.round((Date.now() - t0) / 1000)}s, ${challenges} challenges, ${transfers} transfers`);
+    check('exactly ten points were handed out, and one piece is alive at the end', st.game.pieces.reduce((a, p) => a + p.score, 0) === 10 && st.game.pieces.filter((p) => p.alive).length === 1);
+    await page.waitForTimeout(1500);
+    await page.screenshot({ path: `${OUT}/10-results-2p.png` });
+    const rows = await page.locator('.results tbody tr').allInnerTexts();
+    check('the results table lists rounds held for every piece', rows.length === 2 && rows.every((r) => /\d/.test(r)), rows.join(' / '));
+    check('the chosen camera stayed on the overview all game', st.cameraMode === 'overview');
+    check('saving never touched unrelated storage', (await page.evaluate(() => localStorage.getItem('unrelated-key'))) === 'keep-me');
+    check('no console errors (two-piece game)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
+    await page.context().close();
+  }
+
+  // ── 2. Four bots, fast-forwarded, to the end ─────────────────────────
+  if (run(2)) {
+    const page = await newPage({ width: 1280, height: 800 }, { reducedMotion: 'reduce' });
+    await clearStorage(page, '?quality=low');
+    await page.evaluate(() => localStorage.setItem('one-more-room/settings', JSON.stringify({ fastBots: true, reducedMotion: true, muted: true })));
+    await page.reload();
+    await setupPieces(page, ['bot', 'bot', 'bot', 'bot']);
+    await page.getByRole('button', { name: /Start game/ }).click();
+    const t0 = Date.now();
+    let sawSeance = false;
+    let maxAlive = 0;
+    let st;
+    while (Date.now() - t0 < 900000) {
+      st = await S(page);
+      if (st.game?.challenge?.kind === 'seance') sawSeance = true;
+      if (st.game) maxAlive = Math.max(maxAlive, st.game.pieces.filter((p) => p.alive).length);
+      if (st.game?.phase === 'gameOver') break;
+      await page.waitForTimeout(400);
+    }
+    check('four bots play a full game to the results', st.game?.phase === 'gameOver', `${Math.round((Date.now() - t0) / 1000)}s`);
+    check('four-piece totals: ten points, never more than one living piece', st.game.pieces.reduce((a, p) => a + p.score, 0) === 10 && maxAlive === 1);
+    check('the four-piece game included at least one Séance', sawSeance);
     await page.waitForTimeout(1200);
-    const st = await S(page);
-    check('one person plus five bots reaches the results', st.game.phase === 'gameOver', `${Math.round((Date.now() - t0) / 1000)}s`);
-    check('survival challenges happened along the way', sawChallenge);
-    const fit6 = await page.locator('.results').evaluate((el) => el.scrollWidth - el.clientWidth);
-    check('six-player results fit their panel without sideways scrolling', fit6 <= 1, `${fit6}px`);
-    await page.screenshot({ path: `${OUT}/30-bots-results.png` });
+    await page.screenshot({ path: `${OUT}/20-results-4p.png` });
+    const fit = await page.locator('.results').evaluate((el) => el.scrollWidth - el.clientWidth);
+    check('the results panel fits without sideways scrolling', fit <= 1, `${fit}px`);
     check('no console errors (bots)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
+    await page.context().close();
+  }
+
+  // ── 3. Crafted positions: transfers, traps, curse, reload, undo ──────
+  if (run(3)) {
+    const page = await newPage();
+    await clearStorage(page, '?quality=low');
+    await setupPieces(page, ['human', 'human', 'human', 'human'], ['Knight', 'Goblin', 'Witch', 'Zombie']);
+    await page.getByRole('button', { name: /Start game/ }).click();
+    await placeAll(page);
+    await page.getByRole('button', { name: /Roll for life/ }).click();
+    await settle(page);
+
+    // Several transfers in one round: B steals from A, then C steals from B.
+    await scenario(page, { living: 0, nodes: [6, 5, 4, 20], acting: 1, die: 3 });
+    await confirmMove(page, 'stay');
+    check('a ghost in range is offered the challenge', /within reach/.test(await page.locator('.bottom').innerText()));
+    await page.getByRole('button', { name: /Challenge for the life/ }).click();
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${OUT}/30-duel-intro.png` });
+    let st = await playLocalChallenge(page, [1]);
+    check('the challenger who jumps better steals the life and the space', living(st.game) === 1 && st.game.pieces[1].node === 6);
+    check('the loser retreats two ordinary steps to a free space', st.game.pieces[0].node === 8, `node ${st.game.pieces[0].node}`);
+    await page.screenshot({ path: `${OUT}/31-after-steal.png` });
+    await page.locator('.bottom .btn.primary.big').click();
+    await settle(page);
+    st = await S(page);
+    check('the next scheduled piece acts; the old holder gets no bonus action', acting(st.game) === 2);
+    await page.getByRole('button', { name: /Roll the die/ }).click();
+    await settle(page);
+    await confirmMove(page, 5);
+    await page.getByRole('button', { name: /Challenge for the life/ }).click();
+    st = await playLocalChallenge(page, [1]);
+    check('a second transfer in the same round', living(st.game) === 2 && st.game.round === 2, `living ${living(st.game)}`);
+    await page.screenshot({ path: `${OUT}/32-second-steal.png` });
+
+    // A four-piece Séance from a hidden tile.
+    await scenario(page, { living: 0, nodes: [0, 13, 25, 20], acting: 1, die: 1 });
+    await confirmMove(page, 14);
+    st = await S(page);
+    check('landing on a hidden Séance reveals it and calls all four pieces', st.game.phase === 'challenge' && st.game.challenge.kind === 'seance' && st.game.challenge.participants.length === 4 && st.game.traps.find((t) => t.node === 14).revealed);
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${OUT}/33-seance-intro.png` });
+    st = await playLocalChallenge(page, [3]);
+    check('the Séance winner holds the life and nobody moves', living(st.game) === 3 && st.game.pieces.map((p) => p.node).join() === '0,14,25,20');
+    check('the Séance tile is spent and one of two Séances is used', st.game.traps.find((t) => t.node === 14).spent && st.game.seancesUsed === 1);
+    await page.screenshot({ path: `${OUT}/34-after-seance.png` });
+
+    // A ghost on a hidden Reaper: a remote duel. Reload mid-challenge, then undo.
+    await scenario(page, { living: 0, nodes: [30, 6, 16, 20], acting: 1, die: 3 });
+    await confirmMove(page, 9);
+    st = await S(page);
+    const id = st.game.challenge?.id;
+    check('a ghost landing on a Reaper challenges the living piece from anywhere', st.game.phase === 'challenge' && st.game.challenge.host === 'reaper' && !st.game.challenge.contact);
+    await page.reload();
+    await page.getByRole('button', { name: 'Resume game' }).click();
+    await page.waitForTimeout(800);
+    st = await S(page);
+    check('reload during a challenge resumes the same challenge', st.game.phase === 'challenge' && st.game.challenge.id === id);
+    st = await playLocalChallenge(page, [0]);
+    check('after a remote duel both pieces keep their spaces', st.game.pieces[0].node === 30 && st.game.pieces[1].node === 9 && living(st.game) === 0);
+    await page.getByRole('button', { name: /^Undo/ }).click();
+    await page.getByRole('button', { name: /^Undo to/ }).click();
+    await page.waitForTimeout(800);
+    st = await S(page);
+    check('undo restores the action but the table keeps the reveal', !st.game.traps.find((t) => t.node === 9).revealed && st.known.some((k) => k.node === 9 && k.effect === 'reaper'));
+    await page.screenshot({ path: `${OUT}/35-undo-keeps-reveal.png` });
+
+    // The living piece on a revealed Reaper picks its opponent.
+    await scenario(page, { living: 0, nodes: [8, 6, 16, 20], acting: 0, die: 1, traps: TRAPS.map((t) => (t.node === 9 ? { ...t, revealed: true } : t)) });
+    await page.getByRole('option', { name: /#9 / }).click();
+    check('the forecast warns about a known Reaper before confirming', /Reaper/.test(await page.locator('.forecast').innerText()));
+    await page.locator('.bottom .btn.primary.big').click();
+    await settle(page);
+    check('the living piece chooses which ghost to duel', (await page.locator('.choices .btn').count()) === 3);
+    await page.locator('.choices .btn').nth(1).click();
+    st = await S(page);
+    check('the chosen ghost is the opponent', st.game.challenge?.participants.join() === '0,2');
+    st = await playLocalChallenge(page, [0]);
+
+    // A Poltergeist throws a ghost away; nothing triggers where it lands.
+    await scenario(page, { living: 0, nodes: [0, 18, 16, 24], acting: 1, die: 1 });
+    await confirmMove(page, 19);
+    st = await S(page);
+    check('a Poltergeist throws the piece far away without a minigame', st.game.traps.find((t) => t.node === 19).revealed && st.game.pieces[1].node !== 19 && st.game.pieces[1].node !== 0 && st.game.phase !== 'challenge');
+    await page.screenshot({ path: `${OUT}/36-poltergeist.png` });
+
+    // With both Séances used: a dormant Séance tile and a Reaper-mode Super Reaper.
+    await scenario(page, { living: 0, nodes: [0, 23, 16, 4], acting: 1, die: 3, seancesUsed: 2 });
+    await confirmMove(page, 26);
+    st = await S(page);
+    check('a Séance tile found after both Séances are used is revealed cold', st.game.traps.find((t) => t.node === 26).spent && st.game.phase !== 'challenge' && /cold/.test(await page.locator('.bottom').innerText()));
+    await scenario(page, { living: 0, nodes: [0, 16, 13, 4], acting: 3, die: 1, seancesUsed: 2 });
+    await page.getByRole('option', { name: /#12 / }).click();
+    check('the Super Reaper forecast shows its current effect', /Super Reaper: Reaper’s Challenge/.test(await page.locator('.forecast').innerText()));
+    await page.screenshot({ path: `${OUT}/37-super-reaper-forecast.png` });
+
+    // The curse: shown before play, and each lane shows its own window.
+    await scenario(page, { living: 0, nodes: [6, 5, 16, 20], acting: 1, die: 3, streaks: [3, 0, 0, 0], scores: [3, 0, 0, 0], round: 5 });
+    await confirmMove(page, 'stay');
+    await page.getByRole('button', { name: /Challenge for the life/ }).click();
+    await page.waitForTimeout(400);
+    check('the curse is announced before play', /Alive for 3 rounds • Jump window 20% narrower/.test(await page.locator('.challenge-card').innerText()));
+    await autoplay(page, []);
+    for (let k = 0; k < 4 && (await page.locator('.ch-participants button', { hasText: /^Ready$/ }).count()); k++) await page.locator('.ch-participants button', { hasText: /^Ready$/ }).first().click().catch(() => {});
+    await page.waitForTimeout(4500);
+    const widths = await page.locator('.rope-lane .meter .zone').evaluateAll((els) => els.map((e) => parseFloat(e.style.width)));
+    check('the living lane’s jump window is visibly narrower', widths.length === 2 && widths[0] < widths[1] * 0.85, widths.map((w) => w.toFixed(1)).join(' vs '));
+    await page.screenshot({ path: `${OUT}/38-curse-rope.png` });
+    st = await playLocalChallenge(page, [1]);
+
+    // The last bell with a three-way tie: shared win, ten points in all.
+    await scenario(page, { living: 2, nodes: [0, 16, 8, 24], acting: 3, round: 10, scores: [3, 3, 2, 1], schedule: [2, 0, 1, 3], phase: 'summary' });
+    await page.locator('.bottom .btn.primary.big').click();
+    await settle(page);
+    await page.waitForTimeout(1200);
+    st = await S(page);
+    const title = await page.locator('.results h1').innerText();
+    check('tied top scores share the win; exactly ten points in total', /share the win/.test(title) && st.game.pieces.reduce((a, p) => a + p.score, 0) === 10, title);
+    await page.screenshot({ path: `${OUT}/39-shared-win.png` });
+    check('no console errors (scenarios)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
     await page.context().close();
   }
 
@@ -494,108 +461,140 @@ try {
     await tv.locator('.room-code').waitFor({ timeout: 15000 });
     const code = (await tv.locator('.room-code').innerText()).trim();
     const joinUrl = await tv.locator('.join-url').innerText();
-    check('the TV shows a room code, a QR code and a join link that is not localhost', /^[A-Z]{4}$/.test(code) && (await tv.locator('img.qr').count()) === 1 && !/localhost|127\.0\.0\.1/.test(joinUrl), joinUrl);
-    const phones = [];
-    for (const [name, ch] of [['Ana', 'Witch'], ['Ben', 'Knight']]) {
+    check('the TV shows a room code, a QR code and a LAN join link (not localhost)', /^[A-Z]{4}$/.test(code) && (await tv.locator('img.qr').count()) === 1 && !/localhost|127\.0\.0\.1/.test(joinUrl), joinUrl);
+    await tv.getByRole('radio', { name: 'Team Battle' }).click();
+    const phones = {};
+    for (const name of ['Ana', 'Ben', 'Cy']) {
       const p = await newPage({ width: 390, height: 844 });
       await p.goto(URL + '#/join?room=' + code);
       await p.getByLabel('Your name').fill(name);
       await p.getByRole('button', { name: 'Join' }).click();
-      await p.getByRole('button', { name: new RegExp(ch) }).click();
-      phones.push(p);
+      await p.locator('.pchars').waitFor();
+      phones[name] = p;
     }
+    await phones.Ana.getByRole('button', { name: /^Witch/ }).click();
+    await phones.Cy.getByRole('button', { name: /^Knight/ }).click();
+    await phones.Ben.getByRole('button', { name: /Join Ana’s Witch/ }).click();
     await tv.locator('select[aria-label="Bot costume"]').selectOption('goblin');
     await tv.getByRole('button', { name: 'Add bot' }).click();
-    await tv.waitForTimeout(300);
+    await tv.waitForTimeout(500);
     await tv.screenshot({ path: `${OUT}/40-tv-lobby.png` });
-    await phones[0].screenshot({ path: `${OUT}/41-phone-lobby.png` });
-    await tv.getByRole('button', { name: /Start with 3/ }).click();
-    for (const [i, p] of phones.entries()) {
-      await p.getByRole('button', { name: i ? 'Space 18' : 'Space 26' }).click();
-      await p.getByRole('button', { name: /Curse space/ }).click();
-      if (i === 0) await p.screenshot({ path: `${OUT}/42-phone-curse-set.png` });
-      await p.getByRole('button', { name: 'Hide it' }).click();
-    }
-    await tv.waitForTimeout(1500);
+    await phones.Ben.screenshot({ path: `${OUT}/41-phone-lobby.png` });
+    check('phones chose characters and Ben joined Ana’s team', /Ana & Ben/.test(await tv.locator('.setup-players').innerText()) && /Knight/.test(await tv.locator('.setup-players').innerText()));
+    await tv.getByRole('button', { name: /Start: 3 pieces, 3 phones/ }).click();
+    await phones.Ben.waitForTimeout(800);
+    check('only the first teammate confirms the team’s trap', /Ana confirms your team’s trap/.test(await phones.Ben.locator('body').innerText()));
+    await phones.Ana.getByRole('button', { name: 'Space 26', exact: true }).click();
+    await phones.Ana.getByRole('button', { name: /Set the trap/ }).click();
+    await phones.Cy.getByRole('button', { name: 'Space 18', exact: true }).click();
+    await phones.Cy.getByRole('button', { name: /Set the trap/ }).click();
+    await phones.Ben.waitForTimeout(800);
+    check('both teammates see their team’s pick; the other phone never does', /space 26/.test(await phones.Ben.locator('body').innerText()) && /space 26/.test(await phones.Ana.locator('body').innerText()) && !/space 26/.test(await phones.Cy.locator('body').innerText()));
+    await phones.Ana.screenshot({ path: `${OUT}/42-phone-trap-set.png` });
+    for (const p of Object.values(phones)) await p.getByRole('button', { name: 'Hide it' }).click().catch(() => {});
+    await tv.waitForTimeout(3000);
     const tvGame = (await S(tv)).game;
-    check('the TV never receives hidden traps, the seed or the deck order', tvGame.traps.length === 0 && tvGame.rng === 0 && tvGame.deck.every((c) => c === -1));
-    const other = await phones[1].evaluate(() => document.body.innerText);
-    check('a phone never shows another phone’s pick', !/space 26/.test(other));
+    check('the TV never receives hidden traps, nominations or the seed', tvGame.traps.every((t) => t.revealed) && tvGame.rng === 0 && tvGame.nominations.every((n) => n === -1));
+    const controller = (g, piece) => (piece === 0 ? (g.round % 2 === 1 ? phones.Ana : phones.Ben) : piece === 1 ? phones.Cy : null);
+    const other = (g) => (g.round % 2 === 1 ? phones.Ben : phones.Ana);
     let challenges = 0;
     let reloaded = false;
-    for (let step = 0; step < 260; step++) {
-      const st = await tv.evaluate(() => {
-        const s = window.__omr.getState();
-        const g = s.session?.game;
-        return g ? { phase: g.phase, turn: g.turn, round: g.round, parts: g.challenge?.participants ?? [] } : null;
-      });
-      if (!st) {
-        await tv.waitForTimeout(300);
+    let checkedInactive = new Set();
+    let droppedMid = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 900000) {
+      const st = await S(tv);
+      const g = st.game;
+      if (!g || g.phase === 'placement' || g.phase === 'lifeRoll') {
+        await tv.waitForTimeout(400);
         continue;
       }
-      if (st.phase === 'gameOver' || st.round > 3) break;
-      if (st.phase === 'challenge') {
-        for (const [i, p] of phones.entries()) {
-          if (!st.parts.includes(i)) continue;
+      if (g.phase === 'gameOver' || g.round > 4) break;
+      if (g.phase === 'challenge') {
+        for (const piece of g.challenge.participants) {
+          const p = controller(g, piece);
+          if (!p) continue;
+          if (!droppedMid && piece === 0 && (await p.getByRole('button', { name: /I’m ready/ }).count())) {
+            // Drop mid-challenge: the room freezes it and restarts on return.
+            droppedMid = true;
+            await p.getByRole('button', { name: /I’m ready/ }).click();
+            await p.reload();
+            await p.waitForTimeout(2000);
+            check('a controller reconnecting mid-challenge gets the challenge back', /I’m ready|Haunted Jump Rope/.test(await p.locator('body').innerText()));
+          }
           const ready = p.getByRole('button', { name: /I’m ready/ });
           if (await ready.count()) {
-            await ready.click();
+            await ready.click().catch(() => {});
             challenges++;
+            await autoplay(p);
           }
-          const press = p.locator('.press-btn').first();
-          if (await press.count()) await press.click({ force: true }).catch(() => {});
           if (challenges === 1) await p.screenshot({ path: `${OUT}/43-phone-challenge.png` }).catch(() => {});
         }
         if (challenges === 1) await tv.screenshot({ path: `${OUT}/44-tv-challenge.png` });
-        await tv.waitForTimeout(250);
+        await tv.waitForTimeout(400);
         continue;
       }
-      if (st.turn < 2) {
-        const p = phones[st.turn];
-        if (!reloaded && st.round === 2) {
+      const piece = acting(g);
+      const p = controller(g, piece);
+      if (p) {
+        if (piece === 0 && !checkedInactive.has(g.round)) {
+          checkedInactive.add(g.round);
+          await tv.waitForTimeout(600);
+          const idle = other(g);
+          const idleText = await idle.locator('body').innerText();
+          check(`round ${g.round}: the inactive teammate sees the turn but has no controls`, /controls it this round/.test(idleText) && (await idle.locator('.pbtn.primary').count()) === 0);
+        }
+        if (!reloaded && g.round === 2 && piece === 1) {
           reloaded = true;
           const before = await p.locator('.phead b').first().innerText();
           await p.reload();
-          await p.waitForTimeout(1500);
+          await p.waitForTimeout(1800);
           const after = await p.locator('.phead b').first().innerText().catch(() => '');
-          check('a refreshed phone rejoins its own seat', before === after, `${before} → ${after}`);
+          check('a refreshed phone rejoins its own piece', before === after, `${before} → ${after}`);
         }
-        const opts = p.locator('.pdest');
-        if (st.phase === 'choose' && (await opts.count()) > 1 && !(await p.locator('.pdest.on').count())) await opts.nth(1).click();
+        if (g.phase === 'choose') {
+          const opts = p.locator('.pdest');
+          const hunt = p.locator('.pdest', { hasText: '👻' });
+          if (!(await p.locator('.pdest.on').count())) await ((await hunt.count()) ? hunt.first() : opts.nth(Math.min(2, (await opts.count()) - 1))).click().catch(() => {});
+        }
         const btn = p.locator('.pbtn.primary').first();
-        if ((await btn.count()) && (await btn.isEnabled())) await btn.click().catch(() => {});
+        if ((await btn.count()) && (await btn.isEnabled().catch(() => false))) await btn.click().catch(() => {});
         else {
           const any = p.locator('.pbtn').first();
           if (await any.count()) await any.click().catch(() => {});
         }
-        if (step === 10) await p.screenshot({ path: `${OUT}/45-phone-turn.png` });
       }
-      await tv.waitForTimeout(300);
+      await tv.waitForTimeout(350);
     }
     const fin = (await S(tv)).game;
-    check('phones and a bot played several rounds through the service', fin.round >= 3 || fin.phase === 'gameOver', `round ${fin.round}, ${challenges} phone challenges`);
-    await tv.screenshot({ path: `${OUT}/46-tv-room-game.png` });
-    check('the phone controller has no horizontal overflow', await phones[0].evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    check('no console errors (rooms)', [tv, ...phones].every((p) => p.errors.length === 0), [tv, ...phones].flatMap((p) => p.errors).slice(0, 3).join(' | '));
-    for (const p of [tv, ...phones]) await p.context().close();
+    check('a pair, a solo phone and a bot played several rounds through the service', fin.round >= 4 || fin.phase === 'gameOver', `round ${fin.round}, ${challenges} phone challenges`);
+    check('room scores equal completed rounds; one living piece', fin.pieces.reduce((a, q) => a + q.score, 0) === (fin.phase === 'gameOver' ? 10 : fin.round - 1) && fin.pieces.filter((q) => q.alive).length === 1);
+    check('both teammates controlled the pair in their rounds', checkedInactive.size >= 2, [...checkedInactive].join(','));
+    await tv.screenshot({ path: `${OUT}/45-tv-room-game.png` });
+    await phones.Ana.screenshot({ path: `${OUT}/46-phone-watch.png` });
+    check('the phone controller has no horizontal overflow', await phones.Ana.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    const all = [tv, ...Object.values(phones)];
+    check('no console errors (rooms)', all.every((q) => q.errors.filter((e) => !/WebSocket/.test(e)).length === 0), all.flatMap((q) => q.errors).slice(0, 3).join(' | '));
+    for (const q of all) await q.context().close();
   }
 
   // ── 5. Screen sizes and failure states ───────────────────────────────
   if (run(5)) {
     for (const vp of [
-      { width: 1440, height: 900, name: 'desktop' },
+      { width: 1440, height: 900, name: 'laptop' },
       { width: 1024, height: 768, name: 'tablet' },
       { width: 800, height: 600, name: 'small' },
-      { width: 390, height: 844, name: 'phone-portrait' },
+      { width: 390, height: 844, name: 'mobile' },
     ]) {
       const page = await newPage({ width: vp.width, height: vp.height }, { reducedMotion: vp.name === 'tablet' ? 'reduce' : 'no-preference' });
       await clearStorage(page, '?quality=low');
-      await setupSeats(page, ['human', 'bot', 'bot', 'bot']);
+      await setupPieces(page, ['human', 'bot', 'bot', 'bot']);
       await page.getByRole('button', { name: /Start game/ }).click();
       await placeAll(page);
-      await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
-      await page.getByRole('button', { name: /Roll dice/ }).click();
+      await page.getByRole('button', { name: /Roll for life/ }).click();
       await settle(page);
+      await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
+      await page.waitForTimeout(1500);
       await page.screenshot({ path: `${OUT}/50-${vp.name}.png` });
       const overflow = await page.evaluate(() => {
         const bad = [];
@@ -607,7 +606,7 @@ try {
       });
       check(`${vp.name}: no horizontal clipping`, !overflow.scroll && overflow.bad.length === 0, overflow.bad.slice(0, 4).join(','));
       if (vp.name === 'tablet') check('reduced motion is honoured by default', (await S(page)).settings.reducedMotion === true);
-      if (vp.name === 'desktop') {
+      if (vp.name === 'laptop') {
         await page.getByRole('button', { name: 'Sound and motion settings' }).click();
         await page.getByLabel('Mute all sound').check();
         await page.keyboard.press('Escape');
@@ -617,11 +616,11 @@ try {
     }
     const page = await newPage();
     await page.goto(URL);
-    await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ schema: 1, session: {} })), SAVE_KEY);
+    await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ schema: 2, session: {} })), SAVE_KEY);
     await page.reload();
     await page.waitForTimeout(600);
     await page.getByRole('button', { name: 'Details' }).click();
-    check('an original-rules save is refused with a fresh-start offer', /different version/.test(await page.locator('.dialog').innerText()));
+    check('a candy-rules save is refused with a clear fresh-start explanation', /old candy rules/.test(await page.locator('.dialog').innerText()));
     await page.getByRole('button', { name: 'Clear saved game' }).click();
     await page.context().close();
     const pg = await newPage({ width: 390, height: 844 });
@@ -669,7 +668,9 @@ try {
   }
 } catch (e) {
   check('suite ran to completion', false, e.message.split('\n')[0] + ' @ ' + (e.stack.split('\n').find((l) => l.includes('e2e.mjs')) ?? '').trim());
-  try { await (await browser.contexts())[0]?.pages()[0]?.screenshot({ path: `${OUT}/zz-crash.png` }); } catch {}
+  try {
+    for (const ctx of browser.contexts()) for (const pg of ctx.pages()) await pg.screenshot({ path: `${OUT}/zz-crash-${Date.now()}.png` });
+  } catch {}
 } finally {
   await browser.close();
   server?.kill();

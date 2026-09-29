@@ -1,18 +1,7 @@
 // Versioned local persistence. Only this game's own keys are ever written or
 // removed; nothing else in the browser's storage is touched.
 
-import {
-  CHARACTERS,
-  DEFAULT_GHOST_NAME,
-  DEFAULT_MANSION_NAME,
-  EVENT_TYPES,
-  TRAP_COUNT,
-  trapEligible,
-  NODE_COUNT,
-  ROOMS,
-  TEXT_LIMITS,
-  type EventType,
-} from './config';
+import { CHARACTERS, DEFAULT_MANSION_NAME, MAX_PIECES, NODE_COUNT, ROOMS, ROUNDS, TEXT_LIMITS, TRAP_COUNT, trapEligible } from './config';
 import type { GameState } from './types';
 import type { Session } from './engine';
 import type { BotProfile } from './bots';
@@ -20,21 +9,21 @@ import type { BotProfile } from './bots';
 export const SAVE_KEY = 'one-more-room/save';
 export const PREFS_KEY = 'one-more-room/prefs';
 export const SETTINGS_KEY = 'one-more-room/settings';
-/** v1 = original rules (catch-and-respawn); v2 = survival encounters and ghosts. */
-export const SAVE_SCHEMA = 2;
+/**
+ * v1 = original candy rules; v2 = candy with survival encounters;
+ * v3 = One Life (one living piece, points per round held).
+ */
+export const SAVE_SCHEMA = 3;
 
 export interface Personalization {
   mansionName: string;
-  ghostName: string;
   roomNames: Record<number, string>;
-  /** Optional flavour text per event type; never changes the effect. */
-  flavors: Partial<Record<EventType, string>>;
 }
 
 export function defaultPersonalization(): Personalization {
   const roomNames: Record<number, string> = {};
   for (const [id, r] of Object.entries(ROOMS)) roomNames[Number(id)] = r.defaultName;
-  return { mansionName: DEFAULT_MANSION_NAME, ghostName: DEFAULT_GHOST_NAME, roomNames, flavors: {} };
+  return { mansionName: DEFAULT_MANSION_NAME, roomNames };
 }
 
 /** Trim, collapse control characters, clamp length, and fall back to a default. */
@@ -50,23 +39,12 @@ export function sanitizePersonalization(input: unknown): Personalization {
   if (!input || typeof input !== 'object') return d;
   const o = input as Record<string, unknown>;
   const rooms = (o.roomNames && typeof o.roomNames === 'object' ? o.roomNames : {}) as Record<string, unknown>;
-  const flavorsIn = (o.flavors && typeof o.flavors === 'object' ? o.flavors : {}) as Record<string, unknown>;
-  const flavors: Partial<Record<EventType, string>> = {};
-  for (const t of EVENT_TYPES) {
-    const f = cleanText(flavorsIn[t], TEXT_LIMITS.flavor, '');
-    if (f) flavors[t] = f;
-  }
   const roomNames: Record<number, string> = {};
   for (const id of Object.keys(ROOMS).map(Number)) roomNames[id] = cleanText(rooms[id], TEXT_LIMITS.roomName, d.roomNames[id]);
-  return {
-    mansionName: cleanText(o.mansionName, TEXT_LIMITS.mansionName, d.mansionName),
-    ghostName: cleanText(o.ghostName, TEXT_LIMITS.ghostName, d.ghostName),
-    roomNames,
-    flavors,
-  };
+  return { mansionName: cleanText(o.mansionName, TEXT_LIMITS.mansionName, d.mansionName), roomNames };
 }
 
-/** Who sits in a seat on this device: a person, or a bot with a profile. */
+/** Who plays a piece on this device: people, or a bot with a profile. */
 export interface SeatSetup {
   kind: 'human' | 'bot';
   bot?: BotProfile;
@@ -81,43 +59,46 @@ export interface SaveFile {
 }
 
 const isInt = (v: unknown, min = -Infinity, max = Infinity) => Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
+const PHASES = ['placement', 'lifeRoll', 'turnStart', 'choose', 'pick', 'hunt', 'challenge', 'summary', 'gameOver'];
 
 export function validGame(g: unknown): g is GameState {
   if (!g || typeof g !== 'object') return false;
   const s = g as GameState;
   const chars = new Set(CHARACTERS.map((c) => c.id));
+  if (s.schema !== 3 || !Array.isArray(s.pieces) || s.pieces.length < 2 || s.pieces.length > MAX_PIECES) return false;
+  const started = s.phase !== 'placement' && s.phase !== 'lifeRoll';
+  const living = s.pieces.filter((p) => p && p.alive).length;
   return (
-    s.schema === 2 &&
     isInt(s.rng, 0, 0xffffffff) &&
     isInt(s.challengeRng, 0, 0xffffffff) &&
-    Array.isArray(s.players) &&
-    s.players.length >= 2 &&
-    s.players.length <= 6 &&
-    s.players.every(
+    s.pieces.every(
       (p) =>
         typeof p.id === 'string' &&
         typeof p.name === 'string' &&
         chars.has(p.character) &&
+        Array.isArray(p.controllers) &&
+        p.controllers.length >= 1 &&
+        p.controllers.length <= 2 &&
+        p.controllers.every((c) => typeof c === 'string') &&
         isInt(p.node, 0, NODE_COUNT - 1) &&
-        isInt(p.carried, 0) &&
-        isInt(p.banked, 0) &&
-        isInt(p.bounty, 0, 99) &&
-        typeof p.alive === 'boolean' &&
-        typeof p.decoyUsed === 'boolean',
+        isInt(p.score, 0, ROUNDS) &&
+        isInt(p.streak, 0, ROUNDS) &&
+        typeof p.alive === 'boolean',
     ) &&
-    isInt(s.ghost, 1, NODE_COUNT - 1) &&
-    Array.isArray(s.stocks) && s.stocks.length === NODE_COUNT && s.stocks.every((v) => isInt(v, 0)) &&
-    Array.isArray(s.piles) && s.piles.length === NODE_COUNT && s.piles.every((v) => isInt(v, 0)) &&
-    Array.isArray(s.deck) && Array.isArray(s.discard) && s.deck.length + s.discard.length === 18 &&
-    isInt(s.round, 1, 10) &&
-    isInt(s.turn, 0, s.players.length - 1) &&
-    ['placement', 'turnStart', 'choose', 'pick', 'event', 'challenge', 'ghost', 'summary', 'gameOver'].includes(s.phase) &&
-    (s.dice === null || (Array.isArray(s.dice) && (s.dice.length === 1 || s.dice.length === 2) && s.dice.every((d) => isInt(d, 1, 6)))) &&
-    (['placement', 'turnStart', 'gameOver'].includes(s.phase) || s.dice !== null) &&
-    Array.isArray(s.nominations) && s.nominations.length === s.players.length &&
+    new Set(s.pieces.map((p) => p.character)).size === s.pieces.length &&
+    (started ? living === 1 : living === 0) &&
+    s.pieces.reduce((sum, p) => sum + p.score, 0) <= ROUNDS &&
+    isInt(s.round, 1, ROUNDS) &&
+    PHASES.includes(s.phase) &&
+    Array.isArray(s.schedule) &&
+    (!started || (s.schedule.length === s.pieces.length && new Set(s.schedule).size === s.pieces.length && isInt(s.slot, 0, s.pieces.length - 1))) &&
+    (s.die === null || isInt(s.die, 1, 6)) &&
+    isInt(s.seancesUsed, 0, 2) &&
+    Array.isArray(s.nominations) &&
+    s.nominations.length === s.pieces.length &&
     Array.isArray(s.traps) &&
     (s.phase === 'placement' ? s.traps.length === 0 : s.traps.length === TRAP_COUNT) &&
-    s.traps.every((t) => trapEligible(t.node) && typeof t.revealed === 'boolean') &&
+    s.traps.every((t) => trapEligible(t.node) && ['reaper', 'seance', 'poltergeist'].includes(t.effect) && typeof t.revealed === 'boolean' && typeof t.spent === 'boolean') &&
     (s.phase !== 'challenge' || (!!s.challenge && typeof s.challenge.id === 'string')) &&
     Array.isArray(s.log)
   );
@@ -148,7 +129,7 @@ export function deserialize(raw: string | null): LoadResult {
   }
   if (!Array.isArray(ses.known)) ses.known = [];
   const seats =
-    Array.isArray(parsed.seats) && parsed.seats.length === ses.game.players.length
+    Array.isArray(parsed.seats) && parsed.seats.length === ses.game.pieces.length
       ? parsed.seats.map((x) => (x && x.kind === 'bot' && x.bot ? { kind: 'bot' as const, bot: x.bot } : { kind: 'human' as const }))
       : null;
   return { ok: true, session: ses, personalization: sanitizePersonalization(parsed.personalization), seats };

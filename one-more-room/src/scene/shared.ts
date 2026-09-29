@@ -10,7 +10,3 @@ export const camInfo = {
 
 /** Screen space covered by HUD panels, so the overview can frame around them. */
 export const hudInsets = { top: 72, bottom: 190, left: 0, right: 0 };
-
-export const overlay = {
-  ghostIndicator: null as HTMLElement | null,
-};

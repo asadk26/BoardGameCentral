@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import { CHARACTERS, MAX_PLAYERS, MIN_PLAYERS, type CharacterId } from '../engine/config';
+import { CHARACTERS, MAX_PIECES, MIN_PIECES, type CharacterId } from '../engine/config';
 import { hostSend, leaveRoom } from '../net/host';
 import { useStore } from '../store';
 import { PlayerBadge } from './Dialog';
@@ -17,8 +17,10 @@ export function RoomLobby() {
   }, [room?.joinUrl]);
   if (!room) return null;
   const view = room.view;
-  const seats = view?.seats ?? [];
-  const free = CHARACTERS.filter((c) => !seats.some((s) => s.character === c.id));
+  const pieces = view?.pieces ?? [];
+  const mode = view?.mode ?? 'ffa';
+  const free = CHARACTERS.filter((c) => !pieces.some((s) => s.character === c.id));
+  const people = pieces.reduce((a, p) => a + p.members.length, 0);
   return (
     <div className="setup-screen room-lobby">
       <div className="setup-card">
@@ -37,7 +39,7 @@ export function RoomLobby() {
             <div className="room-join">
               {qr && room.joinUrl ? <img src={qr} alt={`QR code to join room ${room.code}`} className="qr" /> : null}
               <div>
-                <p className="muted">Scan with a phone, or open the address and type the code.</p>
+                <p className="muted">Scan with a phone on the same Wi-Fi, or open the address and type the code. Pick a costume on your phone.</p>
                 <p className="room-code" aria-label="Room code">
                   {room.code}
                 </p>
@@ -45,20 +47,33 @@ export function RoomLobby() {
                 {room.status !== 'open' && <p className="notice">Connection: {room.status}</p>}
               </div>
             </div>
+            <div className="seat-kind" role="radiogroup" aria-label="Mode">
+              <button role="radio" aria-checked={mode === 'ffa'} className={`chip ${mode === 'ffa' ? 'on' : ''}`} onClick={() => hostSend({ t: 'setMode', mode: 'ffa' })}>
+                Free-for-all
+              </button>
+              <button role="radio" aria-checked={mode === 'teams'} className={`chip ${mode === 'teams' ? 'on' : ''}`} onClick={() => hostSend({ t: 'setMode', mode: 'teams' })}>
+                Team Battle
+              </button>
+              <span className="muted small">
+                {mode === 'ffa' ? 'One phone per piece.' : 'Up to two phones share a piece (join a team on the phone). First person: odd rounds; second: even rounds.'}
+              </span>
+            </div>
             <ol className="setup-players">
-              {seats.map((s) => (
-                <li key={s.seat}>
-                  <PlayerBadge n={s.seat + 1} color={CHARACTERS.find((c) => c.id === s.character)!.color} />
+              {pieces.map((s) => (
+                <li key={s.piece}>
+                  <PlayerBadge n={s.piece + 1} color={CHARACTERS.find((c) => c.id === s.character)!.color} />
                   <span>
-                    <b>{s.name}</b> — {CHARACTERS.find((c) => c.id === s.character)!.name} {s.kind === 'bot' ? `🤖 ${s.bot?.personality}` : s.connected ? '📱' : '📱 offline'}
+                    <b>{s.name}</b> — {CHARACTERS.find((c) => c.id === s.character)!.name}{' '}
+                    {s.kind === 'bot' ? `🤖 ${s.bot?.personality}` : s.members.map((m) => `${m.name} ${m.connected ? '📱' : '📱 offline'}`).join(' · ')}
                   </span>
-                  <button className="btn tool" onClick={() => hostSend({ t: 'removeSeat', seat: s.seat })}>
+                  <button className="btn tool" onClick={() => hostSend({ t: 'removePiece', piece: s.piece })}>
                     Remove
                   </button>
                 </li>
               ))}
             </ol>
-            {seats.length < MAX_PLAYERS && free.length > 0 && (
+            {(view?.spectators.length ?? 0) > 0 && <p className="muted small">Joined but not in a piece yet: {view!.spectators.map((m) => m.name).join(', ')}</p>}
+            {pieces.length < MAX_PIECES && free.length > 0 && (
               <div className="row-btns">
                 <select aria-label="Bot costume" value={botChar} onChange={(e) => setBotChar(e.target.value as CharacterId)}>
                   <option value="">Bot costume…</option>
@@ -79,8 +94,8 @@ export function RoomLobby() {
               </div>
             )}
             {room.error && <p className="notice">{room.error}</p>}
-            <button className="btn primary big" disabled={seats.length < MIN_PLAYERS} onClick={() => hostSend({ t: 'start' })}>
-              {seats.length < MIN_PLAYERS ? `Waiting for ${MIN_PLAYERS - seats.length} more` : `Start with ${seats.length} players`}
+            <button className="btn primary big" disabled={pieces.length < MIN_PIECES} onClick={() => hostSend({ t: 'start' })}>
+              {pieces.length < MIN_PIECES ? `Waiting for ${MIN_PIECES - pieces.length} more piece${MIN_PIECES - pieces.length === 1 ? '' : 's'}` : `Start: ${pieces.length} pieces, ${people} ${people === 1 ? 'phone' : 'phones'}`}
             </button>
           </>
         )}

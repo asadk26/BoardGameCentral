@@ -1,69 +1,90 @@
 // Plays hundreds of complete random games through the engine — random but
-// always-legal actions, random survival-game inputs — and checks the
-// invariants the rules rely on after every single action.
+// always-legal actions, random jump-rope inputs, random undos — and checks
+// the invariants the rules rely on after every single action.
 
 import { expect, it } from 'vitest';
-import { CHARACTERS, ENTRANCE, SCORING, TRAP_ELIGIBLE } from '../src/engine/config';
-import { createGame, dispatch, finalScores, legalRoutes, newSession } from '../src/engine/engine';
-import { botChallengeInputs, SKILLS } from '../src/engine/challenges';
-import type { Action } from '../src/engine/types';
+import { CHARACTERS, NODE_COUNT, ROUNDS, TRAP_ELIGIBLE } from '../src/engine/config';
+import { actingPiece, completedRounds, createGame, dispatch, legalRoutes, newSession, undo, undoInfo } from '../src/engine/engine';
+import { botRopeInputs, SKILLS } from '../src/engine/challenges';
+import type { Action, GameState } from '../src/engine/types';
+
+function check(g: GameState, prev: GameState | null) {
+  const started = g.phase !== 'placement' && g.phase !== 'lifeRoll';
+  expect(g.pieces.filter((p) => p.alive).length).toBe(started ? 1 : 0);
+  expect(g.pieces.reduce((a, p) => a + p.score, 0)).toBe(completedRounds(g));
+  g.pieces.forEach((p, i) => {
+    expect(p.node).toBeGreaterThanOrEqual(0);
+    expect(p.node).toBeLessThan(NODE_COUNT);
+    expect(p.streak).toBeLessThanOrEqual(p.score);
+    if (prev && prev.round <= g.round) expect(p.score).toBeGreaterThanOrEqual(prev.pieces[i].score);
+  });
+  if (started) {
+    expect(new Set(g.schedule).size).toBe(g.pieces.length);
+    expect(g.schedule.length).toBe(g.pieces.length);
+    expect(new Set(g.traps.map((t) => t.node)).size).toBe(6);
+  }
+  expect(g.seancesUsed).toBeLessThanOrEqual(2);
+  if (g.phase === 'challenge') expect(g.challenge).not.toBeNull();
+}
 
 it('random full games keep every invariant', () => {
   for (let seed = 1; seed < 300; seed++) {
-    const n = 2 + (seed % 5);
-    let s = newSession(createGame({ players: Array.from({ length: n }, (_, i) => ({ name: `p${i}`, character: CHARACTERS[i].id })), seed }));
+    const n = 2 + (seed % 3);
+    let s = newSession(createGame({ pieces: Array.from({ length: n }, (_, i) => ({ character: CHARACTERS[i].id, controllers: [`p${i}`] })), seed }));
     let k = seed;
     const rnd = () => (k = (Math.imul(k, 1103515245) + 12345) >>> 0) / 2 ** 32;
-    let deadBefore = new Set<number>();
-    for (let guard = 0; s.game.phase !== 'gameOver' && guard < 4000; guard++) {
+    let prev: GameState | null = null;
+    // Actions taken per piece per round, and minigames per action.
+    let actedThisRound = new Map<number, number>();
+    let round = 0;
+    let minigames = 0;
+    for (let guard = 0; s.game.phase !== 'gameOver' && guard < 6000; guard++) {
       const g = s.game;
       let a: Action;
       if (g.phase === 'placement') {
-        const seat = g.nominations.findIndex((x) => x === null);
-        a = { type: 'nominate', seat, node: TRAP_ELIGIBLE[Math.floor(rnd() * TRAP_ELIGIBLE.length)] };
-      } else if (g.phase === 'turnStart') {
-        const r = rnd() < 0.1 ? dispatch(s, { type: 'placeDecoy' }) : null;
-        if (r && !r.error) s = r.session;
+        const piece = g.nominations.findIndex((x) => x === null);
+        a = { type: 'nominate', piece, node: TRAP_ELIGIBLE[Math.floor(rnd() * TRAP_ELIGIBLE.length)] };
+      } else if (g.phase === 'lifeRoll') a = { type: 'rollForLife' };
+      else if (g.phase === 'turnStart') {
+        if (rnd() < 0.03 && undoInfo(s).available) {
+          s = undo(s);
+          actedThisRound = new Map();
+          round = s.game.round;
+          continue;
+        }
         a = { type: 'roll' };
       } else if (g.phase === 'choose') {
-        const moveDie = rnd() < 0.5 ? 0 : 1;
-        const dests = [...legalRoutes(g, moveDie).keys()];
-        const dest = dests.length && rnd() < 0.9 ? dests[Math.floor(rnd() * dests.length)] : 'stay';
-        s = dispatch(s, { type: 'select', moveDie, dest }).session;
+        const dests = [...legalRoutes(g).keys()];
+        const dest = dests.length && rnd() < 0.85 ? dests[Math.floor(rnd() * dests.length)] : 'stay';
+        s = dispatch(s, { type: 'select', dest }).session;
         a = { type: 'confirmMove' };
-      } else if (g.phase === 'pick') {
-        a = { type: 'pickOpponent', option: g.pick!.options[Math.floor(rnd() * g.pick!.options.length)] };
-      } else if (g.phase === 'event') {
-        const ev = g.event!;
-        a = ev.canDecline && rnd() < 0.3 ? { type: 'eventDecline' } : { type: 'eventChoose', option: ev.options[Math.floor(rnd() * ev.options.length)] };
-      } else if (g.phase === 'challenge') {
+      } else if (g.phase === 'pick') a = { type: 'pickOpponent', option: g.pick!.options[Math.floor(rnd() * g.pick!.options.length)] };
+      else if (g.phase === 'hunt') a = rnd() < 0.85 ? { type: 'hunt' } : { type: 'declineHunt' };
+      else if (g.phase === 'challenge') {
         const ch = g.challenge!;
-        const inputs: Record<number, ReturnType<typeof botChallengeInputs>> = {};
-        for (const p of ch.participants) inputs[p] = botChallengeInputs(ch.kind, ch.seed, p, rnd() < 0.5 ? SKILLS.shaky : SKILLS.sharp, ch.oneSurvivor);
+        const inputs: Record<number, ReturnType<typeof botRopeInputs>> = {};
+        for (const p of ch.participants) inputs[p] = botRopeInputs(ch.seed, p, rnd() < 0.5 ? SKILLS.shaky : SKILLS.sharp);
         a = { type: 'challengeResult', id: ch.id, inputs };
-      } else if (g.phase === 'ghost') {
-        a = { type: 'moveGhost' };
+        minigames++;
       } else a = { type: 'nextTurn' };
+      if (a.type === 'roll') {
+        if (g.round !== round) {
+          actedThisRound = new Map();
+          round = g.round;
+        }
+        const me = actingPiece(g);
+        actedThisRound.set(me, (actedThisRound.get(me) ?? 0) + 1);
+        expect(actedThisRound.get(me)).toBe(1);
+        minigames = 0;
+      }
       const r = dispatch(s, a);
       expect(r.error).toBeUndefined();
       s = r.session;
-      const st = s.game;
-      expect(st.ghost).not.toBe(ENTRANCE);
-      expect(st.stocks.every((v) => v >= 0)).toBe(true);
-      if (st.phase !== 'placement') expect(new Set(st.traps.map((t) => t.node)).size).toBe(6);
-      st.players.forEach((p, i) => {
-        expect(p.carried).toBeGreaterThanOrEqual(0);
-        if (p.node === ENTRANCE) expect(p.carried).toBe(0);
-        if (!p.alive) {
-          expect(p.carried).toBe(0);
-          expect(p.node).not.toBe(ENTRANCE);
-        }
-        if (deadBefore.has(i)) expect(p.alive).toBe(false); // irreversible
-        expect(p.bounty).toBeLessThanOrEqual(SCORING.bountyCap);
-      });
-      deadBefore = new Set(st.players.map((p, i) => (p.alive ? -1 : i)).filter((i) => i >= 0));
+      expect(minigames).toBeLessThanOrEqual(1);
+      check(s.game, prev);
+      prev = s.game;
     }
     expect(s.game.phase).toBe('gameOver');
-    expect(finalScores(s.game).length).toBe(n);
+    expect(s.game.pieces.reduce((a, p) => a + p.score, 0)).toBe(ROUNDS);
   }
 }, 120000);

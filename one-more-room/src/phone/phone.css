@@ -223,3 +223,43 @@
   text-decoration: none;
   margin-top: 8px;
 }
+.phead.living {
+  box-shadow: 0 0 0 2px #ffd36b inset;
+}
+.pcurse {
+  color: #ffd0a8;
+}
+.pchallenge .rope-lanes {
+  grid-template-columns: 1fr;
+}
+.pchallenge .press-btn {
+  min-height: 110px;
+  font-size: 1.6rem;
+}
+.pscores {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+  font-size: 0.9rem;
+}
+.pscores li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pscores .pn {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.pscores li.alive {
+  color: var(--amber-2);
+}
+.pscores li.me .pn {
+  text-decoration: underline;
+}
