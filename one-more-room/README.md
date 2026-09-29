@@ -19,8 +19,8 @@ node tests/browser/e2e.mjs   # end-to-end checks in headless Chromium (after a b
 ```
 
 `dist/` is fully static and uses relative paths, so it runs from any sub-path.
-The collection's Pages workflow builds it and publishes it at
-`/The_Town/one-more-room/`.
+This repository's Pages workflow builds it and publishes it at
+`https://asadk26.github.io/BoardGameCentral/one-more-room/`.
 
 The browser suite starts `vite preview` itself. It uses Playwright's Chromium
 at `/opt/pw-browsers/...` by default; set `CHROME=/path/to/chrome` to use

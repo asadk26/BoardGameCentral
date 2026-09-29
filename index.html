@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Board Game Central</title>
+<meta name="description" content="Board games you play around one screen.">
+<meta name="theme-color" content="#150d24">
+<style>
+  :root { --bg: #150d24; --ink: #fff4e2; --muted: #c3b3d9; --amber: #f2b84b; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px;
+    background: radial-gradient(80% 60% at 50% 0%, #3b2a66, var(--bg) 70%);
+    color: var(--ink); font-family: ui-rounded, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 560px; width: 100%; }
+  h1 { font-family: Georgia, serif; font-weight: 700; margin: 0 0 4px; color: var(--muted); font-size: 1rem; letter-spacing: .12em; text-transform: uppercase; }
+  .game { padding: 22px; border-radius: 20px; background: rgba(27, 16, 43, .9); border: 1px solid rgba(255, 220, 160, .2); }
+  h2 { font-family: Georgia, serif; font-size: clamp(2rem, 7vw, 2.8rem); margin: 0; color: #ffd98a; }
+  p { color: var(--muted); line-height: 1.5; }
+  .doors { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+  a { display: inline-flex; align-items: center; min-height: 48px; padding: 10px 20px; border-radius: 12px; font-weight: 700; text-decoration: none; color: #2a1204; background: linear-gradient(180deg, #ffcf6b, #f0a52e); }
+  a.quiet { color: var(--ink); background: rgba(70, 46, 104, .9); border: 1px solid rgba(255, 220, 160, .3); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Board Game Central</h1>
+  <section class="game">
+    <h2>One More Room</h2>
+    <p>A Halloween board game for two to six players around one screen. Grab
+      candy from a haunted mansion, bank it at the door, and decide which die
+      moves the ghost. Ten rounds until midnight.</p>
+    <div class="doors">
+      <a href="one-more-room/">Play on this screen</a>
+    </div>
+  </section>
+</main>
+</body>
+</html>
