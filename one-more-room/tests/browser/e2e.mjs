@@ -246,8 +246,13 @@ try {
     await settle(page);
     await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
     st = await S(page);
-    check('the life roll leaves exactly one living piece at the entrance, ghosts elsewhere', living(st.game) >= 0 && st.game.pieces.filter((p) => p.alive).length === 1 && st.game.pieces[living(st.game)].node === 0 && st.game.pieces.filter((p) => !p.alive).every((p) => [8, 16, 24].includes(p.node)));
-    check('the living piece acts first and the order is shown', acting(st.game) === living(st.game) && (await page.locator('.topbar .order .ord').count()) === 2);
+    // A bot that wins the roll may already have moved: judge the first action's starting snapshot.
+    const first = await page.evaluate((k) => {
+      const ses = JSON.parse(localStorage.getItem(k)).session;
+      return [ses.turnStart, ses.previousTurnStart].find((g) => g && g.round === 1 && g.slot === 0) ?? null;
+    }, SAVE_KEY);
+    check('the life roll leaves exactly one living piece at the entrance, ghosts elsewhere', !!first && first.pieces.filter((p) => p.alive).length === 1 && first.pieces[living(first)].node === 0 && first.pieces.filter((p) => !p.alive).every((p) => [8, 16, 24].includes(p.node)));
+    check('the living piece acts first and the order is shown', !!first && acting(first) === living(first) && (await page.locator('.topbar .order .ord').count()) === 2);
     await page.screenshot({ path: `${OUT}/06-first-action.png` });
     await page.keyboard.press('v');
     await page.waitForTimeout(1500);
