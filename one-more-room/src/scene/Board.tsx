@@ -1,18 +1,8 @@
 import { useMemo, useRef, type ReactNode } from 'react';
 import { useFrame, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
-import { DECORATED_CORRIDORS, ENTRANCE, NODE_COUNT, ORDINARY_EDGES, ROOMS, SECRET_EDGES, nodeKind, secretPairLabel } from '../engine/config';
-import {
-  MANSION_OUTLINE,
-  NODE_TOP,
-  ROOM_PLOTS,
-  WALLS,
-  nodePos,
-  nodeXZ,
-  type V2,
-  type V3,
-  type WallSeg,
-} from './layout';
+import { DECORATED_CORRIDORS, ENTRANCE, NODE_COUNT, ORDINARY_EDGES, ROOMS, SECRET_EDGES, VERSUS_SPACES, nodeKind, secretPairLabel } from '../engine/config';
+import { MANSION_OUTLINE, NODE_TOP, ROOM_PLOTS, WALLS, nodePos, nodeXZ, type V2, type V3, type WallSeg } from './layout';
 import { labelTexture, tileSymbolTexture } from './labels';
 import { camInfo } from './shared';
 
@@ -192,9 +182,27 @@ function Tile({ id }: { id: number }) {
   const plot = ROOM_PLOTS.find((p) => p.node === id);
   const pair = secretPairLabel(id);
   const r = id === ENTRANCE ? 0.95 : 0.52;
-  const color =
-    kind === 'entrance' ? '#e8b54a' : kind === 'room' ? plot!.accent : DECORATED_CORRIDORS.includes(id) ? '#b8703a' : kind === 'secret' ? PASSAGE_COLORS[pair!] : id === 16 ? '#5ff2e0' : '#a595b8';
-  const symbol = kind === 'secret' ? tileSymbolTexture(pair === 'A' ? 'secretA' : 'secretB') : kind === 'entrance' ? tileSymbolTexture('entrance') : null;
+  const versus = VERSUS_SPACES.includes(id);
+  const color = versus
+    ? '#d85cc8'
+    : kind === 'entrance'
+      ? '#e8b54a'
+      : kind === 'room'
+        ? plot!.accent
+        : DECORATED_CORRIDORS.includes(id)
+          ? '#b8703a'
+          : kind === 'secret'
+            ? PASSAGE_COLORS[pair!]
+            : id === 16
+              ? '#5ff2e0'
+              : '#a595b8';
+  const symbol = versus
+    ? tileSymbolTexture('versus')
+    : kind === 'secret'
+      ? tileSymbolTexture(pair === 'A' ? 'secretA' : 'secretB')
+      : kind === 'entrance'
+        ? tileSymbolTexture('entrance')
+        : null;
   const num = useMemo(() => labelTexture([String(id)], { bg: 'rgba(0,0,0,0)', fg: 'rgba(255,240,220,0.85)', height: 64 }).tex, [id]);
   return (
     <group position={[x, 0, z]}>
@@ -204,7 +212,7 @@ function Tile({ id }: { id: number }) {
       </mesh>
       <mesh position={[0, 0.125, 0]} receiveShadow>
         <cylinderGeometry args={[r - 0.06, r - 0.06, 0.02, 32]} />
-        <meshStandardMaterial color={color} roughness={0.55} emissive={color} emissiveIntensity={kind === 'corridor' ? 0.05 : 0.18} />
+        <meshStandardMaterial color={color} roughness={0.55} emissive={color} emissiveIntensity={versus ? 0.3 : kind === 'corridor' ? 0.05 : 0.18} />
       </mesh>
       {symbol && (
         <mesh position={[0, 0.137, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -228,6 +236,18 @@ export function Tiles() {
       {Array.from({ length: NODE_COUNT }, (_, i) => (
         <Tile key={i} id={i} />
       ))}
+    </group>
+  );
+}
+
+/** "Versus" plaques over the two ghost-battle spaces, readable from either camera. */
+export function VersusLabels() {
+  return (
+    <group>
+      {VERSUS_SPACES.map((id) => {
+        const [x, , z] = nodePos(id, 0);
+        return <Label key={id} pos={[x, 0.95, z]} lines={['⚔ Versus']} scale={0.42} color="#f0a6e6" />;
+      })}
     </group>
   );
 }
@@ -395,7 +415,19 @@ export function Ring({ id, color, strength = 1, pulse = true, radius }: { id: nu
   );
 }
 
-export function PathDots({ path, color, size = 0.07, y = NODE_TOP + 0.05, dashed = false }: { path: number[]; color: string; size?: number; y?: number; dashed?: boolean }) {
+export function PathDots({
+  path,
+  color,
+  size = 0.07,
+  y = NODE_TOP + 0.05,
+  dashed = false,
+}: {
+  path: number[];
+  color: string;
+  size?: number;
+  y?: number;
+  dashed?: boolean;
+}) {
   const pts = useMemo(() => {
     const out: V3[] = [];
     for (let i = 1; i < path.length; i++) {

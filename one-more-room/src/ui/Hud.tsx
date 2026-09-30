@@ -10,6 +10,7 @@ import { PlayerBadge } from './Dialog';
 import { Die } from './Dice';
 import { PlacementScreen } from './Placement';
 import { ChallengeStage } from './Challenges';
+import { EncounterChoices, ItemActions, ItemBadge, RewardChoice, RewardReveal, rewardDecider } from './Items';
 
 const colorOf = (id: string) => CHARACTERS.find((c) => c.id === id)!.color;
 const charName = (id: string) => CHARACTERS.find((c) => c.id === id)!.name;
@@ -205,6 +206,11 @@ function PiecesPanel({ game, innerRef }: { game: GameState; innerRef: React.RefO
             <div className="pstats">
               <PieceStatus game={game} i={i} />
             </div>
+            {p.item && (
+              <div className="ploc">
+                <ItemBadge item={p.item} />
+              </div>
+            )}
             {controllerLine(game, i) && <div className="ploc">{controllerLine(game, i)}</div>}
             <div className="ploc">{placeName(p.node, pz)}</div>
           </div>
@@ -224,7 +230,8 @@ function ActionPanel({ game }: { game: GameState }) {
   const me = game.pieces[actingIdx];
   const color = colorOf(me.character);
   const primaryRef = useRef<HTMLButtonElement>(null);
-  const bot = isBotSeat(actingIdx);
+  const decider = rewardDecider(game);
+  const bot = isBotSeat(decider);
   const phaseKey = `${game.actionNumber}:${game.phase}:${busy}`;
   useEffect(() => {
     // Hand keyboard focus to the main action whenever the phase changes.
@@ -260,7 +267,8 @@ function ActionPanel({ game }: { game: GameState }) {
           {game.phase === 'turnStart' && <TurnStart game={game} primaryRef={primaryRef} />}
           {game.phase === 'choose' && <Choose game={game} primaryRef={primaryRef} />}
           {game.phase === 'pick' && <PickPanel game={game} primaryRef={primaryRef} />}
-          {game.phase === 'hunt' && <HuntPanel game={game} primaryRef={primaryRef} />}
+          {game.phase === 'hunt' && <EncounterChoices game={game} send={act} btn="btn" disabled={busy} primaryRef={primaryRef} pz={pz} />}
+          {game.phase === 'reward' && <RewardChoice game={game} send={act} btn="btn" canChoose disabled={busy} primaryRef={primaryRef} />}
           {game.phase === 'challenge' && <p className="prompt">Haunted Jump Rope in progress…</p>}
           {game.phase === 'summary' && <Summary game={game} primaryRef={primaryRef} readOnly={watching} />}
         </>
@@ -272,15 +280,33 @@ function ActionPanel({ game }: { game: GameState }) {
 /** What a bot or a phone is doing, for everyone watching the TV. */
 function WatchPanel({ game, bot }: { game: GameState; bot: boolean }) {
   const pz = useStore((s) => s.personalization);
-  const me = game.pieces[actingPiece(game)];
+  const d = rewardDecider(game);
+  const me = game.pieces[d];
   const sel = game.selection.dest;
   const pv = game.phase === 'choose' && sel !== null ? previewMove(game, sel) : null;
-  const who = bot ? `🤖 ${me.name} is thinking…` : `Waiting for ${me.name}’s phone${controllerLine(game, actingPiece(game)) ? ` (${controllerLine(game, actingPiece(game))})` : ''}…`;
+  const who = bot ? `🤖 ${me.name} is thinking…` : `Waiting for ${me.name}’s phone${controllerLine(game, d) ? ` (${controllerLine(game, d)})` : ''}…`;
+  const o = game.options;
   return (
     <div className="phase">
-      {game.die !== null && <DieBox game={game} />}
+      {(game.die !== null || game.rollInfo?.kind === 'stride') && <DieBox game={game} />}
       <p className="prompt">{who}</p>
-      {game.phase === 'hunt' && <p className="warn">👻 In range of {game.pieces[livingPiece(game)].name}: challenge, or let it pass?</p>}
+      {me.item && game.phase !== 'reward' && (
+        <p className="muted small">
+          Holding <ItemBadge item={me.item} />
+        </p>
+      )}
+      {game.phase === 'hunt' && o && (
+        <p className="warn">
+          {[
+            o.living ? `❤ may challenge ${game.pieces[livingPiece(game)].name} for the life` : null,
+            o.sameSpace.length || o.versus.length ? '⚔ may battle a ghost for an item' : null,
+          ]
+            .filter(Boolean)
+            .join(' • ')}{' '}
+          — or end the action.
+        </p>
+      )}
+      {game.phase === 'reward' && <RewardChoice game={game} send={() => {}} btn="btn" canChoose={false} />}
       {game.phase === 'pick' && <p className="warn">☠ Reaper’s Challenge: choosing a ghost to duel…</p>}
       {pv && <p className="you">➜ {previewSummary(pv, game, pz)}</p>}
     </div>
@@ -311,6 +337,7 @@ function LifeRollResult({ game }: { game: GameState }) {
 
 function TurnStart({ game, primaryRef }: PR) {
   const busy = useStore((s) => s.busy);
+  const pz = useStore((s) => s.personalization);
   const me = game.pieces[actingPiece(game)];
   const curse = me.alive ? curseLine(me.streak) : null;
   return (
@@ -322,6 +349,7 @@ function TurnStart({ game, primaryRef }: PR) {
           : 'Roll one die: a ghost always drifts at least 3 spaces, and may pass through the two dotted wall links. End on the living piece’s space or right next to it to challenge for the life.'}
       </p>
       {curse && <p className="muted small">{curse}</p>}
+      <ItemActions game={game} send={act} btn="btn" disabled={busy} pz={pz} />
       <div className="row-btns">
         <button ref={primaryRef} className={`btn primary big ${me.alive ? '' : 'ghost-btn'}`} disabled={busy} onClick={() => act({ type: 'roll' })}>
           Roll the die 🎲
@@ -335,6 +363,17 @@ function DieBox({ game }: { game: GameState }) {
   const rollId = useStore((s) => s.rollId);
   const reduced = useStore((s) => s.settings.reducedMotion);
   const me = game.pieces[actingPiece(game)];
+  if (game.rollInfo?.kind === 'stride')
+    return (
+      <div className="dice-pair" role="group" aria-label="Your move">
+        <div className="die-btn ghost stride">
+          <span className="stride-icon" aria-hidden="true">
+            👣
+          </span>
+          <span className="die-label">{rollLine(game)}</span>
+        </div>
+      </div>
+    );
   return (
     <div className="dice-pair" role="group" aria-label="Your roll">
       <div className={`die-btn ${me.alive ? 'move' : 'ghost'}`}>
@@ -356,6 +395,7 @@ function Choose({ game, primaryRef }: PR) {
   return (
     <div className="phase choose">
       <DieBox game={game} />
+      <ItemActions game={game} send={act} btn="btn" disabled={busy} pz={pz} />
       <p className="prompt">
         Pick a glowing space on the board or below — or stay.
         {routes.length === 0 && ' No space is reachable, so you can only stay.'}
@@ -390,6 +430,8 @@ function Choose({ game, primaryRef }: PR) {
                 {r.usesWall ? ' · wall' : ''}
                 {pv.superReaper ? (pv.superReaper === 'seance' ? ' · Séance' : ' · Reaper') : pv.known === 'reaper' ? ' · Reaper' : pv.known === 'seance' ? ' · Séance' : pv.known === 'poltergeist' ? ' · Poltergeist' : ''}
                 {pv.canChallenge ? ' · in range' : ''}
+                {pv.battleTargets.length ? ' · ⚔ ghost here' : ''}
+                {pv.versus ? ' · ⚔ Versus' : ''}
                 {me.alive && pv.threats.length ? ` · near ${pv.threats.length} ghost${pv.threats.length > 1 ? 's' : ''}` : ''}
               </span>
             </button>
@@ -435,29 +477,6 @@ function PickPanel({ game, primaryRef }: PR) {
   );
 }
 
-function HuntPanel({ game, primaryRef }: PR) {
-  const busy = useStore((s) => s.busy);
-  const living = game.pieces[livingPiece(game)];
-  const curse = curseLine(living.streak);
-  return (
-    <div className="phase">
-      <p className="prompt">
-        <b>{living.name} is within reach.</b> Challenge them to Haunted Jump Rope: win and you take the life (and their space); lose and you
-        are thrown back two spaces.
-      </p>
-      {curse && <p className="muted small">{living.name}: {curse}</p>}
-      <div className="row-btns">
-        <button ref={primaryRef} className="btn primary big risky" disabled={busy} onClick={() => act({ type: 'hunt' })}>
-          Challenge for the life 👻
-        </button>
-        <button className="btn" disabled={busy} onClick={() => act({ type: 'declineHunt' })}>
-          Let it pass
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function Summary({ game, primaryRef, readOnly }: PR & { readOnly: boolean }) {
   const busy = useStore((s) => s.busy);
   const pz = useStore((s) => s.personalization);
@@ -468,6 +487,7 @@ function Summary({ game, primaryRef, readOnly }: PR & { readOnly: boolean }) {
   const living = game.pieces[livingPiece(game)];
   return (
     <div className="phase">
+      <RewardReveal game={game} />
       <ul className="summary">
         {lines.map((l, i) => (
           <li key={i}>{l}</li>
@@ -499,6 +519,10 @@ function FirstTurnTip({ game }: { game: GameState }) {
         <b>Only one piece is alive.</b> Everyone else is a ghost trying to steal that life. Whoever holds it when a round ends scores a
         point; ten rounds, most points wins. Ghosts challenge the living piece to <b>Haunted Jump Rope</b> from its space or the next one. Six
         hidden traps and the Super Reaper can start challenges from anywhere.
+      </p>
+      <p>
+        Ghosts may also <b>battle each other for an item</b> — by ending a move on another ghost’s space, or on a ⚔ Versus space to call out any
+        ghost. Items: Second Roll, Ghost Switch, Ghostly Stride.
       </p>
       <button className="btn" onClick={() => setState({ tipDismissed: true })}>
         Got it

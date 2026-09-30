@@ -71,7 +71,7 @@ export interface AppState {
   cameraMode: 'follow' | 'overview';
   tipDismissed: boolean;
   modal: Modal;
-  saveProblem: null | 'corrupt' | 'incompatible';
+  saveProblem: null | 'corrupt' | 'incompatible' | 'layout';
   hasSave: boolean;
   saveError: boolean;
   busy: boolean;
@@ -82,7 +82,14 @@ export interface AppState {
   /** Local secret placement: which piece is behind the curtain, and what they have tapped. */
   placement: { seat: number | null; draft: number | null; confirmed: boolean };
   /** Phone-room hosting (TV side). */
-  room: { code: string | null; joinUrl: string | null; problem: string | null; status: string; view: import('./net/protocol').RoomView | null; error: string | null } | null;
+  room: {
+    code: string | null;
+    joinUrl: string | null;
+    problem: string | null;
+    status: string;
+    view: import('./net/protocol').RoomView | null;
+    error: string | null;
+  } | null;
 }
 
 function safeGet(key: string): string | null {
@@ -387,7 +394,9 @@ export function pumpBots() {
     }, 600);
     return;
   }
-  const acting = actingPiece(g);
+  // A ghost battle's winner chooses its reward even when it is not its turn.
+  const decider = (x: GameState) => (x.phase === 'reward' && x.pendingReward ? x.pendingReward.piece : actingPiece(x));
+  const acting = decider(g);
   if (!isBotSeat(acting) || state.busy || state.modal) return;
   const fast = state.settings.fastBots;
   const delay = g.phase === 'choose' ? (fast ? 150 : 650) : fast ? 120 : 520;
@@ -398,7 +407,7 @@ export function pumpBots() {
       pumpBots();
       return;
     }
-    const me = actingPiece(cur);
+    const me = decider(cur);
     const a = botAction(seatView(cur, me), state.seats[me].bot!, memoryFor(me));
     if (a) act(a);
     if (fast) director.skip();

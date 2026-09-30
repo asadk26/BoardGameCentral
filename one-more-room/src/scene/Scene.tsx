@@ -10,7 +10,7 @@ import { director, type Popup } from '../director';
 import { getState, useStore, act, setState } from '../store';
 import { Base, CharacterModel } from './Characters';
 import { MansionProps } from './Props';
-import { Beacon, Corridors, Ground, Label, NodeHitAreas, Passages, PathDots, Ring, RoomLabels, Tiles, Walls } from './Board';
+import { Beacon, Corridors, Ground, Label, NodeHitAreas, Passages, PathDots, Ring, RoomLabels, Tiles, VersusLabels, Walls } from './Board';
 import { labelTexture, badgeTexture } from './labels';
 import { lineupPos, nodePos, playerHeading, playerSlot, type V3 } from './layout';
 import { camInfo, hudInsets } from './shared';
@@ -173,7 +173,19 @@ function ShowcaseLineup({ interactive }: { interactive: boolean }) {
   );
 }
 
-function ShowcaseFigure({ id, index, owner, editingThis, onPick }: { id: CharacterId; index: number; owner: number; editingThis: boolean; onPick?: () => void }) {
+function ShowcaseFigure({
+  id,
+  index,
+  owner,
+  editingThis,
+  onPick,
+}: {
+  id: CharacterId;
+  index: number;
+  owner: number;
+  editingThis: boolean;
+  onPick?: () => void;
+}) {
   const ref = useRef<THREE.Group>(null);
   const [hover, setHover] = useState(false);
   const reduced = useStore((s) => s.settings.reducedMotion);
@@ -547,6 +559,7 @@ function World() {
       <Passages strong={overview || mode !== 'game'} />
       <MansionProps round={game?.round ?? 1} />
       {mode !== 'results' && <RoomLabels roomNames={pz.roomNames} />}
+      {mode !== 'results' && <VersusLabels />}
       {mode !== 'game' && <Label pos={[0, 2.6, 10.6]} lines={[pz.mansionName]} scale={0.8} color="#f2b84b" />}
       <Reapers revealed={game && mode !== 'showcase' ? known : []} reduced={reduced} seancesUsed={game?.seancesUsed ?? 0} />
       <WallLinks strong={overview && mode === 'game'} />

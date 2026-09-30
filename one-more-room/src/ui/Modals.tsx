@@ -1,4 +1,5 @@
-import { CHALLENGE, GHOST_MIN_MOVE, GHOST_SPAWNS, ROUNDS, SEANCE_LIMIT, SUPER_REAPER } from '../engine/config';
+import { CHALLENGE, GHOST_MIN_MOVE, GHOST_SPAWNS, ITEM_WEIGHTS, ROUNDS, SEANCE_LIMIT, SUPER_REAPER, VERSUS_SPACES } from '../engine/config';
+import { ITEM_INFO } from '../text';
 import { undoInfo } from '../engine/engine';
 import { discardSave, doUndo, goToSetup, goToTitle, setState, updateSettings, useStore } from '../store';
 import { audio } from '../audio/audio';
@@ -87,6 +88,37 @@ export function RulesContent() {
         </li>
       </ul>
       <p>One minigame per action at most: a trap that starts a challenge ends the action.</p>
+      <h3>Ghost battles and items</h3>
+      <p>
+        Ghosts can also fight each other — not for the life, but for an item. After an ordinary move (not a stay, not a trap throw), a ghost may{' '}
+        <strong>battle another ghost</strong> that is on the very same space (passing through or standing next to it isn’t enough), or — from one of
+        the two <strong>⚔ Versus spaces</strong> ({VERSUS_SPACES.join(' and ')}) — battle <em>any</em> ghost, wherever it is. Nobody moves. The
+        other ghost doesn’t need to agree or have a turn left; its current controller just gets the usual ready and countdown. The same two
+        ghosts battle at most once per round. The living piece gets nothing from a Versus space, and with only two pieces a Versus space stays
+        quiet.
+      </p>
+      <p>
+        When a ghost lands where it could either challenge the living piece or battle a ghost, it picks one (or neither) — starting either ends
+        the action. A trap that starts a minigame always comes first. A ghost battle is the same Haunted Jump Rope with the normal window for
+        both (no curse). The life, the scores and the round order don’t change. The winner draws one random item —{' '}
+        {ITEM_WEIGHTS.map(([id, w]) => `${ITEM_INFO[id].name} ${Math.round(w * 100)}%`).join(', ')} — and the loser loses nothing.
+      </p>
+      <ul>
+        {ITEM_WEIGHTS.map(([id]) => (
+          <li key={id}>
+            <strong>
+              {ITEM_INFO[id].icon} {ITEM_INFO[id].name}
+            </strong>{' '}
+            ({ITEM_INFO[id].when.toLowerCase()}): {ITEM_INFO[id].what}
+          </li>
+        ))}
+      </ul>
+      <p>
+        Each piece holds at most one item, visible to everyone. Win a different one and you choose which to keep; win the one you already hold
+        and nothing changes. Items can’t be traded, stacked or dropped. You can use one item per action, never in the action that won it (a
+        ghost that wins while defending can use it on its own later turn). Gaining the life — by any challenge, Reaper or Séance — loses the
+        item for good.
+      </p>
       <h3>Winning</h3>
       <p>
         After round {ROUNDS}, the most points wins, whether you end alive or as a ghost. Tied top scores share the win. A game always hands out
@@ -293,7 +325,9 @@ export function Modals() {
           <p>
             {saveProblem === 'incompatible'
               ? 'The saved game on this device uses the old candy rules. One Life is a different game, so that save can’t be resumed — clear it to start fresh.'
-              : 'The saved game on this device looks damaged and can’t be resumed.'}
+              : saveProblem === 'layout'
+                ? 'The saved game on this device has a hidden trap on a space that is now a Versus space for ghost battles, so it can’t continue on the new board. Clear it to start a fresh game.'
+                : 'The saved game on this device looks damaged and can’t be resumed.'}
           </p>
           <p>You can clear it and start fresh. Nothing else stored in your browser is touched.</p>
           <div className="row-btns">

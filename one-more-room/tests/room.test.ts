@@ -112,7 +112,8 @@ function play(h: H, opts: { maxSteps?: number; until?: () => boolean; skill?: ke
         }
         continue;
       }
-      const mayAct = v.game.phase === 'placement' ? v.you.selector : v.you.inControl && actingPiece(v.game) === piece;
+      const decider = v.game.phase === 'reward' && v.game.pendingReward ? v.game.pendingReward.piece : actingPiece(v.game);
+      const mayAct = v.game.phase === 'placement' ? v.you.selector : v.you.inControl && decider === piece;
       if (!mayAct) continue;
       if (!mems.has(p.id)) mems.set(p.id, newBotMemory(p.id.length * 97 + step));
       const a = botAction({ state: v.game, piece, ownNomination: v.ownNomination }, { personality: 'greedy', skill: 'steady' }, mems.get(p.id)!);
@@ -250,6 +251,120 @@ describe('hidden information and forged input', () => {
     const die = h.room.session!.game.die;
     h.room.handle(me.id, { t: 'action', id: 'x4', rev: h.room.rev, action: { type: 'roll' } });
     expect(h.room.session!.game.die).toBe(die); // the duplicate did nothing
+  });
+});
+
+describe('ghost battle rewards and items over the room', () => {
+  /** A mixed-team game at a turn start, with piece 0 a pair. Returns the acting piece and a ghost that is not acting. */
+  function atTurn(layout: number[], seed: number) {
+    const h = lobby(layout, seed);
+    h.room.handle('host', { t: 'start' });
+    play(h, { until: () => h.room.session!.game.phase === 'turnStart' });
+    const g = h.room.session!.game;
+    return { h, g, acting: actingPiece(g) };
+  }
+
+  it('an out-of-turn winner’s current controller chooses keep or replace; nobody else can act meanwhile', () => {
+    // Find a table where the pair (piece 0) is a ghost and someone else is acting.
+    let t = atTurn([2, 1, 1], 3);
+    for (let seed = 4; t.acting === 0 || t.g.pieces[0].alive; seed++) t = atTurn([2, 1, 1], seed);
+    const { h, g, acting } = t;
+    const winner = 0;
+    const game = {
+      ...g,
+      phase: 'reward' as const,
+      minigameUsed: true,
+      pendingReward: { piece: winner, current: 'secondRoll' as const, offered: 'ghostSwitch' as const },
+      pieces: g.pieces.map((p, i) => (i === winner ? { ...p, item: 'secondRoll' as const, itemAwardedAt: 0 } : p)),
+    };
+    h.room.session = { ...h.room.session!, game };
+    h.room.broadcast();
+    const actor = h.people[acting][0];
+    {
+      h.room.handle(actor.id, { t: 'action', id: 'w1', rev: h.room.rev, action: { type: 'nextTurn' } });
+      expect(h.rejected(actor.id).pop()).toMatch(/battle winner/);
+    }
+    const ctrl = h.room.controllerOf(winner)!;
+    const team = h.people[winner];
+    const other = team.find((p) => p.id !== ctrl);
+    expect(other).toBeDefined();
+    if (other) {
+      h.room.handle(other.id, { t: 'action', id: 'w2', rev: h.room.rev, action: { type: 'chooseReward', keep: 'offered' } });
+      expect(h.rejected(other.id).pop()).toMatch(/teammate controls/);
+      expect(h.lastView(other.id)!.game!.pieces[winner].item).toBe('secondRoll');
+    }
+    // The TV sees the held item and the offer, never the reward stream.
+    expect(h.lastView('host')!.game!.pendingReward).toEqual(game.pendingReward);
+    expect(h.lastView('host')!.game!.rewardRng).toBe(0);
+    h.room.handle(ctrl, { t: 'action', id: 'w3', rev: h.room.rev, action: { type: 'chooseReward', keep: 'offered' } });
+    const after = h.room.session!.game;
+    expect(after.pieces[winner].item).toBe('ghostSwitch');
+    expect(after.phase).toBe('summary');
+    // A replay of the same message id changes nothing.
+    h.room.handle(ctrl, { t: 'action', id: 'w3', rev: h.room.rev, action: { type: 'chooseReward', keep: 'current' } });
+    expect(h.room.session!.game.pieces[winner].item).toBe('ghostSwitch');
+  });
+
+  it('a bot winner chooses its reward on its own, even out of turn', () => {
+    const { h, g, acting } = atTurn([1, 1, 0], 4);
+    const bot = 2;
+    if (g.pieces[bot].alive) return;
+    const game = {
+      ...g,
+      phase: 'reward' as const,
+      minigameUsed: true,
+      pendingReward: { piece: bot, current: 'secondRoll' as const, offered: 'ghostlyStride' as const },
+      pieces: g.pieces.map((p, i) => (i === bot ? { ...p, item: 'secondRoll' as const, itemAwardedAt: 0 } : p)),
+    };
+    expect(acting).toBeGreaterThanOrEqual(0);
+    h.room.session = { ...h.room.session!, game };
+    h.room.pump();
+    h.advance(1000);
+    expect(h.room.session!.game.phase).not.toBe('reward');
+    expect(h.room.session!.game.pieces[bot].item).not.toBeNull();
+  });
+
+  it('only the acting ghost’s current controller can use its item; a refused use keeps the item', () => {
+    const { h, g, acting } = atTurn([2, 2, 1], 6);
+    if (g.pieces[acting].alive || !h.people[acting].length) {
+      // Make the acting piece a ghost holding Ghostly Stride by moving life to someone else.
+      const holder = g.pieces.findIndex((_, i) => i !== acting);
+      h.room.session = {
+        ...h.room.session!,
+        game: {
+          ...g,
+          pieces: g.pieces.map((p, i) => ({
+            ...p,
+            alive: i === holder,
+            item: i === acting ? 'ghostlyStride' : null,
+            itemAwardedAt: i === acting ? -1 : null,
+          })),
+        },
+      };
+    } else {
+      h.room.session = {
+        ...h.room.session!,
+        game: {
+          ...g,
+          pieces: g.pieces.map((p, i) => ({
+            ...p,
+            item: i === acting ? 'ghostlyStride' : p.item,
+            itemAwardedAt: i === acting ? -1 : p.itemAwardedAt,
+          })),
+        },
+      };
+    }
+    h.room.broadcast();
+    const ctrl = h.room.controllerOf(acting)!;
+    for (const p of h.people.flat().filter((x) => x.id !== ctrl)) {
+      h.room.handle(p.id, { t: 'action', id: `u-${p.id}`, rev: h.room.rev, action: { type: 'useItem', item: 'ghostlyStride' } });
+      expect(h.room.session!.game.pieces[acting].item).toBe('ghostlyStride');
+    }
+    h.room.handle(ctrl, { t: 'action', id: 'u-ok', rev: h.room.rev, action: { type: 'useItem', item: 'ghostlyStride' } });
+    const after = h.room.session!.game;
+    expect(after.pieces[acting].item).toBeNull();
+    expect(after.rollInfo).toEqual({ kind: 'stride' });
+    expect(after.allowance).toBe(6);
   });
 });
 

@@ -167,7 +167,9 @@ async function playLocalChallenge(page, lanes = null, ms = 90000) {
 async function scenario(page, set) {
   const save = JSON.parse(await page.evaluate((k) => localStorage.getItem(k), SAVE_KEY));
   const g = save.session.game;
-  g.pieces.forEach((p, i) => Object.assign(p, { alive: i === set.living, node: set.nodes[i], streak: set.streaks?.[i] ?? 0, score: set.scores?.[i] ?? 0, facingFrom: null }));
+  g.pieces.forEach((p, i) =>
+    Object.assign(p, { alive: i === set.living, node: set.nodes[i], streak: set.streaks?.[i] ?? 0, score: set.scores?.[i] ?? 0, facingFrom: null, item: set.items?.[i] ?? null, itemAwardedAt: set.items?.[i] ? -1 : null }),
+  );
   const n = g.pieces.length;
   g.round = set.round ?? 2;
   g.schedule = set.schedule ?? [set.living, ...Array.from({ length: n }, (_, k) => k).filter((k) => k !== set.living)];
@@ -175,9 +177,11 @@ async function scenario(page, set) {
   g.traps = (set.traps ?? TRAPS).map((t) => ({ ...t }));
   g.seancesUsed = set.seancesUsed ?? 0;
   Object.assign(g, { challenge: null, pick: null, lastOutcome: null, minigameUsed: false, log: [], turnDirty: false, origin: set.nodes[set.acting ?? set.living], selection: { dest: null } });
+  Object.assign(g, { rollInfo: null, itemUsed: null, options: null, battlesThisRound: [], pendingReward: null });
+  if (set.rewardRng !== undefined) g.rewardRng = set.rewardRng;
   if (set.die) {
     const me = g.pieces[g.schedule[g.slot]];
-    Object.assign(g, { phase: 'choose', die: set.die, allowance: me.alive ? set.die : Math.max(3, set.die) });
+    Object.assign(g, { phase: 'choose', die: set.die, allowance: me.alive ? set.die : Math.max(3, set.die), rollInfo: { kind: 'die' } });
   } else Object.assign(g, { phase: set.phase ?? 'turnStart', die: null, allowance: 0 });
   save.session.game = g;
   save.session.turnStart = { ...g, phase: 'turnStart', die: null, allowance: 0 };
@@ -190,6 +194,16 @@ async function scenario(page, set) {
   await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
   await settle(page);
 }
+
+/** The engine's seeded generator (mulberry32), to predict a reward or a reroll from a crafted save. */
+function nextFloat(state) {
+  const s = (state + 0x6d2b79f5) >>> 0;
+  let t = s;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return [((t ^ (t >>> 14)) >>> 0) / 4294967296, s];
+}
+const itemFromDraw = (u) => (u < 0.4 ? 'secondRoll' : u < 0.8 ? 'ghostSwitch' : 'ghostlyStride');
 
 async function confirmMove(page, dest) {
   if (dest === 'stay') await page.getByRole('option', { name: /Stay here/ }).click();
@@ -534,10 +548,10 @@ try {
         await tv.waitForTimeout(400);
         continue;
       }
-      const piece = acting(g);
+      const piece = g.phase === 'reward' ? g.pendingReward.piece : acting(g);
       const p = controller(g, piece);
       if (p) {
-        if (piece === 0 && !checkedInactive.has(g.round)) {
+        if (piece === 0 && g.phase !== 'reward' && !checkedInactive.has(g.round)) {
           checkedInactive.add(g.round);
           await tv.waitForTimeout(600);
           const idle = other(g);
@@ -575,6 +589,205 @@ try {
     check('the phone controller has no horizontal overflow', await phones.Ana.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     const all = [tv, ...Object.values(phones)];
     check('no console errors (rooms)', all.every((q) => q.errors.filter((e) => !/WebSocket/.test(e)).length === 0), all.flatMap((q) => q.errors).slice(0, 3).join(' | '));
+    for (const q of all) await q.context().close();
+  }
+
+  // ── 6. Ghost battles and items on one screen ─────────────────────────
+  if (run(6)) {
+    const page = await newPage();
+    await clearStorage(page, '?quality=low');
+    await setupPieces(page, ['human', 'human', 'human'], ['Knight', 'Goblin', 'Witch']);
+    await page.getByRole('button', { name: /Start game/ }).click();
+    await placeAll(page);
+    await page.getByRole('button', { name: /Roll for life/ }).click();
+    await settle(page);
+    const saved = () => page.evaluate((k) => JSON.parse(localStorage.getItem(k)).session.game, SAVE_KEY);
+
+    // Same-space battle, won by the ghost that was called out.
+    await scenario(page, { living: 0, nodes: [16, 1, 3], acting: 1, die: 4 });
+    const pv = await page.locator('.dest-list').innerText();
+    check('the destination list marks a ghost-occupied space and a Versus space', /⚔ ghost here/.test(pv) && /⚔ Versus/.test(pv));
+    await confirmMove(page, 3);
+    const enc = await page.locator('.bottom').innerText();
+    check('landing on a ghost offers “Battle ghost • win an item” and ending the action', /Battle ghost • win an item/.test(enc) && /End the action/.test(enc) && !/steal life/.test(enc));
+    await page.screenshot({ path: `${OUT}/60-battle-offer.png` });
+    await page.locator('button.battle').first().click();
+    await page.waitForTimeout(500);
+    check('a ghost battle is titled as one, with neutral lanes (no curse, no life lane)', /Ghost Battle/.test(await page.locator('body').innerText()) && (await page.locator('.rope-lane.living').count()) === 0);
+    await page.screenshot({ path: `${OUT}/61-battle-rope.png` });
+    let st = await playLocalChallenge(page, [1]);
+    const o = st.game.lastOutcome;
+    check('the defender wins the battle and one item; nobody moves; the life stays put', o?.winner === 2 && !!o.reward && st.game.pieces[2].item === o.reward && st.game.pieces[1].item === null && living(st.game) === 0 && st.game.pieces[1].node === 3 && st.game.pieces[2].node === 3 && st.game.pieces.every((p) => p.score === 0));
+    check('the reward is revealed with a card', (await page.locator('.reward-reveal .item-card').count()) === 1);
+    check('the held item is shown on the piece card', (await page.locator('.pcard .item-badge').count()) === 1);
+    await page.screenshot({ path: `${OUT}/62-battle-reward.png` });
+
+    // Versus: call out a ghost anywhere; a different item asks keep or replace.
+    const g0 = await saved();
+    const offered = itemFromDraw(nextFloat(g0.rewardRng)[0]);
+    const current = offered === 'secondRoll' ? 'ghostlyStride' : 'secondRoll';
+    await scenario(page, { living: 0, nodes: [16, 2, 28], acting: 1, die: 3, items: [null, current, null], rewardRng: g0.rewardRng });
+    await confirmMove(page, 5);
+    check('a Versus space invites any ghost, wherever it is', /anywhere/.test(await page.locator('.bottom').innerText()));
+    await page.locator('button.battle').first().click();
+    st = await playLocalChallenge(page, [0]);
+    check('a winner holding a different item gets the keep-or-replace choice', st.game.phase === 'reward' && (await page.locator('.reward-cards .item-card').count()) === 2);
+    await page.screenshot({ path: `${OUT}/63-keep-or-replace.png` });
+    await page.getByRole('button', { name: /^Take / }).click();
+    await settle(page);
+    st = await S(page);
+    check('taking the new item replaces the old one; exactly one item is held', st.game.pieces[1].item === offered && st.game.phase === 'summary');
+
+    // Second Roll: after the die, before moving; the new result stands.
+    await scenario(page, { living: 0, nodes: [16, 1, 28], acting: 1, die: 2, items: [null, 'secondRoll', null] });
+    const g1 = await saved();
+    const newDie = 1 + Math.floor(nextFloat(g1.rng)[0] * 6);
+    await page.getByRole('button', { name: /Use Second Roll/ }).click();
+    await settle(page);
+    st = await S(page);
+    check('Second Roll replaces the die with one fresh roll and shows old and new', st.game.die === newDie && st.game.rollInfo?.rerolledFrom === 2 && st.game.allowance === Math.max(3, newDie) && st.game.pieces[1].item === null && new RegExp(`Second Roll: 2 → ${newDie}`).test(await page.locator('.bottom').innerText()));
+    check('no second item use in the same action', (await page.locator('.item-use').count()) === 0);
+    await page.screenshot({ path: `${OUT}/64-second-roll.png` });
+
+    // Ghost Switch: before rolling; swap with a ghost on a hidden trap — nothing triggers.
+    await scenario(page, { living: 0, nodes: [16, 1, 21], acting: 1, items: [null, 'ghostSwitch', null] });
+    check('Ghost Switch never offers the living piece', !(await page.locator('.item-use').allInnerTexts()).some((t) => t.includes(st.game.pieces[0].name)));
+    await page.locator('.item-use').first().click();
+    await settle(page);
+    st = await S(page);
+    check('Ghost Switch swaps two ghosts and triggers nothing; the ghost then rolls', st.game.pieces[1].node === 21 && st.game.pieces[2].node === 1 && st.game.phase === 'turnStart' && !st.game.traps.find((t) => t.node === 21).revealed && (await page.getByRole('button', { name: /Roll the die/ }).count()) === 1);
+    await page.screenshot({ path: `${OUT}/65-ghost-switch.png` });
+
+    // Ghostly Stride: instead of rolling; no die.
+    await scenario(page, { living: 0, nodes: [16, 1, 28], acting: 1, items: [null, 'ghostlyStride', null] });
+    const rngBefore = (await saved()).rng;
+    await page.getByRole('button', { name: /Use Ghostly Stride/ }).click();
+    await settle(page);
+    st = await S(page);
+    const bottom = await page.locator('.bottom').innerText();
+    check('Ghostly Stride moves up to 6 without rolling and shows no fake die', st.game.rollInfo?.kind === 'stride' && st.game.die === null && st.game.allowance === 6 && st.game.rng === rngBefore && /Ghostly Stride • 6 spaces/.test(bottom) && (await page.locator('.bottom .die').count()) === 0);
+    await page.screenshot({ path: `${OUT}/66-ghostly-stride.png` });
+    await confirmMove(page, 7);
+    st = await S(page);
+    check('a Stride move of six lands normally', st.game.pieces[1].node === 7);
+
+    // Rules describe it all.
+    await page.getByRole('button', { name: 'Rules' }).click();
+    const rules = await page.locator('.rules').innerText();
+    check('rules explain ghost battles, Versus spaces, weights and all three items', /Ghost battles and items/.test(rules) && /Versus/.test(rules) && /Second Roll 40%/.test(rules) && /Ghost Switch 40%/.test(rules) && /Ghostly Stride 20%/.test(rules));
+    await page.keyboard.press('Escape');
+    check('no console errors (battles and items)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
+    await page.context().close();
+  }
+
+  // ── 7. Ghost battles and items through phones (a pair, a solo phone, a bot) ──
+  if (run(7) && server) {
+    const tv = await newPage({ width: 1280, height: 800 });
+    await tv.goto(URL + '?quality=low');
+    await tv.getByRole('button', { name: 'Host a phone room' }).click();
+    await tv.locator('.room-code').waitFor({ timeout: 15000 });
+    const code = (await tv.locator('.room-code').innerText()).trim();
+    await tv.getByRole('radio', { name: 'Team Battle' }).click();
+    const phones = {};
+    for (const name of ['Ana', 'Ben', 'Cy']) {
+      const p = await newPage({ width: 390, height: 844 });
+      await p.goto(URL + '#/join?room=' + code);
+      await p.getByLabel('Your name').fill(name);
+      await p.getByRole('button', { name: 'Join' }).click();
+      await p.locator('.pchars').waitFor();
+      phones[name] = p;
+    }
+    await phones.Ana.getByRole('button', { name: /^Witch/ }).click();
+    await phones.Cy.getByRole('button', { name: /^Knight/ }).click();
+    await phones.Ben.getByRole('button', { name: /Join Ana’s Witch/ }).click();
+    await tv.locator('select[aria-label="Bot costume"]').selectOption('goblin');
+    await tv.getByRole('button', { name: 'Add bot' }).click();
+    await tv.waitForTimeout(500);
+    await tv.getByRole('button', { name: /Start: 3 pieces, 3 phones/ }).click();
+    await phones.Ana.getByRole('button', { name: 'Space 26', exact: true }).click();
+    await phones.Ana.getByRole('button', { name: /Set the trap/ }).click();
+    await phones.Cy.getByRole('button', { name: 'Space 18', exact: true }).click();
+    await phones.Cy.getByRole('button', { name: /Set the trap/ }).click();
+    await phones.Ben.waitForTimeout(800);
+    for (const p of Object.values(phones)) await p.getByRole('button', { name: 'Hide it' }).click().catch(() => {});
+    const controller = (g, piece) => (piece === 0 ? (g.round % 2 === 1 ? phones.Ana : phones.Ben) : piece === 1 ? phones.Cy : null);
+    const other = (g) => (g.round % 2 === 1 ? phones.Ben : phones.Ana);
+    const seen = { battle: false, phoneReward: false, phoneUse: false, choice: false, idleChecked: false };
+    const t0 = Date.now();
+    while (Date.now() - t0 < 900000) {
+      const g = (await S(tv)).game;
+      if (!g || g.phase === 'placement' || g.phase === 'lifeRoll') {
+        await tv.waitForTimeout(400);
+        continue;
+      }
+      if (g.phase === 'gameOver' || (seen.battle && seen.phoneReward && seen.phoneUse) || g.round > 9) break;
+      if (g.pieces.some((p, i) => i < 2 && p.item)) seen.phoneReward = true;
+      if (g.log.some((e) => e.kind === 'itemUsed' && e.piece < 2)) seen.phoneUse = true;
+      if (g.phase === 'challenge') {
+        if (g.challenge.host === 'ghostBattle' || g.challenge.host === 'versus') {
+          if (!seen.battle) await tv.screenshot({ path: `${OUT}/70-tv-ghost-battle.png` });
+          seen.battle = true;
+        }
+        for (const piece of g.challenge.participants) {
+          const p = controller(g, piece);
+          const ready = p?.getByRole('button', { name: /I’m ready/ });
+          if (ready && (await ready.count())) {
+            await ready.click().catch(() => {});
+            await autoplay(p);
+          }
+        }
+        await tv.waitForTimeout(400);
+        continue;
+      }
+      const piece = g.phase === 'reward' ? g.pendingReward.piece : acting(g);
+      const p = controller(g, piece);
+      if (p) {
+        await p.waitForTimeout(300);
+        if (g.phase === 'reward') {
+          seen.choice = true;
+          await p.screenshot({ path: `${OUT}/71-phone-keep-or-replace.png` });
+          await p.getByRole('button', { name: /^Take / }).click().catch(() => {});
+        } else if (g.phase === 'turnStart' || (g.phase === 'choose' && !(await p.locator('.pdest.on').count()))) {
+          const use = p.locator('.item-use:enabled');
+          if (await use.count()) {
+            if (piece === 0 && !seen.idleChecked) {
+              seen.idleChecked = true;
+              const idle = other(g);
+              check('the inactive teammate sees the team’s item but has no item controls', (await idle.locator('.item-badge').count()) > 0 && (await idle.locator('.item-use').count()) === 0);
+            }
+            await p.screenshot({ path: `${OUT}/72-phone-item.png` });
+            await use.first().click().catch(() => {});
+            await tv.waitForTimeout(500);
+            continue;
+          }
+        }
+        if (g.phase === 'choose' && !(await p.locator('.pdest.on').count())) {
+          const opts = p.locator('.pdest');
+          const battle = p.locator('.pdest', { hasText: '⚔' });
+          const hunt = p.locator('.pdest', { hasText: '👻' });
+          const pick = (await battle.count()) ? battle.first() : (await hunt.count()) ? hunt.first() : opts.nth(Math.min(2, (await opts.count()) - 1));
+          await pick.click().catch(() => {});
+        } else if (g.phase === 'hunt') {
+          const battle = p.locator('button.battle');
+          await ((await battle.count()) ? battle.first() : p.locator('.pbtn').first()).click().catch(() => {});
+          await tv.waitForTimeout(350);
+          continue;
+        }
+        const btn = p.locator('.pbtn.primary').first();
+        if ((await btn.count()) && (await btn.isEnabled().catch(() => false))) await btn.click().catch(() => {});
+      }
+      await tv.waitForTimeout(350);
+    }
+    const fin = (await S(tv)).game;
+    check('phones started a ghost battle through the room service', seen.battle);
+    check('a phone piece won an item, visible to the table', seen.phoneReward);
+    check('a phone controller used an item', seen.phoneUse);
+    check('the TV never receives the reward stream', fin.rewardRng === 0);
+    check('room scores still equal completed rounds', fin.pieces.reduce((a, q) => a + q.score, 0) === (fin.phase === 'gameOver' ? 10 : fin.round - 1));
+    await tv.screenshot({ path: `${OUT}/73-tv-items.png` });
+    await phones.Cy.screenshot({ path: `${OUT}/74-phone-items.png` });
+    const all = [tv, ...Object.values(phones)];
+    check('no console errors (phone battles)', all.every((q) => q.errors.filter((e) => !/WebSocket/.test(e)).length === 0), all.flatMap((q) => q.errors).slice(0, 3).join(' | '));
     for (const q of all) await q.context().close();
   }
 
@@ -621,6 +834,13 @@ try {
     await page.waitForTimeout(600);
     await page.getByRole('button', { name: 'Details' }).click();
     check('a candy-rules save is refused with a clear fresh-start explanation', /old candy rules/.test(await page.locator('.dialog').innerText()));
+    await page.getByRole('button', { name: 'Clear saved game' }).click();
+    // A One Life save from before ghost battles, with a trap on a new Versus space.
+    await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ schema: 3, session: { game: { schema: 3, traps: [{ node: 5 }] }, turnStart: { schema: 3, traps: [{ node: 5 }] }, previousTurnStart: null, known: [] } })), SAVE_KEY);
+    await page.reload();
+    await page.waitForTimeout(600);
+    await page.getByRole('button', { name: 'Details' }).click();
+    check('a pre-battle save with a trap on a Versus space is refused with a clear fresh start', /Versus space/.test(await page.locator('.dialog').innerText()) && (await page.evaluate((k) => localStorage.getItem(k), SAVE_KEY)) !== null);
     await page.getByRole('button', { name: 'Clear saved game' }).click();
     await page.context().close();
     const pg = await newPage({ width: 390, height: 844 });
