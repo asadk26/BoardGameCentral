@@ -25,13 +25,30 @@ import {
   TRAP_ELIGIBLE,
   TRAP_WINGS,
   trapEligible,
+  VERSUS_SPACES,
+  STRIDE_ALLOWANCE,
+  itemFromDraw,
   type CharacterId,
+  type ItemId,
   type TrapEffect,
 } from './config';
 import { inAttackRange, ordinaryDistance, pieceRoutes, type PlayerRoute } from './graph';
 import { nextFloat, rollDie, seedFrom, shuffle } from './rng';
 import { judgeRope, type ChallengeInput } from './challenges';
-import type { Action, ActionResult, Challenge, ChallengeHost, ChallengeOutcome, GameState, KnownEffect, LogEntry, MovePreview, PieceState, Trap } from './types';
+import type {
+  Action,
+  ActionResult,
+  Challenge,
+  ChallengeHost,
+  ChallengeOutcome,
+  EncounterOptions,
+  GameState,
+  KnownEffect,
+  LogEntry,
+  MovePreview,
+  PieceState,
+  Trap,
+} from './types';
 
 export interface PieceSetup {
   character: CharacterId;
@@ -59,10 +76,11 @@ export function createGame({ pieces, seed, presetTraps }: NewGameOptions): GameS
   }
   const rng0 = seed >>> 0;
   const state: GameState = {
-    schema: 3,
+    schema: 4,
     seed: rng0,
     rng: seedFrom(`board:${rng0}`),
     challengeRng: seedFrom(`challenge:${rng0}`),
+    rewardRng: seedFrom(`reward:${rng0}`),
     challengeCount: 0,
     pieces: pieces.map<PieceState>((p, i) => ({
       id: `p${i + 1}`,
@@ -75,6 +93,8 @@ export function createGame({ pieces, seed, presetTraps }: NewGameOptions): GameS
       score: 0,
       streak: 0,
       facingFrom: null,
+      item: null,
+      itemAwardedAt: null,
     })),
     phase: 'placement',
     round: 1,
@@ -83,10 +103,15 @@ export function createGame({ pieces, seed, presetTraps }: NewGameOptions): GameS
     actionNumber: 0,
     die: null,
     allowance: 0,
+    rollInfo: null,
+    itemUsed: null,
     selection: { dest: null },
     origin: null,
     minigameUsed: false,
     pick: null,
+    options: null,
+    battlesThisRound: [],
+    pendingReward: null,
     challenge: null,
     lastOutcome: null,
     nominations: pieces.map(() => null),
@@ -113,6 +138,16 @@ export function clone(state: GameState): GameState {
     schedule: state.schedule.slice(),
     selection: { ...state.selection },
     pick: state.pick ? { ...state.pick, options: state.pick.options.slice() } : null,
+    options: state.options
+      ? {
+          ...state.options,
+          sameSpace: state.options.sameSpace.slice(),
+          versus: state.options.versus.slice(),
+        }
+      : null,
+    battlesThisRound: state.battlesThisRound.slice(),
+    pendingReward: state.pendingReward ? { ...state.pendingReward } : null,
+    rollInfo: state.rollInfo ? { ...state.rollInfo } : null,
     nominations: state.nominations.slice(),
     traps: state.traps.map((t) => ({ ...t })),
     log: state.log.slice(),
@@ -155,7 +190,7 @@ export function movementAllowance(die: number, alive: boolean): number {
 /** Legal destinations for the acting piece. Never depends on hidden traps. */
 export function legalRoutes(state: GameState): Map<number, PlayerRoute> {
   const i = actingPiece(state);
-  if (i < 0 || state.die === null) return new Map();
+  if (i < 0 || state.rollInfo === null) return new Map();
   const p = state.pieces[i];
   return pieceRoutes(p.node, state.allowance, !p.alive);
 }
@@ -231,6 +266,7 @@ function rollForLife(s: GameState, events: LogEntry[]) {
 function startRound(s: GameState, events: LogEntry[]) {
   s.schedule = buildSchedule(s);
   s.slot = 0;
+  s.battlesThisRound = [];
   events.push({ kind: 'roundStart', round: s.round, schedule: s.schedule.slice() });
   startAction(s);
 }
@@ -240,10 +276,14 @@ function startAction(s: GameState) {
   s.phase = 'turnStart';
   s.die = null;
   s.allowance = 0;
+  s.rollInfo = null;
+  s.itemUsed = null;
   s.selection = { dest: null };
   s.origin = s.pieces[actingPiece(s)].node;
   s.minigameUsed = false;
   s.pick = null;
+  s.options = null;
+  s.pendingReward = null;
   s.lastOutcome = null;
 }
 
@@ -255,6 +295,9 @@ function transferLife(s: GameState, from: number, to: number, events: LogEntry[]
   s.pieces[from].alive = false;
   s.pieces[from].streak = 0;
   s.pieces[to].alive = true;
+  // Life leaves no room for ghost tricks: any held item is gone for good.
+  s.pieces[to].item = null;
+  s.pieces[to].itemAwardedAt = null;
   events.push({ kind: 'lifeTransfer', from, to });
 }
 
@@ -349,6 +392,7 @@ function poltergeistNode(s: GameState, piece: number): number {
 function resolveChallenge(s: GameState, ch: Challenge, inputs: Record<number, ChallengeInput[]>, events: LogEntry[]) {
   const v = judgeChallenge(ch, inputs);
   const before = livingPiece(s);
+  if (isGhostBattle(ch)) return resolveGhostBattle(s, ch, v, before, events);
   const moves: ChallengeOutcome['moves'] = [];
   const transferred = v.winner !== before;
   if (transferred) transferLife(s, before, v.winner, events);
@@ -418,9 +462,126 @@ function reaperChallenge(s: GameState, pi: number, node: number, host: Challenge
   }
 }
 
-/** After a move (or a stay) with no minigame: a ghost in range may choose to challenge. */
-function endOfMovement(s: GameState, pi: number) {
-  s.phase = !s.minigameUsed && canHunt(s, pi) ? 'hunt' : 'summary';
+// ── ghost battles ───────────────────────────────────────────────────────
+
+export function pairKey(a: number, b: number): string {
+  return a < b ? `${a}-${b}` : `${b}-${a}`;
+}
+
+export function isGhostBattle(ch: { host: ChallengeHost }): boolean {
+  return ch.host === 'ghostBattle' || ch.host === 'versus';
+}
+
+/**
+ * What a ghost may start where it now stands. Ghost battles need a voluntary
+ * normal landing (never a stay, a throw or a swap): another ghost on this very
+ * space, or any ghost from a Versus space. Each pair battles once per round.
+ */
+export function encounterOptions(s: GameState, pi: number, voluntary: boolean): EncounterOptions {
+  const me = s.pieces[pi];
+  const opts: EncounterOptions = { living: false, sameSpace: [], versus: [], versusInactive: null };
+  if (me.alive || s.minigameUsed) return opts;
+  opts.living = canHunt(s, pi);
+  if (!voluntary || !POLICY.ghostBattles) return opts;
+  const ghosts = s.pieces.map((_, i) => i).filter((i) => i !== pi && !s.pieces[i].alive);
+  const fresh = ghosts.filter((i) => !s.battlesThisRound.includes(pairKey(pi, i)));
+  opts.sameSpace = fresh.filter((i) => s.pieces[i].node === me.node);
+  if (VERSUS_SPACES.includes(me.node)) {
+    opts.versus = fresh;
+    if (!fresh.length) opts.versusInactive = ghosts.length ? 'cooldown' : 'noGhosts';
+  }
+  return opts;
+}
+
+function hasOption(o: EncounterOptions): boolean {
+  return o.living || o.sameSpace.length > 0 || o.versus.length > 0;
+}
+
+/** After a move (or a stay) with no minigame: offer what the ghost may start, or end the action. */
+function endOfMovement(s: GameState, pi: number, voluntary = false, events?: LogEntry[]) {
+  const o = encounterOptions(s, pi, voluntary);
+  if (o.versusInactive && events) events.push({ kind: 'versusInactive', piece: pi, node: s.pieces[pi].node, reason: o.versusInactive });
+  if (hasOption(o)) {
+    s.options = o;
+    s.phase = 'hunt';
+  } else {
+    s.options = null;
+    s.phase = 'summary';
+  }
+}
+
+/** Draw a reward only once a winner is known, from its own stream. */
+function drawReward(s: GameState): ItemId {
+  let v: number;
+  [v, s.rewardRng] = nextFloat(s.rewardRng);
+  return itemFromDraw(v);
+}
+
+function resolveGhostBattle(s: GameState, ch: Challenge, v: ReturnType<typeof judgeChallenge>, living: number, events: LogEntry[]) {
+  const offered = drawReward(s);
+  const winner = s.pieces[v.winner];
+  const outcome: ChallengeOutcome = {
+    challengeId: ch.id,
+    kind: ch.kind,
+    host: ch.host,
+    participants: ch.participants.slice(),
+    winner: v.winner,
+    previousLiving: living,
+    transferred: false,
+    scores: v.scores,
+    multipliers: ch.multipliers.slice(),
+    decidedBy: v.decidedBy,
+    finalists: v.finalists,
+    extraSweepsUsed: v.extraSweepsUsed,
+    moves: [],
+    reward: offered,
+  };
+  events.push({ kind: 'outcome', outcome });
+  s.lastOutcome = outcome;
+  s.challenge = null;
+  if (winner.item && winner.item !== offered) {
+    s.pendingReward = { piece: v.winner, current: winner.item, offered };
+    events.push({ kind: 'rewardPending', piece: v.winner, current: winner.item, offered });
+    s.phase = 'reward';
+    return;
+  }
+  const duplicate = winner.item === offered;
+  if (!winner.item) {
+    winner.item = offered;
+    winner.itemAwardedAt = s.actionNumber;
+  }
+  events.push({ kind: 'itemAwarded', piece: v.winner, item: offered, replaced: null, kept: winner.item, duplicate });
+  s.phase = 'summary';
+}
+
+/** Ghosts the acting ghost may swap places with: any other ghost on a different space. */
+export function switchTargets(s: GameState): number[] {
+  const pi = actingPiece(s);
+  if (pi < 0) return [];
+  const me = s.pieces[pi];
+  return s.pieces.map((_, i) => i).filter((i) => i !== pi && !s.pieces[i].alive && s.pieces[i].node !== me.node);
+}
+
+/** Can the acting piece use this item right now? Returns why not, or null. */
+export function itemBlock(s: GameState, item: ItemId, target?: number): string | null {
+  const pi = actingPiece(s);
+  if (pi < 0) return 'Nobody is acting';
+  const me = s.pieces[pi];
+  if (me.alive) return 'The living piece carries no items';
+  if (me.item !== item) return 'You don’t hold that item';
+  if (me.itemAwardedAt === s.actionNumber) return 'An item can’t be used in the action that won it';
+  if (s.itemUsed) return 'Only one item per action';
+  if (item === 'secondRoll') {
+    if (s.phase !== 'choose' || s.rollInfo?.kind !== 'die') return 'Second Roll is used after rolling, before moving';
+    return null;
+  }
+  if (s.phase !== 'turnStart') return 'Use this before rolling';
+  if (item === 'ghostSwitch') {
+    const targets = switchTargets(s);
+    if (!targets.length) return 'No other ghost stands on a different space';
+    if (target === undefined || !targets.includes(target)) return 'Pick another ghost on a different space';
+  }
+  return null;
 }
 
 /** A normal movement landing: resolve the Super Reaper or a trap, before any contact. */
@@ -433,7 +594,7 @@ function resolveLanding(s: GameState, pi: number, events: LogEntry[]) {
     return reaperChallenge(s, pi, node, 'superReaper', events);
   }
   const trap = s.traps.find((t) => t.node === node);
-  if (!trap || trap.spent) return endOfMovement(s, pi);
+  if (!trap || trap.spent) return endOfMovement(s, pi, true, events);
   if (!trap.revealed) {
     trap.revealed = true;
     events.push({ kind: 'trapRevealed', node, effect: trap.effect, piece: pi });
@@ -471,7 +632,7 @@ export function knownEffectAt(state: GameState, node: number): KnownEffect {
  */
 export function previewMove(state: GameState, dest: number | 'stay'): MovePreview | null {
   const pi = actingPiece(state);
-  if (pi < 0 || state.die === null) return null;
+  if (pi < 0 || state.rollInfo === null) return null;
   const me = state.pieces[pi];
   let route: PlayerRoute | null = null;
   if (dest !== 'stay') {
@@ -485,6 +646,11 @@ export function previewMove(state: GameState, dest: number | 'stay'): MovePrevie
   const minigame = known === 'reaper' || known === 'seance';
   const canChallenge = !me.alive && !minigame && known !== 'poltergeist' && inAttackRange(end, state.pieces[living].node);
   const threats = me.alive ? state.pieces.map((_, i) => i).filter((i) => i !== pi && inAttackRange(state.pieces[i].node, end)) : [];
+  // Ghost battles need a voluntary landing on an ordinary space (never a stay).
+  const battleOk = !me.alive && dest !== 'stay' && !known && POLICY.ghostBattles;
+  const fresh = state.pieces.map((_, i) => i).filter((i) => i !== pi && !state.pieces[i].alive && !state.battlesThisRound.includes(pairKey(pi, i)));
+  const battleTargets = battleOk ? fresh.filter((i) => state.pieces[i].node === end) : [];
+  const versus = battleOk && VERSUS_SPACES.includes(end) && fresh.length > 0;
   return {
     dest,
     path: route ? route.path : [me.node],
@@ -494,6 +660,8 @@ export function previewMove(state: GameState, dest: number | 'stay'): MovePrevie
     superReaper,
     canChallenge,
     threats,
+    battleTargets,
+    versus,
   };
 }
 
@@ -534,8 +702,51 @@ export function apply(state: GameState, action: Action): ActionResult {
       [die, s.rng] = rollDie(s.rng);
       s.die = die;
       s.allowance = movementAllowance(die, me.alive);
+      s.rollInfo = { kind: 'die' };
       events.push({ kind: 'roll', piece: pi, die, allowance: s.allowance });
       s.phase = 'choose';
+      break;
+    }
+
+    case 'useItem': {
+      const block = itemBlock(s, action.item, action.target);
+      if (block) return fail(state, block);
+      const me = s.pieces[pi];
+      me.item = null;
+      me.itemAwardedAt = null;
+      s.itemUsed = action.item;
+      if (action.item === 'ghostSwitch') {
+        // Swap places only: nothing lands, nothing triggers, nobody acts.
+        const other = s.pieces[action.target!];
+        const from = me.node;
+        const to = other.node;
+        me.node = to;
+        other.node = from;
+        me.facingFrom = null;
+        other.facingFrom = null;
+        s.origin = to;
+        events.push({ kind: 'itemUsed', piece: pi, item: 'ghostSwitch', detail: { target: action.target, from, to } });
+        break;
+      }
+      if (action.item === 'ghostlyStride') {
+        // No die is rolled, so no movement randomness is drawn.
+        s.die = null;
+        s.allowance = STRIDE_ALLOWANCE;
+        s.rollInfo = { kind: 'stride' };
+        s.phase = 'choose';
+        events.push({ kind: 'itemUsed', piece: pi, item: 'ghostlyStride' });
+        break;
+      }
+      // Second Roll: a fresh die replaces the old one for good, even if worse.
+      const oldDie = s.die!;
+      let newDie: number;
+      [newDie, s.rng] = rollDie(s.rng);
+      s.die = newDie;
+      s.allowance = movementAllowance(newDie, false);
+      s.rollInfo = { kind: 'die', rerolledFrom: oldDie };
+      s.selection = { dest: null };
+      events.push({ kind: 'itemUsed', piece: pi, item: 'secondRoll', detail: { oldDie, newDie } });
+      events.push({ kind: 'roll', piece: pi, die: newDie, allowance: s.allowance });
       break;
     }
 
@@ -575,15 +786,43 @@ export function apply(state: GameState, action: Action): ActionResult {
     }
 
     case 'hunt': {
-      if (s.phase !== 'hunt' || !canHunt(s, pi) || s.minigameUsed) return fail(state, 'No one in range to challenge');
+      if (s.phase !== 'hunt' || !s.options?.living || !canHunt(s, pi) || s.minigameUsed) return fail(state, 'No one in range to challenge');
       const living = livingPiece(s);
+      s.options = null;
       newChallenge(s, 'duel', [pi, living], 'contact', s.pieces[living].node, true, events);
+      break;
+    }
+
+    case 'battle': {
+      const o = s.options;
+      if (s.phase !== 'hunt' || !o || s.minigameUsed) return fail(state, 'No ghost battle on offer');
+      const same = o.sameSpace.includes(action.opponent);
+      if (!same && !o.versus.includes(action.opponent)) return fail(state, 'That ghost can’t be battled from here');
+      s.options = null;
+      s.battlesThisRound.push(pairKey(pi, action.opponent));
+      newChallenge(s, 'duel', [pi, action.opponent], same ? 'ghostBattle' : 'versus', s.pieces[pi].node, false, events);
       break;
     }
 
     case 'declineHunt': {
       if (s.phase !== 'hunt') return fail(state, 'Nothing to decline');
       events.push({ kind: 'huntDeclined', piece: pi });
+      s.options = null;
+      s.phase = 'summary';
+      break;
+    }
+
+    case 'chooseReward': {
+      const pr = s.pendingReward;
+      if (s.phase !== 'reward' || !pr) return fail(state, 'No reward to choose');
+      if (action.keep !== 'current' && action.keep !== 'offered') return fail(state, 'Keep the old item or take the new one');
+      const w = s.pieces[pr.piece];
+      if (action.keep === 'offered') {
+        w.item = pr.offered;
+        w.itemAwardedAt = s.actionNumber;
+      }
+      events.push({ kind: 'itemAwarded', piece: pr.piece, item: pr.offered, replaced: action.keep === 'offered' ? pr.current : null, kept: w.item! });
+      s.pendingReward = null;
       s.phase = 'summary';
       break;
     }

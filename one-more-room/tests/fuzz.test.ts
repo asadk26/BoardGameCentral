@@ -4,7 +4,7 @@
 
 import { expect, it } from 'vitest';
 import { CHARACTERS, NODE_COUNT, ROUNDS, TRAP_ELIGIBLE } from '../src/engine/config';
-import { actingPiece, completedRounds, createGame, dispatch, legalRoutes, newSession, undo, undoInfo } from '../src/engine/engine';
+import { actingPiece, completedRounds, createGame, dispatch, itemBlock, legalRoutes, newSession, switchTargets, undo, undoInfo } from '../src/engine/engine';
 import { botRopeInputs, SKILLS } from '../src/engine/challenges';
 import type { Action, GameState } from '../src/engine/types';
 
@@ -25,9 +25,15 @@ function check(g: GameState, prev: GameState | null) {
   }
   expect(g.seancesUsed).toBeLessThanOrEqual(2);
   if (g.phase === 'challenge') expect(g.challenge).not.toBeNull();
+  if (g.phase === 'reward') expect(g.pendingReward).not.toBeNull();
+  g.pieces.forEach((p) => {
+    if (p.alive) expect(p.item).toBeNull();
+  });
 }
 
 it('random full games keep every invariant', () => {
+  let battles = 0;
+  let uses = 0;
   for (let seed = 1; seed < 300; seed++) {
     const n = 2 + (seed % 3);
     let s = newSession(createGame({ pieces: Array.from({ length: n }, (_, i) => ({ character: CHARACTERS[i].id, controllers: [`p${i}`] })), seed }));
@@ -52,14 +58,50 @@ it('random full games keep every invariant', () => {
           round = s.game.round;
           continue;
         }
-        a = { type: 'roll' };
+        const me = g.pieces[actingPiece(g)];
+        if (me.item && me.item !== 'secondRoll' && rnd() < 0.5) {
+          const targets = switchTargets(g);
+          const target = targets.length ? targets[Math.floor(rnd() * targets.length)] : undefined;
+          const use: Action = { type: 'useItem', item: me.item, target };
+          if (!itemBlock(g, me.item, target) && me.item === 'ghostSwitch') {
+            const r = dispatch(s, use);
+            expect(r.error).toBeUndefined();
+            expect(r.session.game.pieces[actingPiece(g)].item).toBeNull();
+            s = r.session;
+            check(s.game, prev);
+            prev = s.game;
+            uses++;
+            continue;
+          }
+        }
+        a = me.item === 'ghostlyStride' && rnd() < 0.5 ? { type: 'useItem', item: 'ghostlyStride' } : { type: 'roll' };
+        if (a.type === 'useItem') {
+          if (itemBlock(g, 'ghostlyStride')) a = { type: 'roll' };
+          else uses++;
+        }
       } else if (g.phase === 'choose') {
+        const me = g.pieces[actingPiece(g)];
+        if (me.item === 'secondRoll' && !itemBlock(g, 'secondRoll') && rnd() < 0.5) {
+          const r = dispatch(s, { type: 'useItem', item: 'secondRoll' });
+          expect(r.error).toBeUndefined();
+          expect(r.session.game.rollInfo?.rerolledFrom).toBe(g.die);
+          s = r.session;
+          uses++;
+          continue;
+        }
         const dests = [...legalRoutes(g).keys()];
         const dest = dests.length && rnd() < 0.85 ? dests[Math.floor(rnd() * dests.length)] : 'stay';
         s = dispatch(s, { type: 'select', dest }).session;
         a = { type: 'confirmMove' };
       } else if (g.phase === 'pick') a = { type: 'pickOpponent', option: g.pick!.options[Math.floor(rnd() * g.pick!.options.length)] };
-      else if (g.phase === 'hunt') a = rnd() < 0.85 ? { type: 'hunt' } : { type: 'declineHunt' };
+      else if (g.phase === 'hunt') {
+        const o = g.options!;
+        const choices: Action[] = [{ type: 'declineHunt' }];
+        if (o.living) choices.push({ type: 'hunt' }, { type: 'hunt' });
+        for (const opponent of [...o.sameSpace, ...o.versus]) choices.push({ type: 'battle', opponent });
+        a = choices[Math.floor(rnd() * choices.length)];
+        if (a.type === 'battle') battles++;
+      } else if (g.phase === 'reward') a = { type: 'chooseReward', keep: rnd() < 0.5 ? 'current' : 'offered' };
       else if (g.phase === 'challenge') {
         const ch = g.challenge!;
         const inputs: Record<number, ReturnType<typeof botRopeInputs>> = {};
@@ -67,7 +109,7 @@ it('random full games keep every invariant', () => {
         a = { type: 'challengeResult', id: ch.id, inputs };
         minigames++;
       } else a = { type: 'nextTurn' };
-      if (a.type === 'roll') {
+      if (a.type === 'roll' || (a.type === 'useItem' && a.item === 'ghostlyStride')) {
         if (g.round !== round) {
           actedThisRound = new Map();
           round = g.round;
@@ -87,4 +129,6 @@ it('random full games keep every invariant', () => {
     expect(s.game.phase).toBe('gameOver');
     expect(s.game.pieces.reduce((a, p) => a + p.score, 0)).toBe(ROUNDS);
   }
+  expect(battles).toBeGreaterThan(50);
+  expect(uses).toBeGreaterThan(20);
 }, 120000);

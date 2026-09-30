@@ -61,6 +61,19 @@ export interface SimStats {
   wallHunts: number;
   hunts: number;
   maxMinigamesInAction: number;
+  /** Ghost battles started (same space or from a Versus space). */
+  battles: number;
+  versusBattles: number;
+  /** Ghost battles won by the ghost who was challenged. */
+  defenderWins: number;
+  /** Items drawn as rewards, by kind. */
+  rewards: Record<string, number>;
+  /** Items used, by kind. */
+  itemUses: Record<string, number>;
+  /** Rewards that asked the winner to keep or replace. */
+  rewardChoices: number;
+  /** Battles each piece won. */
+  battleWinsBy: number[];
 }
 
 export interface SimResult {
@@ -90,8 +103,16 @@ export function simulateGame(opts: { seed: number; profiles: BotProfile[]; strat
     wallHunts: 0,
     hunts: 0,
     maxMinigamesInAction: 0,
+    battles: 0,
+    versusBattles: 0,
+    defenderWins: 0,
+    rewards: {},
+    itemUses: {},
+    rewardChoices: 0,
+    battleWinsBy: Array(n).fill(0),
   };
   const log: LogEntry[] = [];
+  const instigators = new Map<string, number>();
   let est = 0;
   let lastMoveUsedWall = false;
   let minigamesThisAction = 0;
@@ -109,7 +130,7 @@ export function simulateGame(opts: { seed: number; profiles: BotProfile[]; strat
       action = { type: 'rollForLife' };
       est += 10;
     } else {
-      const seats = g.phase === 'placement' ? [...Array(n).keys()] : [actingPiece(g)];
+      const seats = g.phase === 'placement' ? [...Array(n).keys()] : g.phase === 'reward' ? [g.pendingReward!.piece] : [actingPiece(g)];
       for (const seat of seats) {
         const view = seatView(g, seat);
         action = opts.strategies?.[seat]?.(view) ?? botAction(view, opts.profiles[seat], mems[seat]);
@@ -148,7 +169,19 @@ export function simulateGame(opts: { seed: number; profiles: BotProfile[]; strat
         stats.challenges[key] = (stats.challenges[key] ?? 0) + 1;
         stats.challengesByRound[stats.challengesByRound.length - 1]++;
         minigamesThisAction++;
+        if (e.challenge.host === 'ghostBattle' || e.challenge.host === 'versus') {
+          instigators.set(e.challenge.id, e.challenge.instigator);
+          stats.battles++;
+          if (e.challenge.host === 'versus') stats.versusBattles++;
+        }
       }
+      if (e.kind === 'outcome' && e.outcome.reward) {
+        stats.rewards[e.outcome.reward] = (stats.rewards[e.outcome.reward] ?? 0) + 1;
+        stats.battleWinsBy[e.outcome.winner]++;
+        if (e.outcome.winner !== instigators.get(e.outcome.challengeId)) stats.defenderWins++;
+      }
+      if (e.kind === 'rewardPending') stats.rewardChoices++;
+      if (e.kind === 'itemUsed') stats.itemUses[e.item] = (stats.itemUses[e.item] ?? 0) + 1;
       if (e.kind === 'lifeTransfer') stats.transfersByRound[stats.transfersByRound.length - 1]++;
       if (e.kind === 'roundEnd') {
         stats.roundScorers.push(e.piece);

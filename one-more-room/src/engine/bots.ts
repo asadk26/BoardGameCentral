@@ -3,9 +3,9 @@
 // state or its RNG. Personality (what they value) is separate from reflex
 // skill (how well they jump in Haunted Jump Rope).
 
-import { curseMultiplier, SUPER_REAPER, TRAP_COUNT, TRAP_ELIGIBLE } from './config';
+import { curseMultiplier, GHOST_MIN_MOVE, ITEM_POWER, STRIDE_ALLOWANCE, SUPER_REAPER, TRAP_COUNT, TRAP_ELIGIBLE, type ItemId } from './config';
 import { inAttackRange, ordinaryDistance, pieceRoutes } from './graph';
-import { actingPiece, knownEffectAt, legalRoutes, livingPiece, movementAllowance, previewMove } from './engine';
+import { actingPiece, itemBlock, knownEffectAt, legalRoutes, livingPiece, movementAllowance, previewMove, switchTargets } from './engine';
 import { nextFloat } from './rng';
 import type { Action, GameState, MovePreview } from './types';
 import type { SeatView } from './view';
@@ -35,11 +35,16 @@ export function newBotMemory(seed: number): BotMemory {
  * greedy: ghosts go for known Reaper tiles and any duel they can reach.
  * mischievous: happy to trigger Séances and gamble on unknown corridors.
  */
-const WEIGHTS: Record<Personality, { danger: number; unknown: number; remote: number; chaos: number }> = {
-  cautious: { danger: 1.4, unknown: 1.2, remote: 0.8, chaos: 0.2 },
-  greedy: { danger: 1.0, unknown: 0.8, remote: 1.3, chaos: 0.5 },
-  mischievous: { danger: 0.8, unknown: 0.5, remote: 1.0, chaos: 1.2 },
+const WEIGHTS: Record<Personality, { danger: number; unknown: number; remote: number; chaos: number; loot: number }> = {
+  cautious: { danger: 1.4, unknown: 1.2, remote: 0.8, chaos: 0.2, loot: 0.5 },
+  greedy: { danger: 1.0, unknown: 0.8, remote: 1.3, chaos: 0.5, loot: 0.9 },
+  mischievous: { danger: 0.8, unknown: 0.5, remote: 1.0, chaos: 1.2, loot: 1.1 },
 };
+
+/** How much a ghost battle is worth to this bot right now (small next to a shot at the life). */
+function lootValue(s: GameState, piece: number, w: (typeof WEIGHTS)[Personality]): number {
+  return 0.5 * 0.3 * w.loot * (s.pieces[piece].item ? 0.3 : 1);
+}
 
 export function reflexOf(profile: BotProfile): ReflexSkill {
   return SKILLS[profile.skill];
@@ -140,6 +145,8 @@ function evaluateGhost(view: SeatView, pv: MovePreview, profile: BotProfile, mem
   else if (pv.known === 'poltergeist') v = 0.05;
   else if (pv.canChallenge) v = win;
   else v = 0.15 / (1 + ordinaryDistance(end, s.pieces[living].node));
+  // A ghost battle for an item: a side objective when the life is out of reach.
+  if (!pv.canChallenge && !pv.known && (pv.battleTargets.length || pv.versus)) v = Math.max(v, lootValue(s, view.piece, w));
   // An unknown corridor might hide something; for a ghost that is mostly upside.
   if (pv.dest !== 'stay' && !pv.canChallenge && !pv.known) v += unknownTrapOdds(s, view.ownNomination, end) * 0.2 * w.chaos;
   return v + rand(mem) * 0.04;
@@ -166,12 +173,20 @@ export function botAction(view: SeatView, profile: BotProfile, mem: BotMemory): 
     if (s.nominations[me] !== null) return null;
     return { type: 'nominate', piece: me, node: TRAP_ELIGIBLE[Math.floor(rand(mem) * TRAP_ELIGIBLE.length)] };
   }
+  // A battle winner may be deciding out of turn.
+  if (s.phase === 'reward') {
+    const pr = s.pendingReward;
+    if (!pr || pr.piece !== me) return null;
+    return { type: 'chooseReward', keep: ITEM_POWER.indexOf(pr.offered) > ITEM_POWER.indexOf(pr.current) ? 'offered' : 'current' };
+  }
   if (actingPiece(s) !== me) return null;
   switch (s.phase) {
     case 'turnStart':
-      return { type: 'roll' };
+      return planItemBeforeRoll(view) ?? { type: 'roll' };
     case 'choose': {
-      const key = `${s.actionNumber}:${s.die}`;
+      const reroll = planSecondRoll(view);
+      if (reroll) return reroll;
+      const key = `${s.actionNumber}:${s.die}:${s.rollInfo?.kind}:${s.itemUsed}`;
       if (mem.plan?.key !== key) mem.plan = { key, dest: planMove(view, profile, mem) };
       if (s.selection.dest !== mem.plan.dest) return { type: 'select', dest: mem.plan.dest };
       return { type: 'confirmMove' };
@@ -181,13 +196,57 @@ export function botAction(view: SeatView, profile: BotProfile, mem: BotMemory): 
       const opts = s.pick!.options.slice().sort((a, b) => s.pieces[a].score - s.pieces[b].score || a - b);
       return { type: 'pickOpponent', option: opts[0] };
     }
-    case 'hunt':
-      return { type: 'hunt' };
+    case 'hunt': {
+      const o = s.options!;
+      if (o.living) return { type: 'hunt' };
+      const foes = [...o.sameSpace, ...o.versus.filter((v) => !o.sameSpace.includes(v))];
+      const w = WEIGHTS[profile.personality];
+      const keen = (s.pieces[me].item ? 0.35 : 1) * Math.min(1, w.loot + 0.1);
+      if (foes.length && rand(mem) < keen) {
+        // Battle whoever's win would matter least: the lowest scorer.
+        const foe = foes.slice().sort((a, b) => s.pieces[a].score - s.pieces[b].score || a - b)[0];
+        return { type: 'battle', opponent: foe };
+      }
+      return { type: 'declineHunt' };
+    }
     case 'summary':
       return { type: 'nextTurn' };
     default:
       return null;
   }
+}
+
+/** Before rolling: Ghostly Stride when six would reach the living piece but three might not; Ghost Switch to jump the queue. */
+function planItemBeforeRoll(view: SeatView): Action | null {
+  const s = view.state;
+  const me = s.pieces[view.piece];
+  const item: ItemId | null = me.item;
+  if (!item || me.alive || item === 'secondRoll') return null;
+  const living = s.pieces[livingPiece(s)];
+  const reach = (from: number, allowance: number) =>
+    inAttackRange(from, living.node) || [...pieceRoutes(from, allowance, true).keys()].some((d) => inAttackRange(d, living.node));
+  if (reach(me.node, GHOST_MIN_MOVE)) return null; // already a sure shot
+  if (item === 'ghostlyStride' && !itemBlock(s, 'ghostlyStride') && reach(me.node, STRIDE_ALLOWANCE)) return { type: 'useItem', item: 'ghostlyStride' };
+  if (item === 'ghostSwitch' && !itemBlock(s, 'ghostSwitch', switchTargets(s)[0])) {
+    const mine = ordinaryDistance(me.node, living.node);
+    const best = switchTargets(s)
+      .map((t) => ({ t, d: ordinaryDistance(s.pieces[t].node, living.node) }))
+      .sort((a, b) => a.d - b.d || a.t - b.t)[0];
+    if (best && best.d <= 3 && mine >= best.d + 3) return { type: 'useItem', item: 'ghostSwitch', target: best.t };
+  }
+  return null;
+}
+
+/** After a low roll that reaches nothing useful: spend Second Roll (the new result stands, even if worse). */
+function planSecondRoll(view: SeatView): Action | null {
+  const s = view.state;
+  const me = s.pieces[view.piece];
+  if (me.item !== 'secondRoll' || itemBlock(s, 'secondRoll') || s.die === null || s.die > 3) return null;
+  const useful = [...legalRoutes(s).keys()].some((d) => {
+    const pv = previewMove(s, d);
+    return !!pv && (pv.canChallenge || pv.known === 'reaper' || pv.superReaper !== null);
+  });
+  return useful ? null : { type: 'useItem', item: 'secondRoll' };
 }
 
 export function defaultBotProfile(i: number): BotProfile {

@@ -483,7 +483,10 @@ describe('hidden information', () => {
 
   it('routes and previews are identical whatever the hidden traps are', () => {
     const a = rolled(setup(3, { living: 0, nodes: [0, 16, 24], acting: 1, traps: DEFAULT_TRAPS }), 6);
-    const otherTraps = [2, 5, 13, 18, 23, 28].map((node, k) => ({ node, effect: DEFAULT_TRAPS[k].effect }));
+    const otherTraps = [2, 4, 13, 18, 20, 28].map((node, k) => ({
+      node,
+      effect: DEFAULT_TRAPS[k].effect,
+    }));
     const b = rolled(setup(3, { living: 0, nodes: [0, 16, 24], acting: 1, traps: otherTraps }), 6);
     expect([...legalRoutes(a).keys()]).toEqual([...legalRoutes(b).keys()]);
     for (const d of legalRoutes(a).keys()) expect(previewMove(a, d)).toEqual(previewMove(b, d));
@@ -515,18 +518,45 @@ describe('undo, saves and controllers', () => {
     expect(dispatch(back, { type: 'roll' }).session.game.die).toBe(die);
   });
 
-  it('saves round-trip as schema 3 and refuse older candy-rule saves', () => {
+  it('saves round-trip as schema 4, migrate One Life v3 saves, and refuse older candy-rule saves', () => {
     const ses = dispatch(newSession(game(3, 9)), { type: 'rollForLife' }).session;
     const raw = serialize(ses, defaultPersonalization());
     const back = deserialize(raw);
     expect(back.ok).toBe(true);
-    expect(deserialize(raw.replace('"schema":3', '"schema":2'))).toEqual({ ok: false, reason: 'incompatible' });
+    expect(deserialize(raw.replace('"schema":4', '"schema":2'))).toEqual({ ok: false, reason: 'incompatible' });
     expect(deserialize(JSON.stringify({ schema: 1, session: {} }))).toEqual({ ok: false, reason: 'incompatible' });
     // A save claiming two living pieces is corrupt.
     const bad = JSON.parse(raw);
     bad.session.game.pieces[1].alive = true;
     bad.session.game.pieces[0].alive = true;
     expect(deserialize(JSON.stringify(bad))).toEqual({ ok: false, reason: 'corrupt' });
+    // A v3 (pre-battle) save migrates with empty inventories and no cooldowns.
+    const toV3 = (g: Record<string, unknown>) => {
+      const o = {
+        ...g,
+        schema: 3,
+        pieces: (g.pieces as Array<Record<string, unknown>>).map(({ item: _i, itemAwardedAt: _a, ...p }) => p),
+      } as Record<string, unknown>;
+      for (const k of ['rewardRng', 'rollInfo', 'itemUsed', 'options', 'battlesThisRound', 'pendingReward']) delete o[k];
+      return o;
+    };
+    const v3 = JSON.parse(raw);
+    v3.schema = 3;
+    v3.session.game = toV3(v3.session.game);
+    v3.session.turnStart = toV3(v3.session.turnStart);
+    const mig = deserialize(JSON.stringify(v3));
+    expect(mig.ok).toBe(true);
+    if (mig.ok) {
+      expect(mig.session.game.schema).toBe(4);
+      expect(mig.session.game.pieces.every((p) => p.item === null && p.itemAwardedAt === null)).toBe(true);
+      expect(mig.session.game.battlesThisRound).toEqual([]);
+      expect(mig.session.game.traps).toEqual(ses.game.traps);
+    }
+    // A v3 save with a trap on a new Versus space is refused as a layout clash, never silently altered.
+    const clash = JSON.parse(JSON.stringify(v3));
+    clash.session.game.traps[0].node = 5;
+    clash.session.turnStart.traps[0].node = 5;
+    expect(deserialize(JSON.stringify(clash))).toEqual({ ok: false, reason: 'layout' });
   });
 
   it('pairs alternate controllers by round parity; solo pieces keep one', () => {

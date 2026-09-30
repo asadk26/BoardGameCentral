@@ -45,13 +45,33 @@ export function setup(n: number, opts: { living: number; nodes: number[]; acting
   const schedule = buildSchedule(s);
   const acting = opts.acting ?? opts.living;
   const slot = schedule.indexOf(acting);
-  return { ...s, schedule, slot, phase: 'turnStart', origin: opts.nodes[acting], die: null, allowance: 0, minigameUsed: false, log: [] };
+  return {
+    ...s,
+    schedule,
+    slot,
+    phase: 'turnStart',
+    origin: opts.nodes[acting],
+    die: null,
+    allowance: 0,
+    rollInfo: null,
+    itemUsed: null,
+    options: null,
+    minigameUsed: false,
+    log: [],
+  };
 }
 
 /** Put the acting piece straight into choosing with a given die. */
 export function rolled(s: GameState, die: number): GameState {
   const me = s.pieces[s.schedule[s.slot]];
-  return { ...s, phase: 'choose', die, allowance: movementAllowance(die, me.alive), selection: { dest: null } };
+  return {
+    ...s,
+    phase: 'choose',
+    die,
+    allowance: movementAllowance(die, me.alive),
+    rollInfo: { kind: 'die' },
+    selection: { dest: null },
+  };
 }
 
 export function move(s: GameState, dest: number | 'stay', die = 6): GameState {

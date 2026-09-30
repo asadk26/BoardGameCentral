@@ -1,4 +1,4 @@
-import type { CharacterId, TrapEffect } from './config';
+import type { CharacterId, ItemId, TrapEffect } from './config';
 import type { ChallengeInput, DecidedBy } from './challenges';
 
 export type Phase =
@@ -7,8 +7,9 @@ export type Phase =
   | 'turnStart' // the scheduled piece rolls its die
   | 'choose' // pick a destination (or stay)
   | 'pick' // the living piece on a Reaper's Challenge picks a ghost
-  | 'hunt' // a ghost in range may challenge the living piece
+  | 'hunt' // after landing: challenge the living piece, battle a ghost, or end the action
   | 'challenge' // Haunted Jump Rope is being played
+  | 'reward' // a ghost-battle winner already holding an item keeps it or takes the new one
   | 'summary' // the action is done
   | 'gameOver';
 
@@ -30,6 +31,10 @@ export interface PieceState {
   streak: number;
   /** Node the piece last arrived from, used only for camera heading. */
   facingFrom: number | null;
+  /** The one item a piece may carry (ghosts only; cleared on becoming alive). */
+  item: ItemId | null;
+  /** Action number in which the item was won: it can't be used in that same action. */
+  itemAwardedAt: number | null;
 }
 
 export interface Trap {
@@ -40,7 +45,7 @@ export interface Trap {
   spent: boolean;
 }
 
-export type ChallengeHost = 'contact' | 'reaper' | 'superReaper' | 'seance';
+export type ChallengeHost = 'contact' | 'reaper' | 'superReaper' | 'seance' | 'ghostBattle' | 'versus';
 
 export interface Challenge {
   id: string;
@@ -77,6 +82,34 @@ export interface ChallengeOutcome {
   finalists: number[];
   extraSweepsUsed: number;
   moves: Array<{ piece: number; from: number; to: number; reason: 'claim' | 'retreat' }>;
+  /** Ghost battles: the item the winner drew. */
+  reward?: ItemId;
+}
+
+/** What a ghost may do after an ordinary landing (or a stay), before the action ends. */
+export interface EncounterOptions {
+  /** Challenge the living piece (same space or one ordinary edge). */
+  living: boolean;
+  /** Ghosts on this very space the mover may battle for an item. */
+  sameSpace: number[];
+  /** On a Versus space: any other ghost the mover may battle. */
+  versus: number[];
+  /** Landed on a Versus space but nobody is eligible (why, for the screen). */
+  versusInactive: 'noGhosts' | 'cooldown' | null;
+}
+
+/** A ghost-battle winner who already holds an item chooses which to keep. */
+export interface PendingReward {
+  piece: number;
+  current: ItemId;
+  offered: ItemId;
+}
+
+/** How the acting piece got its movement this action. */
+export interface RollInfo {
+  kind: 'die' | 'stride';
+  /** Second Roll: the discarded first result. */
+  rerolledFrom?: number;
 }
 
 export type LogEntry =
@@ -95,15 +128,21 @@ export type LogEntry =
   | { kind: 'outcome'; outcome: ChallengeOutcome }
   | { kind: 'lifeTransfer'; from: number; to: number }
   | { kind: 'huntDeclined'; piece: number }
+  | { kind: 'versusInactive'; piece: number; node: number; reason: 'noGhosts' | 'cooldown' }
+  | { kind: 'itemAwarded'; piece: number; item: ItemId; replaced: ItemId | null; kept: ItemId; duplicate?: boolean }
+  | { kind: 'rewardPending'; piece: number; current: ItemId; offered: ItemId }
+  | { kind: 'itemUsed'; piece: number; item: ItemId; detail?: { target?: number; from?: number; to?: number; oldDie?: number; newDie?: number } }
   | { kind: 'roundEnd'; round: number; piece: number; score: number; streak: number }
   | { kind: 'gameOver' };
 
 export interface GameState {
-  schema: 3;
+  schema: 4;
   seed: number;
   rng: number;
   /** A separate stream for challenge seeds, so seeds shown to phones reveal nothing else. */
   challengeRng: number;
+  /** A separate stream for ghost-battle rewards, drawn only once a winner is known. */
+  rewardRng: number;
   challengeCount: number;
   pieces: PieceState[];
   phase: Phase;
@@ -117,6 +156,10 @@ export interface GameState {
   /** The acting piece's roll, and its movement allowance. */
   die: number | null;
   allowance: number;
+  /** Die or Ghostly Stride; Second Roll's discarded result. Null before moving is decided. */
+  rollInfo: RollInfo | null;
+  /** The one item used in this action, if any. */
+  itemUsed: ItemId | null;
   selection: { dest: number | 'stay' | null };
   /** Where the acting piece stood when its action began. */
   origin: number | null;
@@ -124,6 +167,12 @@ export interface GameState {
   minigameUsed: boolean;
   /** The living piece on a Reaper's Challenge picks one of these ghosts. */
   pick: { options: number[]; node: number } | null;
+  /** After an ordinary landing: what the acting ghost may start (one at most). */
+  options: EncounterOptions | null;
+  /** Ghost pairs ("a-b", a < b) that already battled this round. */
+  battlesThisRound: string[];
+  /** A winner deciding between their old item and the new one. */
+  pendingReward: PendingReward | null;
   challenge: Challenge | null;
   /** The last resolved challenge, for the summary screen. */
   lastOutcome: ChallengeOutcome | null;
@@ -147,7 +196,10 @@ export type Action =
   | { type: 'confirmMove' }
   | { type: 'pickOpponent'; option: number }
   | { type: 'hunt' }
+  | { type: 'battle'; opponent: number }
   | { type: 'declineHunt' }
+  | { type: 'chooseReward'; keep: 'current' | 'offered' }
+  | { type: 'useItem'; item: ItemId; target?: number }
   | { type: 'challengeResult'; id: string; inputs: Record<number, ChallengeInput[]> }
   | { type: 'nextTurn' };
 
@@ -173,4 +225,8 @@ export interface MovePreview {
   canChallenge: boolean;
   /** Living: ghosts whose current space is within ordinary range of the destination. */
   threats: number[];
+  /** Ghost: other ghosts on the destination it could battle for an item. */
+  battleTargets: number[];
+  /** Ghost: the destination is a Versus space with at least one eligible opponent. */
+  versus: boolean;
 }

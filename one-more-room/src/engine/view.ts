@@ -17,9 +17,12 @@ export function publicView(s: GameState): GameState {
     seed: 0,
     rng: 0,
     challengeRng: 0,
+    // Future rewards stay unpredictable: the reward stream never leaves the authority.
+    rewardRng: 0,
     nominations: s.nominations.map((n) => (n === null ? null : -1)),
     traps: s.traps.filter((t) => t.revealed).map((t) => ({ ...t })),
     pieces: s.pieces.map((p) => ({ ...p, controllers: p.controllers.slice() })),
+    battlesThisRound: s.battlesThisRound.slice(),
     schedule: s.schedule.slice(),
     log: s.log.slice(),
   };
