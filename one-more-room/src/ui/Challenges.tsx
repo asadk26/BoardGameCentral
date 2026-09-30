@@ -88,9 +88,9 @@ function LocalChallenge({ game, ch }: { game: GameState; ch: Challenge }) {
       const { all, v } = judge(inputs);
       setVerdict({ winner: v.winner, inputs: all, decidedBy: v.decidedBy, finalists: v.finalists });
       setStage('verdict');
-      audio.play(v.winner === ch.livingAtStart ? 'hit' : 'transform');
+      audio.play(v.winner === ch.livingAtStart || ch.host === 'ghostBattle' || ch.host === 'versus' ? 'hit' : 'transform');
     },
-    [judge, ch.livingAtStart],
+    [judge, ch.livingAtStart, ch.host],
   );
 
   /** After the eight scored sweeps: stop now unless the top is tied. */
@@ -180,7 +180,12 @@ function LocalChallenge({ game, ch }: { game: GameState; ch: Challenge }) {
         {stage === 'verdict' && verdict && (
           <div className="ch-verdict">
             <p className="lives">
-              {game.pieces[verdict.winner].name} {verdict.winner === ch.livingAtStart ? 'keeps the life!' : 'steals the life!'}
+              {game.pieces[verdict.winner].name}{' '}
+              {ch.host === 'ghostBattle' || ch.host === 'versus'
+                ? 'wins the battle — and an item!'
+                : verdict.winner === ch.livingAtStart
+                  ? 'keeps the life!'
+                  : 'steals the life!'}
             </p>
             {verdict.decidedBy === 'suddenDeath' && <p className="muted">Decided in sudden death between {verdict.finalists.map((f) => game.pieces[f].name).join(' and ')}.</p>}
             {verdict.decidedBy === 'timing' && <p className="muted">Tied after sudden death — the steadier timing wins.</p>}

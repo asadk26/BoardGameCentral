@@ -1527,3 +1527,11 @@ kbd {
   flex-direction: column;
   gap: 6px;
 }
+
+/* Ghostly Stride: a fixed move, never a fake die. */
+.die-btn.stride .stride-icon {
+  font-size: 2.4rem;
+  line-height: 64px;
+  width: 64px;
+  text-align: center;
+}

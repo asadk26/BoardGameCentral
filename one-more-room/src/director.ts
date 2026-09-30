@@ -5,6 +5,7 @@
 import { SUPER_REAPER } from './engine/config';
 import type { GameState, LogEntry } from './engine/types';
 import { nodePos, playerSlot, type V3 } from './scene/layout';
+import { ITEM_INFO } from './text';
 
 export type Actor = number;
 
@@ -162,6 +163,12 @@ class Director {
             this.segs.push({ actor: def, t0: t, t1: t + 0.6, kind: 'fright', points: [from, from] });
             this.popup(nodePos(c.node, 1.7), 'Challenge!', '#ff8a9a', t - now());
             t += 0.6;
+          } else if (c.host === 'ghostBattle' || c.host === 'versus') {
+            cue('catch', t);
+            const other = c.participants.find((p) => p !== c.instigator)!;
+            this.popup(nodePos(c.node, 1.8), c.host === 'versus' ? 'Versus! Ghost battle' : 'Ghost battle!', '#7ff5e6', t - now());
+            if (c.host === 'versus') this.popup(above(other, 1.8), 'Called to battle!', '#7ff5e6', t - now() + 0.2);
+            t += 0.5;
           } else if (c.kind === 'seance') {
             this.popup(nodePos(c.node, 2.2), 'Everyone to the Séance!', '#ff9fb4', t - now());
             t += 0.4;
@@ -174,7 +181,8 @@ class Director {
             const from = this.start(m.piece, playerSlot(before, m.piece));
             this.segs.push({ actor: m.piece, t0: t, t1: t + 0.8 / this.speed, kind: m.reason === 'claim' ? 'glide' : 'arc', points: [from, playerSlot(after, m.piece)] });
           }
-          if (!o.transferred) this.popup(above(o.winner, 1.9), 'Defended!', '#b8ffb0', t - now());
+          if (o.reward) this.popup(above(o.winner, 1.9), 'Wins an item!', '#7ff5e6', t - now());
+          else if (!o.transferred) this.popup(above(o.winner, 1.9), 'Defended!', '#b8ffb0', t - now());
           t += 0.8 / this.speed;
           break;
         }
@@ -182,6 +190,35 @@ class Director {
           cue('transform', t);
           this.popup(above(e.to, 2.0), `${after.pieces[e.to].name} steals the life!`, '#ffd36b', t - now());
           t += 0.9 / this.speed;
+          break;
+        case 'itemAwarded':
+          if (!e.duplicate) {
+            cue('transform', t);
+            this.popup(above(e.piece, 2.2), `${ITEM_INFO[e.kept].icon} ${ITEM_INFO[e.kept].name}`, '#ffe08a', t - now());
+            t += 0.6 / this.speed;
+          }
+          break;
+        case 'itemUsed':
+          if (e.item === 'ghostSwitch' && e.detail?.target !== undefined) {
+            cue('whoosh', t);
+            arc(e.piece, 0.8 / this.speed);
+            arc(e.detail.target, 0.8 / this.speed);
+            this.popup(above(e.piece, 1.9), '🔄 Ghost Switch!', '#7ff5e6', t - now());
+            t += 0.8 / this.speed;
+          } else if (e.item === 'secondRoll') {
+            this.popup(above(e.piece, 1.9), `🎲 Second Roll: ${e.detail?.oldDie} → ${e.detail?.newDie}`, '#ffe08a', t - now());
+          } else {
+            this.popup(above(e.piece, 1.9), '👣 Ghostly Stride • 6 spaces', '#d6a6ff', t - now());
+            t += 0.4 / this.speed;
+          }
+          break;
+        case 'versusInactive':
+          this.popup(
+            nodePos(e.node, 1.6),
+            e.reason === 'noGhosts' ? 'Versus: no other ghost to battle' : 'Versus: every ghost already battled',
+            '#c9bdd6',
+            t - now(),
+          );
           break;
         case 'huntDeclined':
           this.popup(above(e.piece, 1.6), 'Lets it pass', '#7ff5e6', t - now());

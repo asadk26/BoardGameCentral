@@ -3,15 +3,7 @@
 
 export type NodeKind = 'entrance' | 'room' | 'secret' | 'corridor';
 
-export type RoomKey =
-  | 'kitchen'
-  | 'dining'
-  | 'conservatory'
-  | 'attic'
-  | 'crypt'
-  | 'laboratory'
-  | 'nursery'
-  | 'library';
+export type RoomKey = 'kitchen' | 'dining' | 'conservatory' | 'attic' | 'crypt' | 'laboratory' | 'nursery' | 'library';
 
 export const NODE_COUNT = 32;
 /** The Entrance Hall: now an ordinary space, and where the first life appears. */
@@ -68,7 +60,42 @@ export const POLICY = {
   loserRetreatSteps: 2,
   /** A Poltergeist throws a piece at least this many ordinary steps. */
   poltergeistMinSteps: 3,
+  /** Ghost-versus-ghost battles for items (off only for baseline simulations). */
+  ghostBattles: true,
 };
+
+// ── Ghost battles and items ─────────────────────────────────────────────
+
+/**
+ * Visible Versus spaces (two of the former Trick-or-Treat corridors, far
+ * apart): a ghost ending a normal move here may battle any other ghost.
+ */
+export const VERSUS_SPACES: readonly number[] = [5, 23];
+
+export type ItemId = 'secondRoll' | 'ghostSwitch' | 'ghostlyStride';
+
+/** Reward odds, in draw order. These are the requested starting values. */
+export const ITEM_WEIGHTS: ReadonlyArray<readonly [ItemId, number]> = [
+  ['secondRoll', 0.4],
+  ['ghostSwitch', 0.4],
+  ['ghostlyStride', 0.2],
+];
+
+/** Presumed strength, weakest first (used by bots deciding keep or replace). */
+export const ITEM_POWER: readonly ItemId[] = ['secondRoll', 'ghostSwitch', 'ghostlyStride'];
+
+/** Ghostly Stride: this many movement spaces instead of a roll. */
+export const STRIDE_ALLOWANCE = 6;
+
+/** Map a uniform draw in [0, 1) to an item by the weights above. */
+export function itemFromDraw(u: number): ItemId {
+  let acc = 0;
+  for (const [item, w] of ITEM_WEIGHTS) {
+    acc += w;
+    if (u < acc) return item;
+  }
+  return ITEM_WEIGHTS[ITEM_WEIGHTS.length - 1][0];
+}
 
 // ── The Reaper and the traps ────────────────────────────────────────────
 
@@ -82,15 +109,11 @@ export const TRAP_EFFECTS: readonly TrapEffect[] = ['reaper', 'reaper', 'seance'
 /** Séances (hidden tiles and the Super Reaper together) allowed per match. */
 export const SEANCE_LIMIT = 2;
 
-/** Former Trick-or-Treat spaces: ordinary corridors that keep their decorations. */
+/** Former Trick-or-Treat spaces that keep their decorations (5 and 23 are now Versus spaces). */
 export const DECORATED_CORRIDORS: readonly number[] = [5, 13, 23];
 
 /** Mansion wings used to spread computer-filled traps around. */
-export const TRAP_WINGS: Record<string, readonly number[]> = {
-  west: [2, 4, 5, 6, 9],
-  north: [13, 14, 18, 19],
-  east: [20, 21, 23, 26, 28, 30],
-};
+export const TRAP_WINGS: Record<string, readonly number[]> = { west: [2, 4, 6, 9], north: [13, 14, 18, 19], east: [20, 21, 26, 28, 30] };
 
 /** Timings for Haunted Jump Rope, in milliseconds. */
 export const CHALLENGE = {
@@ -161,10 +184,13 @@ export function trapEligible(id: number): boolean {
   if (id === SUPER_REAPER || id === LIVING_SPAWN || GHOST_SPAWNS.includes(id)) return false;
   if (id === 1 || id === NODE_COUNT - 1) return false; // the entrance's neighbours
   if (SECRET_ENDPOINTS.includes(id) || WALL_LINK_ENDPOINTS.includes(id)) return false;
+  if (VERSUS_SPACES.includes(id)) return false;
   return true;
 }
 export const TRAP_ELIGIBLE: readonly number[] = Array.from({ length: NODE_COUNT }, (_, i) => i).filter(trapEligible);
 if (TRAP_ELIGIBLE.length < TRAP_COUNT) throw new Error('Fewer eligible trap spaces than traps');
+if (VERSUS_SPACES.some((n) => n === SUPER_REAPER || GHOST_SPAWNS.includes(n) || n === LIVING_SPAWN))
+  throw new Error('A Versus space collides with a fixed space');
 
 export function secretPairLabel(id: number): 'A' | 'B' | null {
   if (id === 8 || id === 24) return 'A';
@@ -183,7 +209,7 @@ export const NODE_POSITIONS: ReadonlyArray<readonly [number, number]> = [
   [-4, 8], // 2
   [-4, 6], // 3 kitchen
   [-4, 4], // 4 junction to west wing
-  [-6, 4], // 5 decorated corridor
+  [-6, 4], // 5 Versus space
   [-8, 4], // 6
   [-10, 4], // 7 dining room
   [-10, 2], // 8 secret A
@@ -201,7 +227,7 @@ export const NODE_POSITIONS: ReadonlyArray<readonly [number, number]> = [
   [4, 0], // 20 junction to east wing
   [6, 0], // 21
   [8, 0], // 22 laboratory
-  [10, 0], // 23 decorated corridor
+  [10, 0], // 23 Versus space
   [10, 2], // 24 secret A
   [10, 4], // 25 nursery
   [8, 4], // 26

@@ -14,6 +14,7 @@ import { challengeHost, challengeHowTo, challengeTitle, controllerLine, curseLin
 import { defaultPersonalization } from '../engine/save';
 import { MiniMap } from '../ui/MiniMap';
 import { RopeGame } from '../ui/Challenges';
+import { EncounterChoices, ItemActions, ItemBadge, RewardChoice, RewardReveal, rewardDecider } from '../ui/Items';
 import { audio } from '../audio/audio';
 import './phone.css';
 
@@ -218,7 +219,8 @@ function Game({ view, client }: { view: RoomView; client: RoomClient }) {
   const needsAck = view.ownNomination !== null && !acked && g.round === 1 && (g.phase === 'placement' || g.phase === 'lifeRoll' || g.actionNumber <= g.pieces.length);
   const me = g.pieces[piece];
   const inControl = !!view.you?.inControl;
-  const acting = actingPiece(g) === piece;
+  // A ghost battle's winner chooses its reward even out of turn.
+  const acting = rewardDecider(g) === piece;
   const started = g.phase !== 'placement' && g.phase !== 'lifeRoll';
   const curse = me.alive ? curseLine(me.streak) : null;
   return (
@@ -249,7 +251,14 @@ function Game({ view, client }: { view: RoomView; client: RoomClient }) {
         (acting && inControl ? (
           <MyAction g={g} send={send} />
         ) : acting ? (
-          <Watching g={g} note={`Your piece’s action — ${me.controllers[activeController(g, piece)]} controls it this round.`} />
+          <Watching
+            g={g}
+            note={
+              g.phase === 'reward'
+                ? `Your piece won an item — ${me.controllers[activeController(g, piece)]} chooses this round.`
+                : `Your piece’s action — ${me.controllers[activeController(g, piece)]} controls it this round.`
+            }
+          />
         ) : (
           <Watching g={g} />
         ))}
@@ -269,6 +278,7 @@ function Scoreboard({ g, me }: { g: GameState; me: number }) {
           <span className="pn">{p.name}</span>
           <b>{p.score}</b>
           {p.alive ? ' ❤' : ''}
+          {p.item && <ItemBadge item={p.item} compact />}
         </li>
       ))}
     </ul>
@@ -335,6 +345,8 @@ function Watching({ g, note }: { g: GameState; note?: string }) {
           Order: {g.schedule.map((i, k) => `${k < g.slot ? '✓ ' : k === g.slot ? '▶ ' : ''}${g.pieces[i].name}`).join(' → ')}
         </p>
       )}
+      {g.phase === 'reward' && <RewardChoice game={g} send={() => {}} btn="pbtn" canChoose={false} />}
+      {g.phase === 'summary' && <RewardReveal game={g} />}
       <ul className="plog">
         {lines.map((l, i) => (
           <li key={i}>{l}</li>
@@ -355,6 +367,7 @@ function MyAction({ g, send }: { g: GameState; send: (a: Action) => void }) {
             ? 'You hold the life. Move up to your roll, or stay — ghosts act after you.'
             : `You are a ghost: you drift at least 3 spaces. End on ${g.pieces[livingPiece(g)].name}’s space or next to it to challenge.`}
         </p>
+        <ItemActions game={g} send={send} btn="pbtn" pz={pz} />
         <button className="pbtn primary big" onClick={() => send({ type: 'roll' })}>
           Roll the die 🎲
         </button>
@@ -374,28 +387,14 @@ function MyAction({ g, send }: { g: GameState; send: (a: Action) => void }) {
         ))}
       </div>
     );
-  if (g.phase === 'hunt') {
-    const living = g.pieces[livingPiece(g)];
-    return (
-      <div className="pstack">
-        <p>
-          <b>{living.name}</b> is within reach. Challenge for the life?
-        </p>
-        {curseLine(living.streak) && <p className="muted small">{living.name}: {curseLine(living.streak)}</p>}
-        <button className="pbtn primary big risky" onClick={() => send({ type: 'hunt' })}>
-          Challenge 👻
-        </button>
-        <button className="pbtn" onClick={() => send({ type: 'declineHunt' })}>
-          Let it pass
-        </button>
-      </div>
-    );
-  }
+  if (g.phase === 'hunt') return <EncounterChoices game={g} send={send} btn="pbtn" pz={pz} />;
+  if (g.phase === 'reward') return <RewardChoice game={g} send={send} btn="pbtn" canChoose />;
   if (g.phase === 'summary') {
     const lines = [...(g.log.map((e) => (e.kind === 'outcome' ? null : logLine(e, g, pz))).filter(Boolean) as string[]), ...(g.lastOutcome ? outcomeLines(g.lastOutcome, g, pz) : [])];
     const last = g.slot === g.schedule.length - 1;
     return (
       <div className="pstack">
+        <RewardReveal game={g} />
         <ul className="plog">
           {lines.map((l, i) => (
             <li key={i}>{l}</li>
@@ -419,6 +418,7 @@ function PhoneChoose({ g, send }: { g: GameState; send: (a: Action) => void }) {
   return (
     <div className="pstack">
       <p className="pnote">{rollLine(g)}</p>
+      <ItemActions game={g} send={send} btn="pbtn" pz={pz} />
       <p className="muted small">☠ Six hidden traps: only where a move ends counts. {superReaperLine(g)}.</p>
       <MiniMap game={g} revealed={g.traps} pickable={new Set(routes.map((r) => r.dest))} selected={typeof sel === 'number' ? sel : null} onPick={(d) => send({ type: 'select', dest: d })} path={pv?.path} showWallLinks={!me.alive} label="Tap where to go" />
       <div className="pdests">
@@ -429,7 +429,7 @@ function PhoneChoose({ g, send }: { g: GameState; send: (a: Action) => void }) {
           const p = previewMove(g, r.dest)!;
           return (
             <button key={r.dest} className={`pdest ${sel === r.dest ? 'on' : ''}`} onClick={() => send({ type: 'select', dest: r.dest })}>
-              {p.canChallenge ? '👻 ' : p.known === 'reaper' || p.known === 'seance' || p.superReaper ? '☠ ' : ''}
+              {p.canChallenge ? '👻 ' : p.known === 'reaper' || p.known === 'seance' || p.superReaper ? '☠ ' : p.battleTargets.length || p.versus ? '⚔ ' : ''}
               {nodeName(r.dest, pz)} <small>#{r.dest}</small>
             </button>
           );

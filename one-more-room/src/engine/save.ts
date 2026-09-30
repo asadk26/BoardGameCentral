@@ -1,7 +1,20 @@
 // Versioned local persistence. Only this game's own keys are ever written or
 // removed; nothing else in the browser's storage is touched.
 
-import { CHARACTERS, DEFAULT_MANSION_NAME, MAX_PIECES, NODE_COUNT, ROOMS, ROUNDS, TEXT_LIMITS, TRAP_COUNT, trapEligible } from './config';
+import {
+  CHARACTERS,
+  DEFAULT_MANSION_NAME,
+  MAX_PIECES,
+  NODE_COUNT,
+  ROOMS,
+  ROUNDS,
+  TEXT_LIMITS,
+  TRAP_COUNT,
+  trapEligible,
+  VERSUS_SPACES,
+  type ItemId,
+} from './config';
+import { seedFrom } from './rng';
 import type { GameState } from './types';
 import type { Session } from './engine';
 import type { BotProfile } from './bots';
@@ -11,9 +24,11 @@ export const PREFS_KEY = 'one-more-room/prefs';
 export const SETTINGS_KEY = 'one-more-room/settings';
 /**
  * v1 = original candy rules; v2 = candy with survival encounters;
- * v3 = One Life (one living piece, points per round held).
+ * v3 = One Life (one living piece, points per round held);
+ * v4 = One Life with ghost battles and items. v3 saves migrate to v4 when
+ * no trap sits on a new Versus space.
  */
-export const SAVE_SCHEMA = 3;
+export const SAVE_SCHEMA = 4;
 
 export interface Personalization {
   mansionName: string;
@@ -59,18 +74,21 @@ export interface SaveFile {
 }
 
 const isInt = (v: unknown, min = -Infinity, max = Infinity) => Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
-const PHASES = ['placement', 'lifeRoll', 'turnStart', 'choose', 'pick', 'hunt', 'challenge', 'summary', 'gameOver'];
+const PHASES = ['placement', 'lifeRoll', 'turnStart', 'choose', 'pick', 'hunt', 'challenge', 'reward', 'summary', 'gameOver'];
+const ITEMS: readonly ItemId[] = ['secondRoll', 'ghostSwitch', 'ghostlyStride'];
+const isItem = (v: unknown) => v === null || ITEMS.includes(v as ItemId);
 
 export function validGame(g: unknown): g is GameState {
   if (!g || typeof g !== 'object') return false;
   const s = g as GameState;
   const chars = new Set(CHARACTERS.map((c) => c.id));
-  if (s.schema !== 3 || !Array.isArray(s.pieces) || s.pieces.length < 2 || s.pieces.length > MAX_PIECES) return false;
+  if (s.schema !== 4 || !Array.isArray(s.pieces) || s.pieces.length < 2 || s.pieces.length > MAX_PIECES) return false;
   const started = s.phase !== 'placement' && s.phase !== 'lifeRoll';
   const living = s.pieces.filter((p) => p && p.alive).length;
   return (
     isInt(s.rng, 0, 0xffffffff) &&
     isInt(s.challengeRng, 0, 0xffffffff) &&
+    isInt(s.rewardRng, 0, 0xffffffff) &&
     s.pieces.every(
       (p) =>
         typeof p.id === 'string' &&
@@ -83,8 +101,16 @@ export function validGame(g: unknown): g is GameState {
         isInt(p.node, 0, NODE_COUNT - 1) &&
         isInt(p.score, 0, ROUNDS) &&
         isInt(p.streak, 0, ROUNDS) &&
-        typeof p.alive === 'boolean',
+        typeof p.alive === 'boolean' &&
+        isItem(p.item) &&
+        (p.itemAwardedAt === null || Number.isInteger(p.itemAwardedAt)) &&
+        !(p.alive && p.item),
     ) &&
+    isItem(s.itemUsed) &&
+    Array.isArray(s.battlesThisRound) &&
+    s.battlesThisRound.every((k) => typeof k === 'string') &&
+    (s.phase !== 'reward' || (!!s.pendingReward && isItem(s.pendingReward.current) && isItem(s.pendingReward.offered))) &&
+    (s.phase !== 'hunt' || !!s.options) &&
     new Set(s.pieces.map((p) => p.character)).size === s.pieces.length &&
     (started ? living === 1 : living === 0) &&
     s.pieces.reduce((sum, p) => sum + p.score, 0) <= ROUNDS &&
@@ -111,7 +137,36 @@ export function serialize(session: Session, personalization: Personalization, se
 
 export type LoadResult =
   | { ok: true; session: Session; personalization: Personalization; seats: SeatSetup[] | null }
-  | { ok: false; reason: 'missing' | 'corrupt' | 'incompatible' };
+  | { ok: false; reason: 'missing' | 'corrupt' | 'incompatible' | 'layout' };
+
+/**
+ * Bring a One Life schema-3 snapshot up to schema 4: empty inventories, no
+ * battles yet, and a reward stream derived from the game's own seed. Refuses
+ * (returns null) if a hidden trap or a nomination sits on a new Versus space.
+ */
+function migrate3(g: unknown): GameState | null {
+  if (!g || typeof g !== 'object') return null;
+  const s = g as Record<string, unknown> & { pieces?: Array<Record<string, unknown>>; traps?: Array<{ node: number }>; nominations?: Array<number | null> };
+  if (s.schema !== 3) return null;
+  if ((s.traps ?? []).some((t) => VERSUS_SPACES.includes(t.node))) return null;
+  if ((s.nominations ?? []).some((n) => n !== null && VERSUS_SPACES.includes(n))) return null;
+  const out = {
+    ...s,
+    schema: 4,
+    rewardRng: seedFrom(`reward:${(s.seed as number) ?? 0}`),
+    rollInfo: s.phase === 'choose' ? { kind: 'die' } : null,
+    itemUsed: null,
+    options: s.phase === 'hunt' ? { living: true, sameSpace: [], versus: [], versusInactive: null } : null,
+    battlesThisRound: [],
+    pendingReward: null,
+    pieces: (s.pieces ?? []).map((p) => ({
+      ...p,
+      item: null,
+      itemAwardedAt: null,
+    })),
+  };
+  return out as unknown as GameState;
+}
 
 export function deserialize(raw: string | null): LoadResult {
   if (raw === null) return { ok: false, reason: 'missing' };
@@ -122,6 +177,24 @@ export function deserialize(raw: string | null): LoadResult {
     return { ok: false, reason: 'corrupt' };
   }
   if (!parsed || typeof parsed !== 'object') return { ok: false, reason: 'corrupt' };
+  if (parsed.schema === 3 && parsed.session) {
+    // One Life before ghost battles: migrate every snapshot, or refuse clearly.
+    const old = parsed.session;
+    const game = migrate3(old.game);
+    const turnStart = migrate3(old.turnStart);
+    const prev = old.previousTurnStart === null ? null : migrate3(old.previousTurnStart);
+    if (!game || !turnStart || (old.previousTurnStart !== null && !prev)) {
+      const layoutClash = [old.game, old.turnStart].some(
+        (x) =>
+          x &&
+          ((x as GameState).traps?.some((t) => VERSUS_SPACES.includes(t.node)) ||
+            (x as GameState).nominations?.some((n) => n !== null && VERSUS_SPACES.includes(n))),
+      );
+      return { ok: false, reason: layoutClash ? 'layout' : 'corrupt' };
+    }
+    parsed.session = { ...old, game, turnStart, previousTurnStart: prev };
+    parsed.schema = SAVE_SCHEMA;
+  }
   if (parsed.schema !== SAVE_SCHEMA) return { ok: false, reason: 'incompatible' };
   const ses = parsed.session;
   if (!ses || !validGame(ses.game) || !validGame(ses.turnStart) || (ses.previousTurnStart !== null && !validGame(ses.previousTurnStart))) {

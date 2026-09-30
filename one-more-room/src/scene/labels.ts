@@ -92,7 +92,7 @@ export function badgeTexture(text: string, bg: string, fg = '#1a1024', ring = '#
 }
 
 /** Symbols painted on tiles: the hall's crest, a keyhole for passages. */
-export function tileSymbolTexture(kind: 'secretA' | 'secretB' | 'entrance'): THREE.CanvasTexture {
+export function tileSymbolTexture(kind: 'secretA' | 'secretB' | 'entrance' | 'versus'): THREE.CanvasTexture {
   const key = `tile:${kind}`;
   let tex = cache.get(key);
   if (!tex) {
@@ -102,7 +102,26 @@ export function tileSymbolTexture(kind: 'secretA' | 'secretB' | 'entrance'): THR
     ctx.clearRect(0, 0, 256, 256);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    if (kind === 'entrance') {
+    if (kind === 'versus') {
+      // Two crossed blades: a Versus space for ghost battles.
+      ctx.strokeStyle = '#1b0a24';
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 22;
+      ctx.beginPath();
+      ctx.moveTo(62, 62);
+      ctx.lineTo(194, 194);
+      ctx.moveTo(194, 62);
+      ctx.lineTo(62, 194);
+      ctx.stroke();
+      ctx.strokeStyle = '#fff4fb';
+      ctx.lineWidth = 10;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(128, 128, 112, 0, Math.PI * 2);
+      ctx.lineWidth = 8;
+      ctx.strokeStyle = '#1b0a24';
+      ctx.stroke();
+    } else if (kind === 'entrance') {
       ctx.strokeStyle = '#3a2008';
       ctx.lineWidth = 10;
       ctx.beginPath();

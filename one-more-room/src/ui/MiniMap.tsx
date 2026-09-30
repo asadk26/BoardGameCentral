@@ -2,7 +2,19 @@
 // by the phone controller. It draws only what it is given — callers pass
 // public facts (revealed traps), never the hidden map.
 
-import { CHARACTERS, DECORATED_CORRIDORS, GHOST_WALL_LINKS, NODE_COUNT, NODE_POSITIONS, ORDINARY_EDGES, SECRET_EDGES, SUPER_REAPER, nodeKind, type TrapEffect } from '../engine/config';
+import {
+  CHARACTERS,
+  DECORATED_CORRIDORS,
+  GHOST_WALL_LINKS,
+  NODE_COUNT,
+  NODE_POSITIONS,
+  ORDINARY_EDGES,
+  SECRET_EDGES,
+  SUPER_REAPER,
+  VERSUS_SPACES,
+  nodeKind,
+  type TrapEffect,
+} from '../engine/config';
 import type { GameState } from '../engine/types';
 
 const X0 = -13;
@@ -53,9 +65,34 @@ export function MiniMap({ pickable, selected, onPick, game, revealed = [], label
         const [x, y] = px(id);
         const kind = nodeKind(id);
         const can = pickable?.has(id) ?? false;
-        const fill = id === 0 ? '#e8b54a' : kind === 'room' ? '#c98a4b' : DECORATED_CORRIDORS.includes(id) ? '#b8703a' : kind === 'secret' ? '#9b6ce0' : id === SUPER_REAPER ? '#8a2be2' : '#5a4d66';
+        const versus = VERSUS_SPACES.includes(id);
+        const fill = versus
+          ? '#d85cc8'
+          : id === 0
+            ? '#e8b54a'
+            : kind === 'room'
+              ? '#c98a4b'
+              : DECORATED_CORRIDORS.includes(id)
+                ? '#b8703a'
+                : kind === 'secret'
+                  ? '#9b6ce0'
+                  : id === SUPER_REAPER
+                    ? '#8a2be2'
+                    : '#5a4d66';
         const trap = revealed.find((t) => t.node === id);
-        const mark = id === SUPER_REAPER ? '☠' : trap ? (trap.effect === 'reaper' ? '☠' : trap.effect === 'seance' ? (trap.spent ? '·' : '🕯') : '🌀') : String(id);
+        const mark = versus
+          ? '⚔'
+          : id === SUPER_REAPER
+            ? '☠'
+            : trap
+              ? trap.effect === 'reaper'
+                ? '☠'
+                : trap.effect === 'seance'
+                  ? trap.spent
+                    ? '·'
+                    : '🕯'
+                  : '🌀'
+              : String(id);
         const r = id === 0 ? 15 : 11;
         return (
           <g
@@ -63,7 +100,7 @@ export function MiniMap({ pickable, selected, onPick, game, revealed = [], label
             className={`mm-node ${can ? 'can' : ''} ${selected === id ? 'sel' : ''}`}
             onClick={can && onPick ? () => onPick(id) : undefined}
             role={can ? 'button' : undefined}
-            aria-label={can ? `Space ${id}` : undefined}
+            aria-label={can ? `Space ${id}${versus ? ' (Versus)' : ''}` : undefined}
             tabIndex={can ? 0 : undefined}
             onKeyDown={can && onPick ? (e) => (e.key === 'Enter' || e.key === ' ') && onPick(id) : undefined}
           >

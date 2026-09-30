@@ -431,7 +431,10 @@ export class Room {
           if (a.piece !== myPiece) return reply({ t: 'rejected', id: msg.id, reason: 'You can only choose for your own piece.' });
           if (this.pieces[myPiece].members[0] !== me.id) return reply({ t: 'rejected', id: msg.id, reason: 'Your teammate confirms your team’s trap.' });
         } else {
-          if (actingPiece(g) !== myPiece) return reply({ t: 'rejected', id: msg.id, reason: 'Not your turn.' });
+          // A ghost battle's winner chooses its reward even out of turn; nobody else acts meanwhile.
+          const decider = g.phase === 'reward' && g.pendingReward ? g.pendingReward.piece : actingPiece(g);
+          if (decider !== myPiece)
+            return reply({ t: 'rejected', id: msg.id, reason: g.phase === 'reward' ? 'Waiting for the battle winner to choose.' : 'Not your turn.' });
           if (this.controllerOf(myPiece) !== me.id) return reply({ t: 'rejected', id: msg.id, reason: 'Your teammate controls your piece this round.' });
           if (a.type !== 'select' && (typeof msg.rev !== 'number' || msg.rev < this.phaseRev)) return reply({ t: 'rejected', id: msg.id, reason: 'stale' });
         }
@@ -632,7 +635,7 @@ export class Room {
       }
       return null;
     }
-    const i = actingPiece(g);
+    const i = g.phase === 'reward' && g.pendingReward ? g.pendingReward.piece : actingPiece(g);
     if (this.pieces[i]?.kind !== 'bot') return null;
     return botAction(seatView(g, i), this.pieces[i].bot!, this.memory(i));
   }

@@ -78,6 +78,42 @@ phone controller through a small room service on your home network.
 There is no candy, banking, protection or elimination any more. Stealing the
 life *is* coming back to life.
 
+### Ghost battles and items
+
+Ghosts can also fight each other, for an item rather than the life.
+
+* **Starting one.** After an ordinary move (not a stay, a Poltergeist throw, or
+  a trap minigame), a ghost may:
+  * battle a ghost standing on the **same space** (adjacency or passing through
+    is not enough; if several are there, it picks one); or
+  * from a **⚔ Versus space** (spaces **5** and **23**, visible in both cameras
+    and on the phone map), battle **any** ghost anywhere. Nobody is moved.
+* The ghost picks among whatever is on offer: battle a ghost, challenge the
+  living piece if in range, or end the action. Starting either minigame ends
+  the action. Traps always resolve first.
+* The other ghost needs no acceptance and no remaining turn. Its current-round
+  controller gets the usual ready and countdown. Each pair battles **once per
+  round**. The living piece gets nothing on a Versus space; with two pieces a
+  Versus space explains that there is no other ghost.
+* It is the same **Haunted Jump Rope**, with the normal window for both (no
+  curse). The life, scores, streaks and the round's order never change. The
+  loser keeps everything.
+* **Reward.** The winner draws one item after the result, from its own seeded
+  stream: **Second Roll 40%**, **Ghost Switch 40%**, **Ghostly Stride 20%**.
+  * One item per piece, visible to everyone.
+  * Winning a different item asks the winner to keep or replace, even out of
+    turn. Winning the same item changes nothing.
+  * No trading, dropping or stacking.
+* **Items** (ghosts only, one per action, never in the action that won it):
+  * *Second Roll:* after rolling, before moving. One new die replaces the old
+    one for good (a ghost still drifts at least 3).
+  * *Ghost Switch:* before rolling. Swap places with another ghost on a
+    different space. Nothing triggers from the swap; then roll and move as
+    usual.
+  * *Ghostly Stride:* before rolling, instead of rolling. Move up to 6 spaces;
+    no die is rolled.
+  * Gaining the life by any route (challenge, Reaper, Séance) clears the item.
+
 ### Teams and control
 
 * **Free-for-all:** one person or a bot per piece.
@@ -189,9 +225,15 @@ No public room service is deployed or offered.
 Local games save in this browser’s `localStorage` under keys starting with
 `one-more-room/`. Nothing else in storage is read or changed.
 
-* The save (schema 3) holds: the action order and used slots, who holds the
+* The save (schema 4) holds: the action order and used slots, who holds the
   life, streaks, scores, controllers, trap truth and public knowledge, the
-  Séance count, any pending challenge, and the RNG.
+  Séance count, any pending challenge, and the RNGs. It also holds items, the
+  action each item was won in, this round's battle pairs, and any pending
+  keep-or-replace choice, so a reload never re-draws or duplicates a reward.
+* One Life saves from before ghost battles (schema 3) are migrated with empty
+  inventories. A schema-3 save whose hidden trap sits on a new Versus space
+  (5 or 23) can't continue on the new board. The player is told so and offered
+  a fresh start; the save is never silently changed or erased.
 * Saves from the candy versions (schema 1 and 2) are refused. The player is told
   why and offered a fresh start; they are never reinterpreted.
 * **Undo** (local only) restores the start of the current or previous action with
@@ -261,6 +303,56 @@ What this shows:
 * **No other numbers were changed after measuring.** The ghost minimum move (3),
   spawns, curse steps and rope timing are still the starting values; nothing
   measured justified a change before human playtesting.
+
+### Ghost battles: baseline against the addition
+
+The same seeds with ghost battles switched off (`POLICY.ghostBattles = false`)
+and on. 600 simulated games per setting, equal-skill bots:
+
+| Measure (off → on) | 3 pieces | 4 pieces |
+|---|---|---|
+| Ghost battles per game | 0 → 1.77 (73% from Versus) | 0 → 2.62 (61% from Versus) |
+| Battles won by the ghost called out | 47% | 51% |
+| Rewards drawn (Roll / Switch / Stride; target 40 / 40 / 20) | 42% / 39% / 20% | 39% / 41% / 20% |
+| Keep-or-replace choices per game | 0.04 | 0.09 |
+| Items used per game (Roll / Switch / Stride) | 0.24 / 0.17 / 0.23 | 0.26 / 0.44 / 0.32 |
+| Life challenges per game | 16.1 → 15.3 | 25.0 → 24.0 |
+| Life transfers per game | 8.6 → 8.4 | 13.1 → 12.8 |
+| Minigames per round | 1.61 → 1.70 | 2.50 → 2.67 |
+| First holder's win share (fair) | 30% → 35% (33%) | 22% → 25% (25%) |
+| Points by seat, identical bots | 3.21 · 3.36 · 3.42 → 3.14 · 3.38 · 3.48 | 2.56 · 2.30 · 2.49 · 2.65 → 2.56 · 2.39 · 2.42 · 2.63 |
+| Sharp jumper against steady bots (points / wins) | 6.17 / 94% → 6.06 / 93% | 5.35 / 92% → 5.26 / 91% |
+| Estimated minutes (model) | 13.1 → 13.4 | 18.7 → 19.3 |
+
+Two pieces are unchanged (there is never a second ghost). Piece 1 playing
+these strategies, in points and win share:
+
+| Strategy | 3 pieces | 4 pieces |
+|---|---|---|
+| Normal bot | 3.34 / 33% | 2.63 / 28% |
+| Always battles when it can, even over a life challenge | 3.31 / 33% | 2.60 / 27% |
+| Camps on Versus spaces | 2.07 / 12% | 1.38 / 6% |
+| Always battles, one opponent shaky (vs. normal play) | 4.37 / 49% (4.40 / 49%) | 3.07 / 30% (3.07 / 30%) |
+
+What this shows (bots, not people):
+
+* Battles add about one extra minigame every ten rounds and take a few life
+  challenges' place. Items change little, as intended for a side objective.
+* **Versus camping loses**, and **pair farming gains nothing**. Always looting
+  is no better than normal play, and beating up a shaky ghost adds nothing to
+  simply having a shaky opponent.
+* **Reflex advantage is not amplified.** A sharp jumper wins about as often with
+  battles as without.
+* **One flag:** in 3-piece games the first holder's win share rose from 30% to
+  35% (fair 33%). That moves it closer to fair rather than past it, and 600
+  games have about ±2 points of noise, but it is the one structural shift. It
+  likely comes from ghosts spending actions on each other. The weights and
+  rules were not tuned in response.
+* Most items are never used. Many are lost on gaining the life, and the bots
+  use them conservatively. How people use them is the open question.
+
+The most valuable next human test is whether **choosing to fight another ghost
+is fun**, or just a distraction from the chase for the life.
 
 ## Not in this iteration
 

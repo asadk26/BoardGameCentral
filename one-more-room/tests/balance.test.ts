@@ -8,7 +8,8 @@
 import { expect, it } from 'vitest';
 import type { BotProfile, Personality, SkillLevel } from '../src/engine/bots';
 import { camper, farmer, remoteSeeker, simulateGame, type SimResult, type Strategy } from '../src/engine/sim';
-import { ROUNDS } from '../src/engine/config';
+import { POLICY, ROUNDS, VERSUS_SPACES } from '../src/engine/config';
+import { actingPiece, legalRoutes } from '../src/engine/engine';
 
 const run = process.env.BALANCE ? it : it.skip;
 const GAMES = Number(process.env.GAMES ?? 400);
@@ -114,3 +115,115 @@ run('strategies: camping, remote tiles, farming a weak ghost', () => {
     console.log(`farms piece 2    ${f(farm.points)} / ${f(farm.win * 100, 0)}%`);
   }
 }, 600_000);
+
+/** Always battles when it can (over challenging the living piece too). */
+const looter: Strategy = (view) => {
+  const s = view.state;
+  if (actingPiece(s) !== view.piece || s.phase !== 'hunt' || !s.options) return null;
+  const opp = s.options.sameSpace[0] ?? s.options.versus[0];
+  return opp === undefined ? null : { type: 'battle', opponent: opp };
+};
+
+/** Heads for a Versus space whenever one is in reach, then battles from it. */
+const versusCamper: Strategy = (view) => {
+  const s = view.state;
+  if (actingPiece(s) !== view.piece) return null;
+  if (s.phase === 'hunt') return looter(view);
+  if (s.phase !== 'choose' || s.pieces[view.piece].alive) return null;
+  const v = [...legalRoutes(s).keys()].find((d) => VERSUS_SPACES.includes(d));
+  if (v === undefined) return null;
+  return s.selection.dest === v ? { type: 'confirmMove' } : { type: 'select', dest: v };
+};
+
+function battleLine(b: Batch) {
+  const r = b.results;
+  const total = (k: 'battles' | 'versusBattles' | 'defenderWins' | 'rewardChoices') => r.reduce((a, x) => a + x.stats[k], 0);
+  const sum = (k: 'rewards' | 'itemUses') => {
+    const o: Record<string, number> = {};
+    for (const x of r) for (const [i, v] of Object.entries(x.stats[k])) o[i] = (o[i] ?? 0) + v;
+    return o;
+  };
+  const rewards = sum('rewards');
+  const nRewards = Object.values(rewards).reduce((a, v) => a + v, 0);
+  const uses = sum('itemUses');
+  const life = r.map((x) =>
+    Object.entries(x.stats.challenges)
+      .filter(([k]) => !k.startsWith('ghostBattle') && !k.startsWith('versus'))
+      .reduce((a, [, v]) => a + v, 0),
+  );
+  return {
+    battles: total('battles') / r.length,
+    versusShare: total('versusBattles') / Math.max(1, total('battles')),
+    defenderWin: total('defenderWins') / Math.max(1, total('battles')),
+    rewardMix: Object.fromEntries(Object.entries(rewards).map(([k, v]) => [k, v / Math.max(1, nRewards)])),
+    usesPerGame: Object.fromEntries(Object.entries(uses).map(([k, v]) => [k, v / r.length])),
+    choicesPerGame: total('rewardChoices') / r.length,
+    lifeChallenges: mean(life),
+    transfers: mean(r.map((x) => x.stats.transfersByRound.reduce((a, v) => a + v, 0))),
+  };
+}
+
+run(
+  'ghost battles: baseline versus with battles and items',
+  () => {
+    const was = POLICY.ghostBattles;
+    try {
+      for (const n of [2, 3, 4]) {
+        POLICY.ghostBattles = false;
+        const base = batch(n, { seed: 9000 });
+        const baseSeats = batch(n, { same: 'greedy', seed: 5000 });
+        const baseSharp = piece0(batch(n, { skills: { 0: 'sharp' }, seed: 7000 }));
+        POLICY.ghostBattles = true;
+        const add = batch(n, { seed: 9000 });
+        const addSeats = batch(n, { same: 'greedy', seed: 5000 });
+        const addSharp = piece0(batch(n, { skills: { 0: 'sharp' }, seed: 7000 }));
+        const b0 = battleLine(base);
+        const b1 = battleLine(add);
+        const s0 = summary(base);
+        const s1 = summary(add);
+        const seat = (b: Batch) => Array.from({ length: n }, (_, i) => f(mean(b.results.map((r) => r.session.game.pieces[i].score)))).join(' · ');
+        console.log(`\n── ghost battles, ${n} pieces, ${GAMES} games (baseline → with battles) ──`);
+        console.log(
+          `ghost battles/game ${f(b0.battles)} → ${f(b1.battles)} · from Versus ${f(b1.versusShare * 100, 0)}% · won by defender ${f(b1.defenderWin * 100, 0)}%`,
+        );
+        console.log(
+          `reward mix ${Object.entries(b1.rewardMix)
+            .map(([k, v]) => `${k} ${f(v * 100, 1)}%`)
+            .join(' · ')} · keep/replace choices/game ${f(b1.choicesPerGame, 2)}`,
+        );
+        console.log(
+          `items used/game ${
+            Object.entries(b1.usesPerGame)
+              .map(([k, v]) => `${k} ${f(v, 2)}`)
+              .join(' · ') || 'none'
+          }`,
+        );
+        console.log(
+          `life challenges/game ${f(b0.lifeChallenges, 2)} → ${f(b1.lifeChallenges, 2)} · life transfers/game ${f(b0.transfers, 2)} → ${f(b1.transfers, 2)}`,
+        );
+        console.log(
+          `minigames/round ${f(s0.encountersPerRound)} → ${f(s1.encountersPerRound)} · rounds with none ${f(s0.roundsNoEncounter * 100, 0)}% → ${f(s1.roundsNoEncounter * 100, 0)}% · est. minutes ${f(s0.minutes, 1)} → ${f(s1.minutes, 1)}`,
+        );
+        console.log(`first holder wins ${f(s0.firstWin * 100, 0)}% → ${f(s1.firstWin * 100, 0)}% (fair ${f(100 / n, 0)}%)`);
+        console.log(`identical bots, points by seat: ${seat(baseSeats)} → ${seat(addSeats)}`);
+        console.log(
+          `sharp jumper (piece 1) vs steady: ${f(baseSharp.points)} pts / ${f(baseSharp.win * 100, 0)}% → ${f(addSharp.points)} / ${f(addSharp.win * 100, 0)}%`,
+        );
+        expect(s1.maxMinigamesInAction).toBeLessThanOrEqual(1);
+        if (n >= 3) {
+          const norm = piece0(add);
+          const loot = piece0(batch(n, { strategies: [looter], seed: 9000 }));
+          const camp = piece0(batch(n, { strategies: [versusCamper], seed: 9000 }));
+          const weak = piece0(batch(n, { skills: { 1: 'shaky' }, seed: 9000 }));
+          const farm = piece0(batch(n, { strategies: [looter], skills: { 1: 'shaky' }, seed: 9000 }));
+          console.log(
+            `piece 1 strategies: normal ${f(norm.points)} / ${f(norm.win * 100, 0)}% · always battles ${f(loot.points)} / ${f(loot.win * 100, 0)}% · camps Versus ${f(camp.points)} / ${f(camp.win * 100, 0)}% · piece 2 shaky: normal ${f(weak.points)} / ${f(weak.win * 100, 0)}% vs always battles ${f(farm.points)} / ${f(farm.win * 100, 0)}%`,
+          );
+        }
+      }
+    } finally {
+      POLICY.ghostBattles = was;
+    }
+  },
+  900_000,
+);
