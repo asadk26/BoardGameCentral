@@ -7,9 +7,9 @@
 
 import { expect, it } from 'vitest';
 import type { BotProfile, Personality, SkillLevel } from '../src/engine/bots';
-import { camper, farmer, remoteSeeker, simulateGame, type SimResult, type Strategy } from '../src/engine/sim';
+import { camper, farmer, headTo, remoteSeeker, simulateGame, type SimResult, type Strategy } from '../src/engine/sim';
 import { POLICY, ROUNDS, VERSUS_SPACES } from '../src/engine/config';
-import { actingPiece, legalRoutes } from '../src/engine/engine';
+import { actingPiece, moveLandings } from '../src/engine/engine';
 
 const run = process.env.BALANCE ? it : it.skip;
 const GAMES = Number(process.env.GAMES ?? 400);
@@ -109,7 +109,7 @@ run('strategies: camping, remote tiles, farming a weak ghost', () => {
     const farm = piece0(batch(n, { strategies: [farmer(1)], skills: { 1: 'shaky' } }));
     console.log(`\n── strategies, ${n} pieces (piece 1 score / win share) ──`);
     console.log(`normal bot       ${f(base.points)} / ${f(base.win * 100, 0)}%`);
-    console.log(`never moves      ${f(camp.points)} / ${f(camp.win * 100, 0)}%`);
+    console.log(`wanders aimlessly ${f(camp.points)} / ${f(camp.win * 100, 0)}%`);
     console.log(`seeks remote     ${f(remote.points)} / ${f(remote.win * 100, 0)}%`);
     console.log(`(piece 2 shaky)  ${f(weak.points)} / ${f(weak.win * 100, 0)}%`);
     console.log(`farms piece 2    ${f(farm.points)} / ${f(farm.win * 100, 0)}%`);
@@ -130,9 +130,9 @@ const versusCamper: Strategy = (view) => {
   if (actingPiece(s) !== view.piece) return null;
   if (s.phase === 'hunt') return looter(view);
   if (s.phase !== 'choose' || s.pieces[view.piece].alive) return null;
-  const v = [...legalRoutes(s).keys()].find((d) => VERSUS_SPACES.includes(d));
+  const v = moveLandings(s).find((d) => VERSUS_SPACES.includes(d));
   if (v === undefined) return null;
-  return s.selection.dest === v ? { type: 'confirmMove' } : { type: 'select', dest: v };
+  return headTo(s, v);
 };
 
 function battleLine(b: Batch) {

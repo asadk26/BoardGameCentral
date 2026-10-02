@@ -6,7 +6,6 @@ import {
   CURSE_MULTIPLIERS,
   curseMultiplier,
   ENTRANCE,
-  GHOST_MIN_MOVE,
   nodeKind,
   ROOMS,
   SEANCE_LIMIT,
@@ -16,7 +15,7 @@ import {
   VERSUS_SPACES,
   type ItemId,
 } from './engine/config';
-import { actingPiece, activeController, livingPiece } from './engine/engine';
+import { activeController, livingPiece } from './engine/engine';
 import type { Challenge, ChallengeOutcome, GameState, LogEntry, MovePreview } from './engine/types';
 import type { Personalization } from './engine/save';
 
@@ -52,14 +51,27 @@ export function controllerLine(state: GameState, piece: number): string | null {
   return `${p.controllers[activeController(state, piece)]}’s round`;
 }
 
+/** "6 spaces" (or Ghostly Stride / Second Roll), exactly how far this move goes. */
 export function rollLine(state: GameState): string | null {
-  if (state.rollInfo?.kind === 'stride') return `Ghostly Stride • ${STRIDE_ALLOWANCE} spaces`;
+  if (state.rollInfo?.kind === 'stride') return `Ghostly Stride · ${STRIDE_ALLOWANCE} spaces`;
   if (state.die === null) return null;
-  if (state.rollInfo?.rerolledFrom !== undefined)
-    return `Second Roll: ${state.rollInfo.rerolledFrom} → ${state.die} • Move up to ${state.allowance} space${state.allowance === 1 ? '' : 's'}`;
-  const me = state.pieces[actingPiece(state)];
-  if (!me.alive && state.die < GHOST_MIN_MOVE) return `Rolled ${state.die} • Ghost drift: ${state.allowance} spaces`;
-  return `Rolled ${state.die} • Move up to ${state.allowance} space${state.allowance === 1 ? '' : 's'}`;
+  const n = `${state.allowance} space${state.allowance === 1 ? '' : 's'}`;
+  if (state.rollInfo?.rerolledFrom !== undefined) return `Second Roll ${state.rollInfo.rerolledFrom} → ${state.die} · ${n}`;
+  return n;
+}
+
+const ROMAN = ['', 'I', 'II', 'III'];
+/** "Curse II: shorter jumps", from a jump multiplier (1 = no curse). */
+export function cursePhrase(multiplier: number): string {
+  const tier = Math.round((1 - multiplier) * 10);
+  return tier <= 0 ? 'no curse' : `Curse ${ROMAN[Math.min(3, tier)]}: shorter jumps`;
+}
+
+/** "Maya steals life" / "Leo keeps life" / "Ana wins an item". */
+export function outcomeHeadline(ch: Challenge, winner: number, state: GameState): string {
+  const name = state.pieces[winner]?.name ?? '?';
+  if (ch.host === 'ghostBattle' || ch.host === 'versus') return `${name} wins an item`;
+  return winner === ch.livingAtStart ? `${name} keeps life` : `${name} steals life`;
 }
 
 export function superReaperLine(state: GameState): string {
@@ -76,7 +88,7 @@ export const ITEM_INFO: Record<ItemId, { name: string; icon: string; when: strin
     name: 'Second Roll',
     icon: '🎲',
     when: 'After you roll, before you move',
-    what: 'Roll one new die. The new result replaces the old one for good, even if it is lower (a ghost still drifts at least 3).',
+    what: 'Roll one new die before you move. The new number replaces the old one for good, even if it is lower.',
   },
   ghostSwitch: {
     name: 'Ghost Switch',
@@ -88,7 +100,7 @@ export const ITEM_INFO: Record<ItemId, { name: string; icon: string; when: strin
     name: 'Ghostly Stride',
     icon: '👣',
     when: 'Before you roll, instead of rolling',
-    what: `Move up to ${STRIDE_ALLOWANCE} spaces without rolling. You may stop early.`,
+    what: `Move exactly ${STRIDE_ALLOWANCE} spaces without rolling.`,
   },
 };
 
@@ -132,19 +144,17 @@ export function challengeHost(ch: Challenge, state: GameState): string {
   return `The Reaper summons ${name(other)} and ${living}: winner holds the life.`;
 }
 
+/** A few words about a possible landing (public facts only). */
 export function previewSummary(p: MovePreview, state: GameState, pz: Personalization): string {
-  const bits: string[] = [];
-  if (p.dest === 'stay') bits.push('Stay here');
-  else bits.push(`${nodeName(p.dest, pz)} (${p.path.length - 1} ${p.path.length === 2 ? 'step' : 'steps'}${p.usesSecret ? ', secret passage' : ''}${p.usesWall ? ', through the wall' : ''})`);
-  if (p.superReaper) bits.push(p.superReaper === 'seance' ? 'Super Reaper: Séance for everyone' : 'Super Reaper: Reaper’s Challenge');
-  else if (p.known === 'reaper') bits.push(state.pieces[actingPiece(state)].alive ? 'Reaper’s Challenge: pick a ghost to duel' : 'Reaper’s Challenge: duel the living piece from here');
-  else if (p.known === 'seance') bits.push('Séance for everyone');
-  else if (p.known === 'poltergeist') bits.push('Poltergeist: thrown elsewhere');
-  if (p.canChallenge) bits.push(`${state.pieces[livingPiece(state)].name} in range — you may challenge`);
-  if (p.battleTargets.length) bits.push(`${p.battleTargets.map((t) => state.pieces[t].name).join(', ')} here — you may battle for an item`);
-  if (p.versus) bits.push('Versus space: you may battle any ghost for an item');
-  if (p.threats.length) bits.push(`in range of ${p.threats.map((t) => state.pieces[t].name).join(', ')} now`);
-  return bits.join(' • ');
+  const bits: string[] = [nodeName(p.dest, pz)];
+  if (p.superReaper) bits.push(p.superReaper === 'seance' ? 'Super Reaper: Séance' : 'Super Reaper: Reaper duel');
+  else if (p.known === 'reaper') bits.push('Reaper duel');
+  else if (p.known === 'seance') bits.push('Séance');
+  else if (p.known === 'poltergeist') bits.push('Poltergeist');
+  if (p.canChallenge) bits.push(`can challenge ${state.pieces[livingPiece(state)].name}`);
+  if (p.battleTargets.length || p.versus) bits.push('can battle a ghost');
+  if (p.threats.length) bits.push(`near ${p.threats.map((t) => state.pieces[t].name).join(', ')}`);
+  return bits.join(' · ');
 }
 
 export function outcomeLines(o: ChallengeOutcome, state: GameState, pz: Personalization): string[] {
@@ -183,11 +193,9 @@ export function logLine(e: LogEntry, state: GameState, pz: Personalization): str
     case 'roundStart':
       return `Round ${e.round}: ${e.schedule.map(name).join(' → ')}.`;
     case 'roll':
-      return `${name(e.piece)} rolled ${e.die}${e.allowance !== e.die ? ` (ghost drift ${e.allowance})` : ''}.`;
+      return `${name(e.piece)} rolled ${e.die}.`;
     case 'move':
-      return `${name(e.piece)} moved ${e.path.length - 1} to ${placeName(e.path[e.path.length - 1], pz)}${e.usesSecret ? ' through a secret passage' : ''}${e.usesWall ? ' through the wall' : ''}.`;
-    case 'stay':
-      return `${name(e.piece)} stayed.`;
+      return e.remaining > 0 ? null : `${name(e.piece)} landed on ${placeName(e.path[e.path.length - 1], pz)}.`;
     case 'trapRevealed':
       return `${EFFECT_NAMES[e.effect]} revealed at ${placeName(e.node, pz)}.`;
     case 'seanceDormant':

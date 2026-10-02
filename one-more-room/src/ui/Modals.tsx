@@ -1,4 +1,4 @@
-import { CHALLENGE, GHOST_MIN_MOVE, GHOST_SPAWNS, ITEM_WEIGHTS, ROUNDS, SEANCE_LIMIT, SUPER_REAPER, VERSUS_SPACES } from '../engine/config';
+import { CHALLENGE, GHOST_SPAWNS, ITEM_WEIGHTS, ROUNDS, SEANCE_LIMIT, SUPER_REAPER, VERSUS_SPACES } from '../engine/config';
 import { ITEM_INFO } from '../text';
 import { undoInfo } from '../engine/engine';
 import { discardSave, doUndo, goToSetup, goToTitle, setState, updateSettings, useStore } from '../store';
@@ -11,15 +11,17 @@ export function RulesContent() {
   const c = CHALLENGE.rope;
   return (
     <div className="rules">
-      <p className="lede">
-        There is one life in the mansion. One piece holds it; everyone else is a ghost trying to steal it. Whoever holds the life when
-        a round ends scores a point. Ten rounds — most points wins.
-      </p>
+      <ul className="quick-rules">
+        <li>❤ One piece is alive. Holding it when a round’s bell rings scores 1 point. Ten rounds.</li>
+        <li>👻 Everyone else is a ghost. Land on the living piece or right next to it to challenge for the life.</li>
+        <li>🎲 Roll, move exactly that many spaces, pick a path at forks.</li>
+        <li>🪢 Challenges are Haunted Jump Rope: jump as the rope reaches your feet.</li>
+      </ul>
       <h3>Pieces, teams and control</h3>
       <p>
-        Two to four pieces play. In <strong>Free-for-all</strong> each piece is one person or a bot. In <strong>Team Battle</strong> one or two
-        people share a piece (uneven teams are fine): the first person controls it in odd rounds, the second in even rounds — every
-        move and every jump that round, even out of turn. A team shares one score, one position and one trap.
+        The game is made for four pieces. Any piece nobody plays is a bot, so one, two or three people still get the full four-piece game
+        (Advanced settings allow fewer). In teams, two people share a piece: the first controls it in odd rounds, the second in even
+        rounds — every move and every jump that round. A team shares one score, one position and one trap.
       </p>
       <h3>Before the first round</h3>
       <ol>
@@ -42,9 +44,11 @@ export function RulesContent() {
       </p>
       <h3>Moving</h3>
       <ul>
-        <li>Roll one die. The living piece moves up to its roll. A ghost always drifts at least {GHOST_MIN_MOVE} (a 1 or 2 counts as {GHOST_MIN_MOVE}).</li>
-        <li>Stop anywhere within reach, or stay. Pieces never block each other and may share spaces.</li>
-        <li>Everyone may take one secret passage per move. Only ghosts may slip through the two dotted wall links (dining room ↔ conservatory, laboratory ↔ nursery).</li>
+        <li>Roll one die and move <strong>exactly</strong> that many spaces, one at a time — a 2 is two spaces, living or ghost. No stopping short.</li>
+        <li>Straight corridors walk on by themselves. At a fork the piece stops and numbered arrows show the ways on; pick one.</li>
+        <li>You can’t turn straight back along the corridor you just came down (the board has no dead ends). Going round a loop is fine.</li>
+        <li>Only where you land counts: passing over a trap, a ghost or a Versus space does nothing.</li>
+        <li>Everyone may take one secret passage per move. Only ghosts may slip through the two dotted wall links (dining room ↔ conservatory, laboratory ↔ nursery). Pieces never block each other.</li>
       </ul>
       <h3>Stealing the life</h3>
       <p>
@@ -55,19 +59,21 @@ export function RulesContent() {
       </p>
       <h3>Haunted Jump Rope</h3>
       <p>
-        Eight shared sweeps that get faster every time the rope comes round (about 1.3 s apart at first, 0.8 s by the end), one press per sweep — holding or mashing never counts twice. The most clean jumps wins. Tied at the top? Only
-        the tied jump up to {c.extraSweeps} sudden-death sweeps; then the steadier timing on the eight sweeps wins; an exact tie gets the
-        Reaper’s seeded verdict. Exactly one piece always holds the life afterwards.
+        Watch the TV. Press Jump (your phone, your key, or the on-screen button) and your character jumps — one press, one jump; holding or
+        tapping fast doesn’t jump higher, and you must land before jumping again. A sweep counts when your feet are above the rope as it
+        passes under them; if it catches you, you stumble. Eight sweeps, getting faster (about 1.4 s apart at first, 0.85 s by the end). Most
+        clean jumps wins. Tied at the top? Only the tied jump up to {c.extraSweeps} sudden-death sweeps; then the more centred jumps win; an
+        exact tie gets the Reaper’s seeded verdict. The first rope of a match starts with three practice sweeps.
       </p>
       <p>
-        <strong>The curse:</strong> the longer you hold the life, the narrower your jump window — normal after 0–1 rounds held, 10% narrower after 2,
-        20% after 3, 30% after 4 or more. Losing the life resets it; winning a defence doesn’t change it. The rope is the same for everyone;
-        only how precisely you must jump changes, and the screen shows your own window.
+        <strong>The curse:</strong> the longer you hold the life, the shorter and lower your jumps — normal after 0–1 rounds held, then Curse
+        I, II and III (10%, 20%, 30% shorter) after 2, 3 and 4+ rounds. A shorter jump needs better timing, but every sweep stays clearable.
+        Losing the life resets it; winning a defence doesn’t change it. The rope is the same for everyone.
       </p>
       <h3>Traps and the Super Reaper</h3>
       <p>
-        Traps trigger when a move ends on them (living or ghost) and stay revealed. Passing over, staying, or being thrown onto a space never
-        triggers anything.
+        Traps trigger when a move ends on them (living or ghost) and stay revealed. Passing over or being thrown onto a space never triggers
+        anything.
       </p>
       <ul>
         <li>
@@ -90,7 +96,7 @@ export function RulesContent() {
       <p>One minigame per action at most: a trap that starts a challenge ends the action.</p>
       <h3>Ghost battles and items</h3>
       <p>
-        Ghosts can also fight each other — not for the life, but for an item. After an ordinary move (not a stay, not a trap throw), a ghost may{' '}
+        Ghosts can also fight each other — not for the life, but for an item. After an ordinary move (not a trap throw), a ghost may{' '}
         <strong>battle another ghost</strong> that is on the very same space (passing through or standing next to it isn’t enough), or — from one of
         the two <strong>⚔ Versus spaces</strong> ({VERSUS_SPACES.join(' and ')}) — battle <em>any</em> ghost, wherever it is. Nobody moves. The
         other ghost doesn’t need to agree or have a turn left; its current controller just gets the usual ready and countdown. The same two
@@ -99,8 +105,8 @@ export function RulesContent() {
       </p>
       <p>
         When a ghost lands where it could either challenge the living piece or battle a ghost, it picks one (or neither) — starting either ends
-        the action. A trap that starts a minigame always comes first. A ghost battle is the same Haunted Jump Rope with the normal window for
-        both (no curse). The life, the scores and the round order don’t change. The winner draws one random item —{' '}
+        the action. A trap that starts a minigame always comes first. A ghost battle is the same Haunted Jump Rope with full jumps for both
+        (no curse). The life, the scores and the round order don’t change. The winner draws one random item —{' '}
         {ITEM_WEIGHTS.map(([id, w]) => `${ITEM_INFO[id].name} ${Math.round(w * 100)}%`).join(', ')} — and the loser loses nothing.
       </p>
       <ul>

@@ -36,18 +36,22 @@ export interface RoomPlot {
   wallHeight: number;
 }
 
-/** Room plots. Corridors run through them; walls get doorways where they do. */
+/**
+ * Room plots. Corridors run through them; walls get doorways where they do.
+ * Room walls are knee-high rails: rooms read by their floors and rails, and
+ * never hide a piece.
+ */
 export const ROOM_PLOTS: RoomPlot[] = [
-  { node: 3, key: 'kitchen', rect: { x0: -7.1, z0: 5.0, x1: -2.9, z1: 6.9 }, floor: '#6b4a33', accent: '#e8913a', wallHeight: 0.8 },
-  { node: 7, key: 'dining', rect: { x0: -12.3, z0: 2.9, x1: -8.9, z1: 6.7 }, floor: '#5a2230', accent: '#e05262', wallHeight: 0.8 },
-  { node: 10, key: 'conservatory', rect: { x0: -9.2, z0: -2.9, x1: -6.9, z1: 1.1 }, floor: '#2f4a33', accent: '#7fd36b', wallHeight: 0.8 },
-  { node: 15, key: 'attic', rect: { x0: -3.1, z0: -7.0, x1: -0.95, z1: -3.0 }, floor: '#5b4632', accent: '#d8a657', wallHeight: 0.8 },
-  { node: 16, key: 'lair', rect: { x0: -0.95, z0: -7.0, x1: 0.95, z1: -3.0 }, floor: '#23324a', accent: '#5ff2e0', wallHeight: 0.8 },
-  { node: 17, key: 'crypt', rect: { x0: 0.95, z0: -7.0, x1: 3.1, z1: -3.0 }, floor: '#3d3d48', accent: '#a7b4d8', wallHeight: 0.8 },
-  { node: 22, key: 'laboratory', rect: { x0: 6.9, z0: -2.9, x1: 9.2, z1: 1.1 }, floor: '#233d44', accent: '#6ef0a8', wallHeight: 0.8 },
-  { node: 25, key: 'nursery', rect: { x0: 8.9, z0: 2.9, x1: 12.3, z1: 6.7 }, floor: '#4a3552', accent: '#f29ad6', wallHeight: 0.8 },
-  { node: 29, key: 'library', rect: { x0: 2.9, z0: 5.0, x1: 7.1, z1: 6.9 }, floor: '#3f2a1f', accent: '#c98a4b', wallHeight: 0.8 },
-  { node: ENTRANCE, key: 'entrance', rect: { x0: -3.0, z0: 7.0, x1: 3.0, z1: 10.4 }, floor: '#5a3b24', accent: '#f2b84b', wallHeight: 0.8 },
+  { node: 3, key: 'kitchen', rect: { x0: -7.1, z0: 5.0, x1: -2.9, z1: 6.9 }, floor: '#6b4a33', accent: '#e8913a', wallHeight: 0.34 },
+  { node: 7, key: 'dining', rect: { x0: -12.3, z0: 2.9, x1: -8.9, z1: 6.7 }, floor: '#5a2230', accent: '#e05262', wallHeight: 0.34 },
+  { node: 10, key: 'conservatory', rect: { x0: -9.2, z0: -2.9, x1: -6.9, z1: 1.1 }, floor: '#2f4a33', accent: '#7fd36b', wallHeight: 0.34 },
+  { node: 15, key: 'attic', rect: { x0: -3.1, z0: -7.0, x1: -0.95, z1: -3.0 }, floor: '#5b4632', accent: '#d8a657', wallHeight: 0.34 },
+  { node: 16, key: 'lair', rect: { x0: -0.95, z0: -7.0, x1: 0.95, z1: -3.0 }, floor: '#23324a', accent: '#5ff2e0', wallHeight: 0.34 },
+  { node: 17, key: 'crypt', rect: { x0: 0.95, z0: -7.0, x1: 3.1, z1: -3.0 }, floor: '#3d3d48', accent: '#a7b4d8', wallHeight: 0.34 },
+  { node: 22, key: 'laboratory', rect: { x0: 6.9, z0: -2.9, x1: 9.2, z1: 1.1 }, floor: '#233d44', accent: '#6ef0a8', wallHeight: 0.34 },
+  { node: 25, key: 'nursery', rect: { x0: 8.9, z0: 2.9, x1: 12.3, z1: 6.7 }, floor: '#4a3552', accent: '#f29ad6', wallHeight: 0.34 },
+  { node: 29, key: 'library', rect: { x0: 2.9, z0: 5.0, x1: 7.1, z1: 6.9 }, floor: '#3f2a1f', accent: '#c98a4b', wallHeight: 0.34 },
+  { node: ENTRANCE, key: 'entrance', rect: { x0: -3.0, z0: 7.0, x1: 3.0, z1: 10.4 }, floor: '#5a3b24', accent: '#f2b84b', wallHeight: 0.34 },
 ];
 
 /**
@@ -160,14 +164,15 @@ export const WALLS: WallSeg[] = (() => {
   const e = ROOM_PLOTS.find((p) => p.key === 'entrance')!.rect;
   // Its side walls stop where the outer wall takes over.
   const foyer = [
-    ...wallWithDoors([e.x1, e.z0], [e.x1, 9.0], 0.8, '#4a3a5c', false),
-    ...wallWithDoors([e.x0, 9.0], [e.x0, e.z0], 0.8, '#4a3a5c', false),
+    ...wallWithDoors([e.x1, e.z0], [e.x1, 9.0], 0.34, '#4a3a5c', false),
+    ...wallWithDoors([e.x0, 9.0], [e.x0, e.z0], 0.34, '#4a3a5c', false),
   ];
   const outerColor = '#3a2b4d';
   const outer = MANSION_OUTLINE.flatMap((a, i) => {
     const b = MANSION_OUTLINE[(i + 1) % MANSION_OUTLINE.length];
     const isFront = a[1] === FRONT_DOOR[1] && b[1] === FRONT_DOOR[1];
-    return wallWithDoors(a, b, 1.35, outerColor, true, isFront ? [FRONT_DOOR] : []);
+    // Low outer walls: a cut-away dolls' house, so no wall ever stands between the camera and a piece for long.
+    return wallWithDoors(a, b, 0.7, outerColor, true, isFront ? [FRONT_DOOR] : []);
   });
   return dedupeShared([...inner, ...foyer, ...outer]);
 })();

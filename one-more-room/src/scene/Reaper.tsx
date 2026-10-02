@@ -89,16 +89,17 @@ function SuperReaper({ reduced, effect, seancesLeft }: { reduced: boolean; effec
   });
   const glow = effect === 'seance' ? '#ff3d6e' : '#b36bff';
   return (
-    <group position={[x - 0.75, 0, z]}>
+    // Beside the space on its open east side (no corridor arrives from there), so it never stands between the camera and a piece.
+    <group position={[x + 1.0, 0, z]}>
       <group ref={ref}>
-        <ReaperModel glow={glow} scale={0.95} />
+        <ReaperModel glow={glow} scale={0.72} />
       </group>
-      <mesh position={[0.75, 0.16, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[-1.0, 0.16, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[0.44, 0.6, 36]} />
         <meshBasicMaterial color={glow} transparent opacity={0.9} toneMapped={false} />
       </mesh>
       <Label
-        pos={[0, 1.85, 0]}
+        pos={[0.2, 1.5, 0]}
         lines={['Super Reaper', effect === 'seance' ? `Séance · ${seancesLeft} left` : 'Reaper’s Challenge']}
         scale={0.4}
         color={effect === 'seance' ? '#ff7b98' : '#d6a6ff'}

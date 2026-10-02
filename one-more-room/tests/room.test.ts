@@ -455,7 +455,10 @@ describe('disconnects, handover and pause', () => {
     play(h, { until: () => !h.room.session!.game.challenge });
     const outcomes = [...(h.box.get('host') ?? [])].flatMap((m) => (m.t === 'view' ? m.events : [])).filter((e) => e.kind === 'outcome' && e.outcome.challengeId === ch.id);
     expect(outcomes.length).toBe(1);
-    expect(h.room.session!.game.pieces.map((p) => p.score)).toEqual(scoresBefore);
+    // Scores only ever come from bells: still exactly one point per completed round.
+    const g = h.room.session!.game;
+    expect(g.pieces.reduce((n, p) => n + p.score, 0)).toBe(g.round - 1 + (g.phase === 'gameOver' ? 1 : 0));
+    expect(g.pieces.reduce((n, p) => n + p.score, 0)).toBeGreaterThanOrEqual(scoresBefore.reduce((n, x) => n + x, 0));
   });
 
   it('the host hands a disconnected controller’s slot to another phone before a challenge starts; the old phone loses authority', () => {

@@ -69,6 +69,8 @@ export interface AppState {
   setupMode: 'ffa' | 'teams';
   /** Advanced: allow fewer than four pieces (off by default). */
   fewerPieces: boolean;
+  /** The first rope of a match has a practice; after that just a countdown. */
+  ropePracticed: boolean;
   settings: Settings;
   cameraMode: 'follow' | 'overview';
   tipDismissed: boolean;
@@ -222,6 +224,7 @@ let state: AppState = {
   setupPieces: prefs.setupPieces,
   setupMode: prefs.setupMode,
   fewerPieces: prefs.fewerPieces,
+  ropePracticed: false,
   settings: loadSettings(),
   cameraMode: 'follow',
   tipDismissed: false,
@@ -266,7 +269,13 @@ director.subscribe(() => {
 });
 
 // Read-only handle for automated browser checks and debugging.
-(globalThis as unknown as { __omr?: unknown }).__omr = { getState, director, act: (a: Action) => act(a) };
+(globalThis as unknown as { __omr?: unknown }).__omr = {
+  getState,
+  director,
+  act: (a: Action) => act(a),
+  /** For automated visual checks: show a crafted position (local games only). */
+  setGame: (g: GameState) => state.session && state.mode === 'local' && setState({ session: { ...state.session, game: g, turnStart: g } }),
+};
 director.onCue = (s) => audio.play(s);
 
 function applyAudioSettings(s: Settings) {
@@ -456,6 +465,7 @@ export function startGame(lineup: SetupPiece[] = state.setupPieces) {
     modal: null,
     tipDismissed: false,
     banner: null,
+    ropePracticed: false,
     placement: { seat: null, draft: null, confirmed: false },
   });
   audio.midnight = false;
@@ -522,6 +532,10 @@ export function playAgain() {
       return { names: seat.kind === 'bot' ? [p.controllers[0].replace(/ \(bot\)$/, '')] : p.controllers.slice(), character: p.character, ...seat };
     }),
   );
+}
+
+export function markRopePracticed() {
+  if (!state.ropePracticed) setState({ ropePracticed: true });
 }
 
 export function toggleCamera() {

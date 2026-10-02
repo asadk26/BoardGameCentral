@@ -87,7 +87,7 @@ class Director {
   }
 
   play(events: LogEntry[], before: GameState, after: GameState) {
-    const step = 0.26 / this.speed;
+    const step = 0.34 / this.speed; // one space at a time, slow enough to count along
     let t = Math.max(now(), this.end);
     const cue = (sound: string, at: number) => this.cues.push({ t: at, sound });
     const above = (piece: number, h = 1.5): V3 => {
@@ -131,8 +131,6 @@ class Director {
           t += dur;
           break;
         }
-        case 'stay':
-          break;
         case 'trapRevealed': {
           const label = e.effect === 'reaper' ? 'A Reaper rises!' : e.effect === 'seance' ? 'Séance!' : 'Poltergeist!';
           cue(e.effect === 'poltergeist' ? 'whoosh' : 'reaper', t);

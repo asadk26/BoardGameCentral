@@ -1,16 +1,18 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CHARACTERS, ROUNDS } from '../engine/config';
-import { actingPiece, finalScores, legalRoutes, livingPiece, previewMove, undoInfo } from '../engine/engine';
+import { actingPiece, finalScores, livingPiece, previewMove, undoInfo } from '../engine/engine';
 import type { GameState } from '../engine/types';
 import { director } from '../director';
 import { act, goToSetup, isBotSeat, playAgain, setState, toggleCamera, useStore } from '../store';
-import { controllerLine, curseLine, logLine, nodeName, outcomeLines, placeName, previewSummary, rollLine, superReaperLine } from '../text';
+import { controllerLine, cursePhrase, logLine, nodeName, outcomeLines, previewSummary, rollLine } from '../text';
+import { curseMultiplier } from '../engine/config';
 import { hudInsets } from '../scene/shared';
 import { PlayerBadge } from './Dialog';
 import { Die } from './Dice';
 import { PlacementScreen } from './Placement';
-import { ChallengeStage } from './Challenges';
+import { ChallengeStage, ResultFlash } from './Challenges';
 import { EncounterChoices, ItemActions, ItemBadge, RewardChoice, RewardReveal, rewardDecider } from './Items';
+import { forkChoices, stepFor, type ForkChoice } from '../forks';
 
 const colorOf = (id: string) => CHARACTERS.find((c) => c.id === id)!.color;
 const charName = (id: string) => CHARACTERS.find((c) => c.id === id)!.name;
@@ -18,6 +20,7 @@ const charName = (id: string) => CHARACTERS.find((c) => c.id === id)!.name;
 export function Hud() {
   const game = useStore((s) => s.session?.game);
   const placement = useStore((s) => s.placement);
+  const playMode = useStore((s) => s.mode);
   const topRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const leftRef = useRef<HTMLDivElement>(null);
@@ -69,6 +72,7 @@ export function Hud() {
       <FirstTurnTip game={game} />
       <RoundBanner />
       {game.phase === 'challenge' && game.challenge && <ChallengeStage game={game} />}
+      {playMode === 'room' && game.phase !== 'challenge' && game.lastOutcome && <ResultFlash key={game.lastOutcome.challengeId} outcome={game.lastOutcome} game={game} />}
     </div>
   );
 }
@@ -82,14 +86,11 @@ function LifeRoll({ game }: { game: GameState }) {
     <div className="hud">
       <div className="life-roll" role="dialog" aria-label="Roll for life">
         <h2>Who starts alive?</h2>
-        <p>
-          The traps are set. Now every piece rolls one die: the <b>highest roll starts alive</b> in the Entrance Hall, and everyone else
-          starts as a ghost on the far side of the mansion. Tied leaders roll again.
-        </p>
+        <p>Highest roll starts alive ❤ · everyone else is a ghost 👻</p>
         <ul className="lr-pieces">
           {game.pieces.map((p, i) => (
             <li key={p.id}>
-              <PlayerBadge n={i + 1} color={colorOf(p.character)} size={22} /> {p.name} <span className="muted">· {charName(p.character)}</span>
+              <PlayerBadge n={i + 1} color={colorOf(p.character)} size={22} /> {p.name} {seats[i]?.kind === 'bot' && <span className="tag bot">BOT</span>}
             </li>
           ))}
         </ul>
@@ -110,7 +111,6 @@ function TopBar({ game, innerRef }: { game: GameState; innerRef: React.RefObject
   const session = useStore((s) => s.session)!;
   const saveError = useStore((s) => s.saveError);
   const playMode = useStore((s) => s.mode);
-  const mansion = useStore((s) => s.personalization.mansionName);
   const undo = undoInfo(session);
   const actingIdx = actingPiece(game);
   const me = game.pieces[actingIdx];
@@ -118,101 +118,72 @@ function TopBar({ game, innerRef }: { game: GameState; innerRef: React.RefObject
   return (
     <div className="topbar" ref={innerRef}>
       <div className="where">
-        <span className="mansion">{mansion}</span>
         <span className="round">
-          Round {game.round} / {ROUNDS}
-          {game.round === ROUNDS ? ' • final round' : ''}
+          Round {game.round}/{ROUNDS}
         </span>
-        <span className="now">
-          <PlayerBadge n={actingIdx + 1} color={colorOf(me.character)} size={22} /> {me.name} {me.alive ? '(alive)' : '(ghost)'}
-          {controllerLine(game, actingIdx) ? ` • ${controllerLine(game, actingIdx)}` : ''}
+        <span className="now turn-banner" style={{ borderColor: colorOf(me.character) }}>
+          <span aria-hidden="true">{me.alive ? '❤' : '👻'}</span> {me.name}’s turn
         </span>
-        <span className="order" aria-label="Action order this round">
+        <span className="order" aria-label="Turn order this round">
           {game.schedule.map((p, k) => (
-            <span key={p} className={`ord ${k < game.slot ? 'done' : k === game.slot ? 'now' : ''}`} title={k < game.slot ? 'Has acted' : k === game.slot ? 'Acting now' : 'Still to act'}>
+            <span key={p} className={`ord ${k < game.slot ? 'done' : k === game.slot ? 'now' : ''}`} title={game.pieces[p].name}>
               <PlayerBadge n={p + 1} color={colorOf(game.pieces[p].character)} size={18} />
-              {k < game.schedule.length - 1 && <span className="arrow">›</span>}
             </span>
           ))}
         </span>
       </div>
       <div className="tools">
         <button className="btn tool view-toggle" onClick={toggleCamera} aria-pressed={mode === 'overview'} title="Keyboard: V">
-          {mode === 'overview' ? 'Follow piece' : 'View board'} <kbd>V</kbd>
+          {mode === 'overview' ? 'Follow' : 'Whole board'} <kbd>V</kbd>
         </button>
-        {playMode === 'local' && (
-          <button
-            className="btn tool"
-            disabled={!canUndo}
-            onClick={() => setState({ modal: 'confirmUndo' })}
-            title={canUndo ? `Restore the start of ${undo.pieceName}’s action (round ${undo.round})` : 'Nothing to undo yet'}
-          >
-            Undo{canUndo ? ` ${undo.pieceName}’s action` : ''}
+        {canUndo && (
+          <button className="btn tool" onClick={() => setState({ modal: 'confirmUndo' })} title={`Back to the start of ${undo.pieceName}’s turn`}>
+            Undo
           </button>
         )}
         <button className="btn tool" onClick={() => setState({ modal: 'rules' })}>
-          Rules
-        </button>
-        <button className="btn tool" onClick={() => setState({ modal: 'settings' })} aria-label="Sound and motion settings">
-          Sound
+          Help
         </button>
         <button className="btn tool" onClick={() => setState({ modal: 'menu' })}>
           Menu
         </button>
-        <span className={`saved ${saveError ? 'err' : ''}`} role="status">
-          {playMode === 'room' ? 'Phone room' : saveError ? 'Could not save on this device' : 'Saved on this device'}
-        </span>
+        {saveError && playMode === 'local' && (
+          <span className="saved err" role="status">
+            Not saved
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-export function PieceStatus({ game, i }: { game: GameState; i: number }) {
-  const p = game.pieces[i];
-  if (!p.alive) return <span className="status ghosted">👻 ghost — steal the life</span>;
-  const curse = curseLine(p.streak);
-  return (
-    <>
-      <span className="status alive">❤ holds the life</span>
-      {curse && <span className="status curse">{curse}</span>}
-    </>
-  );
-}
-
 function PiecesPanel({ game, innerRef }: { game: GameState; innerRef: React.RefObject<HTMLDivElement | null> }) {
-  const pz = useStore((s) => s.personalization);
   const seats = useStore((s) => s.seats);
   const acting = actingPiece(game);
   return (
-    <div className="players" ref={innerRef} aria-label="Pieces">
+    <div className="players" ref={innerRef} aria-label="Scores">
       {game.pieces.map((p, i) => {
-        const pos = game.schedule.indexOf(i);
+        const curse = p.alive && curseMultiplier(p.streak) < 1 ? cursePhrase(curseMultiplier(p.streak)) : null;
         return (
           <div key={p.id} className={`pcard ${i === acting ? 'active' : ''} ${p.alive ? 'living' : 'dead'}`} style={{ ['--pc' as string]: colorOf(p.character) }}>
             <div className="pline">
               <PlayerBadge n={i + 1} color={colorOf(p.character)} />
               <span className="pname">{p.name}</span>
-              <span className="pchar">
-                {seats[i]?.kind === 'bot' ? '🤖 ' : ''}
-                {p.alive ? charName(p.character) : `Spectral ${charName(p.character)}`}
+              <span className="prole" title={p.alive ? 'Holds the life' : 'Ghost'}>
+                {p.alive ? '❤' : '👻'}
               </span>
+              <b className="pscore" title="Points">
+                {p.score}
+              </b>
             </div>
-            <div className="pstats">
-              <span title="One point for each round ended holding the life">
-                <b>{p.score}</b> point{p.score === 1 ? '' : 's'}
-              </span>
-              <span className="muted">{pos < game.slot ? 'acted' : pos === game.slot ? 'acting' : `acts ${pos + 1}${['st', 'nd', 'rd'][pos] ?? 'th'}`}</span>
-            </div>
-            <div className="pstats">
-              <PieceStatus game={game} i={i} />
-            </div>
-            {p.item && (
-              <div className="ploc">
-                <ItemBadge item={p.item} />
+            {(seats[i]?.kind === 'bot' || p.item || curse || controllerLine(game, i)) && (
+              <div className="pmeta">
+                {seats[i]?.kind === 'bot' && <span className="tag bot">BOT</span>}
+                {p.item && <ItemBadge item={p.item} />}
+                {curse && <span className="status curse">{curse}</span>}
+                {controllerLine(game, i) && <span className="muted small">{controllerLine(game, i)}</span>}
               </div>
             )}
-            {controllerLine(game, i) && <div className="ploc">{controllerLine(game, i)}</div>}
-            <div className="ploc">{placeName(p.node, pz)}</div>
           </div>
         );
       })}
@@ -220,7 +191,7 @@ function PiecesPanel({ game, innerRef }: { game: GameState; innerRef: React.RefO
   );
 }
 
-// ── the action panel, one layout per phase ──────────────────────────────
+// ── the action panel: one main action at a time ─────────────────────────
 
 function ActionPanel({ game }: { game: GameState }) {
   const busy = useStore((s) => s.busy);
@@ -232,34 +203,20 @@ function ActionPanel({ game }: { game: GameState }) {
   const primaryRef = useRef<HTMLButtonElement>(null);
   const decider = rewardDecider(game);
   const bot = isBotSeat(decider);
-  const phaseKey = `${game.actionNumber}:${game.phase}:${busy}`;
+  const phaseKey = `${game.actionNumber}:${game.phase}:${busy}:${game.move?.remaining ?? ''}`;
   useEffect(() => {
     // Hand keyboard focus to the main action whenever the phase changes.
     const active = document.activeElement;
     if (!active || active === document.body || active.closest('.bottom')) primaryRef.current?.focus({ preventScroll: true });
   }, [phaseKey]);
-
   const watching = bot || mode === 'room';
-  const living = game.pieces[livingPiece(game)];
   return (
     <section className={`action ${me.alive ? 'is-living' : 'is-ghost'}`} style={{ ['--pc' as string]: color }} aria-live="polite">
-      <header className="action-head">
-        <PlayerBadge n={actingIdx + 1} color={color} size={30} />
-        <div>
-          <h2>
-            {me.name} <span className="muted">the {me.alive ? '' : 'spectral '}{charName(me.character)}</span>
-          </h2>
-          <p className="sub">
-            {me.alive ? `Holds the life at ${placeName(me.node, pz)}` : `A ghost at ${placeName(me.node, pz)} • ${living.name} holds the life at ${placeName(living.node, pz)}`}
-            {controllerLine(game, actingIdx) ? ` • ${controllerLine(game, actingIdx)}` : ''}
-          </p>
-        </div>
-        {busy && (
-          <button className="btn skip" onClick={() => director.skip()}>
-            Skip animation ⏭
-          </button>
-        )}
-      </header>
+      {busy && (
+        <button className="btn skip" onClick={() => director.skip()}>
+          Skip ⏭
+        </button>
+      )}
       {watching && game.phase !== 'summary' && game.phase !== 'challenge' ? (
         <WatchPanel game={game} bot={bot} />
       ) : (
@@ -269,7 +226,7 @@ function ActionPanel({ game }: { game: GameState }) {
           {game.phase === 'pick' && <PickPanel game={game} primaryRef={primaryRef} />}
           {game.phase === 'hunt' && <EncounterChoices game={game} send={act} btn="btn" disabled={busy} primaryRef={primaryRef} pz={pz} />}
           {game.phase === 'reward' && <RewardChoice game={game} send={act} btn="btn" canChoose disabled={busy} primaryRef={primaryRef} />}
-          {game.phase === 'challenge' && <p className="prompt">Haunted Jump Rope in progress…</p>}
+          {game.phase === 'challenge' && <p className="prompt">Jump rope!</p>}
           {game.phase === 'summary' && <Summary game={game} primaryRef={primaryRef} readOnly={watching} />}
         </>
       )}
@@ -279,80 +236,39 @@ function ActionPanel({ game }: { game: GameState }) {
 
 /** What a bot or a phone is doing, for everyone watching the TV. */
 function WatchPanel({ game, bot }: { game: GameState; bot: boolean }) {
-  const pz = useStore((s) => s.personalization);
+  const busy = useStore((s) => s.busy);
   const d = rewardDecider(game);
   const me = game.pieces[d];
-  const sel = game.selection.dest;
-  const pv = game.phase === 'choose' && sel !== null ? previewMove(game, sel) : null;
-  const who = bot ? `🤖 ${me.name} is thinking…` : `Waiting for ${me.name}’s phone${controllerLine(game, d) ? ` (${controllerLine(game, d)})` : ''}…`;
-  const o = game.options;
+  const who = `${bot ? '🤖 ' : ''}${me.name}`;
+  let doing = `${who} is choosing…`;
+  if (game.phase === 'turnStart') doing = `${who} is rolling…`;
+  if (game.phase === 'choose') doing = busy ? `${who} is moving` : `${who} · choose a path`;
+  if (game.phase === 'hunt') doing = `${who} · challenge?`;
+  if (game.phase === 'pick') doing = `${who} · choose opponent`;
+  if (game.phase === 'reward') doing = `${who} · keep or replace?`;
   return (
     <div className="phase">
-      {(game.die !== null || game.rollInfo?.kind === 'stride') && <DieBox game={game} />}
-      <p className="prompt">{who}</p>
-      {me.item && game.phase !== 'reward' && (
-        <p className="muted small">
-          Holding <ItemBadge item={me.item} />
-        </p>
-      )}
-      {game.phase === 'hunt' && o && (
-        <p className="warn">
-          {[
-            o.living ? `❤ may challenge ${game.pieces[livingPiece(game)].name} for the life` : null,
-            o.sameSpace.length || o.versus.length ? '⚔ may battle a ghost for an item' : null,
-          ]
-            .filter(Boolean)
-            .join(' • ')}{' '}
-          — or end the action.
-        </p>
-      )}
+      {(game.die !== null || game.rollInfo?.kind === 'stride') && game.phase === 'choose' && <DieBox game={game} />}
+      <p className="prompt">{doing}</p>
+      {game.phase === 'choose' && !busy && <ForkList game={game} readOnly />}
       {game.phase === 'reward' && <RewardChoice game={game} send={() => {}} btn="btn" canChoose={false} />}
-      {game.phase === 'pick' && <p className="warn">☠ Reaper’s Challenge: choosing a ghost to duel…</p>}
-      {pv && <p className="you">➜ {previewSummary(pv, game, pz)}</p>}
     </div>
   );
 }
 
 type PR = { game: GameState; primaryRef: React.RefObject<HTMLButtonElement | null> };
 
-function LifeRollResult({ game }: { game: GameState }) {
-  const e = game.log.find((x) => x.kind === 'lifeRoll');
-  if (!e || e.kind !== 'lifeRoll') return null;
-  return (
-    <div className="objective" role="note">
-      <b>Life roll:</b>{' '}
-      {e.rolls.map((row, k) => (
-        <span key={k}>
-          {k > 0 ? ' · reroll: ' : ''}
-          {row
-            .map((v, i) => (v === null ? null : `${game.pieces[i].name} ${v}`))
-            .filter(Boolean)
-            .join(', ')}
-        </span>
-      ))}
-      . <b>{game.pieces[e.winner].name}</b> starts alive.
-    </div>
-  );
-}
-
 function TurnStart({ game, primaryRef }: PR) {
   const busy = useStore((s) => s.busy);
   const pz = useStore((s) => s.personalization);
   const me = game.pieces[actingPiece(game)];
-  const curse = me.alive ? curseLine(me.streak) : null;
   return (
     <div className="phase">
-      {game.round === 1 && game.slot === 0 && <LifeRollResult game={game} />}
-      <p className="prompt">
-        {me.alive
-          ? 'You hold the life. Roll one die and move up to that many spaces — or stay. Ghosts act after you this round; end somewhere they will struggle to reach.'
-          : 'Roll one die: a ghost always drifts at least 3 spaces, and may pass through the two dotted wall links. End on the living piece’s space or right next to it to challenge for the life.'}
-      </p>
-      {curse && <p className="muted small">{curse}</p>}
+      <p className="hint">{me.alive ? '❤ Stay away from the ghosts' : '👻 Land on or next to ❤ to challenge'}</p>
       <ItemActions game={game} send={act} btn="btn" disabled={busy} pz={pz} />
       <div className="row-btns">
         <button ref={primaryRef} className={`btn primary big ${me.alive ? '' : 'ghost-btn'}`} disabled={busy} onClick={() => act({ type: 'roll' })}>
-          Roll the die 🎲
+          Roll 🎲
         </button>
       </div>
     </div>
@@ -384,91 +300,90 @@ function DieBox({ game }: { game: GameState }) {
   );
 }
 
+/** The ways on, as large numbered buttons (the same numbers and colours as the arrows on the board and on phones). */
+function ForkList({ game, readOnly = false, primaryRef }: { game: GameState; readOnly?: boolean; primaryRef?: React.RefObject<HTMLButtonElement | null> }) {
+  const pz = useStore((s) => s.personalization);
+  const choices = forkChoices(game);
+  const hover = (to: number | null) => setState({ hoverNode: to });
+  return (
+    <div className="fork-list" role="group" aria-label="Ways on">
+      {choices.map((c, i) => {
+        const pv = c.landings.length === 1 ? previewMove(game, c.landings[0]) : null;
+        return (
+          <button
+            key={c.to}
+            ref={i === 0 ? primaryRef : undefined}
+            className="btn fork-btn"
+            style={{ ['--fc' as string]: c.color }}
+            disabled={readOnly}
+            aria-label={`Way ${c.num}: ${c.word}${c.kind === 's' ? ', secret passage' : c.kind === 'w' ? ', through the wall' : ''}, toward ${nodeName(c.to, pz)}`}
+            onClick={() => act(stepFor(game, c.to))}
+            onMouseEnter={() => hover(c.to)}
+            onMouseLeave={() => hover(null)}
+            title={pv ? previewSummary(pv, game, pz) : `Can end on: ${c.landings.map((n) => nodeName(n, pz)).join(', ')}`}
+          >
+            <span className="fork-num">{c.num}</span>
+            <span className="fork-arrow" style={{ transform: `rotate(${(c.rel * 180) / Math.PI}deg)` }} aria-hidden="true">
+              ⬆
+            </span>
+            <span className="fork-word">
+              {c.kind === 's' ? '✦ passage' : c.kind === 'w' ? '👻 wall' : c.word}
+              <small>{nodeName(c.to, pz)}</small>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function Choose({ game, primaryRef }: PR) {
   const busy = useStore((s) => s.busy);
   const pz = useStore((s) => s.personalization);
-  const routes = useMemo(() => [...legalRoutes(game).values()].sort((a, b) => a.path.length - b.path.length || a.dest - b.dest), [game]);
-  const sel = game.selection.dest;
-  const preview = sel !== null ? previewMove(game, sel) : null;
-  const me = game.pieces[actingPiece(game)];
-  const minigame = preview && (preview.known === 'reaper' || preview.known === 'seance');
+  const choices = forkChoices(game);
+  // Number keys (and arrow keys) pick a way, matching the numbers on the board.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (busy || e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+      let c: ForkChoice | undefined;
+      const n = Number(e.key);
+      if (n >= 1 && n <= choices.length) c = choices[n - 1];
+      else if (e.key === 'ArrowLeft') c = choices.find((x) => x.word === 'Left');
+      else if (e.key === 'ArrowRight') c = choices.find((x) => x.word === 'Right');
+      else if (e.key === 'ArrowUp') c = choices.find((x) => x.word === 'Ahead');
+      if (!c) return;
+      e.preventDefault();
+      act(stepFor(game, c.to));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+  const left = game.move?.remaining ?? 0;
+  const started = (game.move?.path.length ?? 1) > 1;
   return (
     <div className="phase choose">
-      <DieBox game={game} />
+      {!started && <DieBox game={game} />}
       <ItemActions game={game} send={act} btn="btn" disabled={busy} pz={pz} />
-      <p className="prompt">
-        Pick a glowing space on the board or below — or stay.
-        {routes.length === 0 && ' No space is reachable, so you can only stay.'}
-      </p>
-      <p className="muted small reminder">
-        ☠ Six hidden traps lie in the corridors. Passing through is safe; only where a move ends counts. {superReaperLine(game)}.
-      </p>
-      <div className="dest-list" role="listbox" aria-label="Destinations">
-        <button role="option" aria-selected={sel === 'stay'} className={`dest ${sel === 'stay' ? 'on' : ''}`} onClick={() => act({ type: 'select', dest: 'stay' })}>
-          Stay here
-        </button>
-        {routes.map((r) => {
-          const pv = previewMove(game, r.dest)!;
-          const hot = pv.known === 'reaper' || pv.known === 'seance' || !!pv.superReaper;
-          return (
-            <button
-              key={r.dest}
-              role="option"
-              aria-selected={sel === r.dest}
-              className={`dest ${sel === r.dest ? 'on' : ''} ${hot ? 'danger' : ''} ${pv.canChallenge ? 'haunt' : ''}`}
-              onClick={() => act({ type: 'select', dest: r.dest })}
-              onMouseEnter={() => setState({ hoverNode: r.dest })}
-              onMouseLeave={() => setState({ hoverNode: null })}
-            >
-              <span className="dname">
-                {pv.canChallenge ? '👻 ' : hot ? '☠ ' : ''}
-                {nodeName(r.dest, pz)}
-              </span>
-              <span className="dmeta">
-                #{r.dest} · {r.path.length - 1} step{r.path.length === 2 ? '' : 's'}
-                {r.usesSecret ? ' · passage' : ''}
-                {r.usesWall ? ' · wall' : ''}
-                {pv.superReaper ? (pv.superReaper === 'seance' ? ' · Séance' : ' · Reaper') : pv.known === 'reaper' ? ' · Reaper' : pv.known === 'seance' ? ' · Séance' : pv.known === 'poltergeist' ? ' · Poltergeist' : ''}
-                {pv.canChallenge ? ' · in range' : ''}
-                {pv.battleTargets.length ? ' · ⚔ ghost here' : ''}
-                {pv.versus ? ' · ⚔ Versus' : ''}
-                {me.alive && pv.threats.length ? ` · near ${pv.threats.length} ghost${pv.threats.length > 1 ? 's' : ''}` : ''}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-      {preview && (
-        <div className="forecast">
-          {minigame && <p className="warn">☠ This ends your action with a Haunted Jump Rope{preview.known === 'seance' ? ' for every piece' : ''}. Whoever wins holds the life.</p>}
-          <p className="you">➜ {previewSummary(preview, game, pz)}</p>
-        </div>
-      )}
-      <div className="row-btns">
-        <button ref={primaryRef} className={`btn primary big ${minigame ? 'risky' : ''} ${me.alive ? '' : 'ghost-btn'}`} disabled={sel === null || busy} onClick={() => act({ type: 'confirmMove' })}>
-          {sel === null ? 'Choose where to go' : sel === 'stay' ? 'Confirm: stay here' : `${minigame ? 'Risk it: ' : 'Confirm move to '}${nodeName(sel, pz)}`}
-        </button>
-      </div>
+      <p className="prompt big-prompt">{busy ? 'Moving…' : `${left} left · Choose a path`}</p>
+      {!busy && <ForkList game={game} primaryRef={primaryRef} />}
     </div>
   );
 }
 
 function PickPanel({ game, primaryRef }: PR) {
   const busy = useStore((s) => s.busy);
-  const pz = useStore((s) => s.personalization);
   const pk = game.pick!;
   return (
     <div className="phase">
-      <p className="prompt">
-        <b>Reaper’s Challenge.</b> Choose one ghost to duel for the life. Win and you keep it; lose and they take it. Nobody moves on the
-        board.
-      </p>
+      <p className="prompt big-prompt">☠ Choose opponent</p>
       <div className="choices">
         {pk.options.map((o, k) => {
           const p = game.pieces[o];
           return (
             <button key={o} ref={k === 0 ? primaryRef : undefined} className="btn" disabled={busy} onClick={() => act({ type: 'pickOpponent', option: o })}>
-              <PlayerBadge n={o + 1} color={colorOf(p.character)} size={20} /> {p.name} • {p.score} pt{p.score === 1 ? '' : 's'} • {placeName(p.node, pz)}
+              <PlayerBadge n={o + 1} color={colorOf(p.character)} size={20} /> {p.name} · {p.score} pt{p.score === 1 ? '' : 's'}
             </button>
           );
         })}
@@ -477,31 +392,40 @@ function PickPanel({ game, primaryRef }: PR) {
   );
 }
 
+/** Plain moves pass quickly; anything that happened stays up a little longer. Always skippable. */
 function Summary({ game, primaryRef, readOnly }: PR & { readOnly: boolean }) {
   const busy = useStore((s) => s.busy);
   const pz = useStore((s) => s.personalization);
-  const lines = game.log.filter((e) => e.kind !== 'outcome' && e.kind !== 'lifeRoll' && e.kind !== 'spawn' && e.kind !== 'roundStart').map((e) => logLine(e, game, pz)).filter(Boolean) as string[];
-  const outcome = game.lastOutcome ? outcomeLines(game.lastOutcome, game, pz) : [];
+  const lines = game.log.filter((e) => !['outcome', 'lifeRoll', 'spawn', 'roundStart', 'roll'].includes(e.kind)).map((e) => logLine(e, game, pz)).filter(Boolean) as string[];
+  const outcome = game.lastOutcome ? outcomeLines(game.lastOutcome, game, pz).slice(-1) : [];
+  const eventful = !!game.lastOutcome || game.log.some((e) => ['trapRevealed', 'poltergeist', 'itemAwarded', 'itemUsed', 'superReaper', 'seanceDormant', 'versusInactive'].includes(e.kind));
   const lastSlot = game.slot === game.schedule.length - 1;
   const next = lastSlot ? null : game.pieces[game.schedule[game.slot + 1]];
   const living = game.pieces[livingPiece(game)];
+  useEffect(() => {
+    if (readOnly || busy) return;
+    const t = window.setTimeout(() => act({ type: 'nextTurn' }), eventful ? 3200 : 1300);
+    return () => clearTimeout(t);
+  }, [readOnly, busy, eventful, game.actionNumber]);
   return (
     <div className="phase">
       <RewardReveal game={game} />
-      <ul className="summary">
-        {lines.map((l, i) => (
-          <li key={i}>{l}</li>
-        ))}
-        {outcome.map((l, i) => (
-          <li key={`o${i}`} className="outcome-line">
-            {l}
-          </li>
-        ))}
-      </ul>
+      {(lines.length > 0 || outcome.length > 0) && (
+        <ul className="summary">
+          {lines.slice(-3).map((l, i) => (
+            <li key={i}>{l}</li>
+          ))}
+          {outcome.map((l, i) => (
+            <li key={`o${i}`} className="outcome-line">
+              {l}
+            </li>
+          ))}
+        </ul>
+      )}
       {!readOnly && (
         <div className="row-btns">
-          <button ref={primaryRef} className="btn primary big" disabled={busy} onClick={() => act({ type: 'nextTurn' })}>
-            {next ? `Next: ${next.name} ▸` : game.round === ROUNDS ? `Ring the last bell — ${living.name} scores` : `Ring the bell — ${living.name} scores round ${game.round}`}
+          <button ref={primaryRef} className="btn primary" disabled={busy} onClick={() => act({ type: 'nextTurn' })}>
+            {next ? `Next: ${next.name} ▸` : `🔔 ${living.name} scores`}
           </button>
         </div>
       )}
@@ -514,16 +438,11 @@ function FirstTurnTip({ game }: { game: GameState }) {
   if (dismissed || game.actionNumber > 1 || game.round > 1) return null;
   return (
     <div className="tip" role="note">
-      <h3>One life in the mansion</h3>
-      <p>
-        <b>Only one piece is alive.</b> Everyone else is a ghost trying to steal that life. Whoever holds it when a round ends scores a
-        point; ten rounds, most points wins. Ghosts challenge the living piece to <b>Haunted Jump Rope</b> from its space or the next one. Six
-        hidden traps and the Super Reaper can start challenges from anywhere.
-      </p>
-      <p>
-        Ghosts may also <b>battle each other for an item</b> — by ending a move on another ghost’s space, or on a ⚔ Versus space to call out any
-        ghost. Items: Second Roll, Ghost Switch, Ghostly Stride.
-      </p>
+      <ul className="tip-list">
+        <li>❤ One piece is alive. Holding it when the bell rings = 1 point.</li>
+        <li>👻 Ghosts land on or next to ❤ to challenge.</li>
+        <li>🎲 Roll, then pick a path at the arrows.</li>
+      </ul>
       <button className="btn" onClick={() => setState({ tipDismissed: true })}>
         Got it
       </button>

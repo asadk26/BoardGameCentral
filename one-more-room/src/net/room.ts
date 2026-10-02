@@ -14,7 +14,7 @@
 // game uses. A modified phone could still fake good timing for itself.
 
 import { CHARACTERS, MAX_CONTROLLERS_PER_PIECE, MAX_PIECES, MIN_PIECES, TEXT_LIMITS, type CharacterId } from '../engine/config';
-import { actingPiece, activeController, createGame, dispatch, newSession, type Session } from '../engine/engine';
+import { actingPiece, activeController, createGame, dispatch, judgeChallenge, newSession, type Session } from '../engine/engine';
 import { botAction, newBotMemory, reflexOf, type BotMemory, type BotProfile } from '../engine/bots';
 import { airTime, botRopeInputs, challengeDurationMs, practiceSchedule, ropeSchedule, type ChallengeInput } from '../engine/challenges';
 import { publicView, seatView } from '../engine/view';
@@ -692,20 +692,31 @@ export class Room {
     if (this.runTimer) this.deps.clearTimer(this.runTimer);
     const id = run.id;
     const attempt = run.attempt;
+    const sched = ropeSchedule(ch.seed);
+    // After the eight scored sweeps: finish now if they settled it, otherwise after sudden death.
     this.runTimer = this.deps.setTimer(() => {
       if (this.run?.id !== id || this.run.attempt !== attempt) return;
-      this.resolveRun();
-    }, COUNTDOWN_MS + ropeSchedule(ch.seed).totalMs + RESOLVE_GRACE_MS);
+      const inputs = this.runInputs();
+      if (judgeChallenge(ch, inputs).decidedBy === 'score') return this.resolveRun();
+      this.runTimer = this.deps.setTimer(() => {
+        if (this.run?.id !== id || this.run.attempt !== attempt) return;
+        this.resolveRun();
+      }, sched.totalMs - sched.mainMs);
+    }, COUNTDOWN_MS + sched.mainMs + RESOLVE_GRACE_MS);
+  }
+
+  private runInputs(): Record<number, ChallengeInput[]> {
+    const inputs: Record<number, ChallengeInput[]> = {};
+    for (const p of this.challengePieces()) inputs[p] = (this.run?.presses.get(p) ?? []).map((t) => ({ t }));
+    return inputs;
   }
 
   private resolveRun() {
     const run = this.run;
     const ch = this.session?.game.challenge;
     if (!run || !ch || run.paused || this.paused || run.stage !== 'countdown') return;
-    const inputs: Record<number, ChallengeInput[]> = {};
-    for (const p of ch.participants) inputs[p] = (run.presses.get(p) ?? []).map((t) => ({ t }));
     // Everyone's presses are judged together: no advantage from whose message arrived first.
-    this.apply({ type: 'challengeResult', id: ch.id, inputs }, undefined, undefined);
+    this.apply({ type: 'challengeResult', id: ch.id, inputs: this.runInputs() }, undefined, undefined);
   }
 
   // ── bots and automatic steps ──────────────────────────────────────────
@@ -732,8 +743,17 @@ export class Room {
       return null;
     }
     const i = g.phase === 'reward' && g.pendingReward ? g.pendingReward.piece : actingPiece(g);
+    // A finished turn moves on by itself after a moment (the phone can also tap Done).
+    if (g.phase === 'summary' && this.pieces[i]?.kind !== 'bot') return { type: 'nextTurn' };
     if (this.pieces[i]?.kind !== 'bot') return null;
     return botAction(seatView(g, i), this.pieces[i].bot!, this.memory(i));
+  }
+
+  /** How long to let the table take in a finished turn: longer when something happened. */
+  private summaryPause(): number {
+    const g = this.session!.game;
+    const eventful = !!g.lastOutcome || g.log.some((e) => ['trapRevealed', 'poltergeist', 'itemAwarded', 'itemUsed', 'superReaper', 'seanceDormant', 'versusInactive'].includes(e.kind));
+    return (eventful ? 3600 : 1800) * Math.max(0.01, (this.deps.botDelayMs ?? 700) / 700);
   }
 
   /** Let bots (and the life roll) happen on their own, never while paused or the host is away. */
@@ -741,7 +761,13 @@ export class Room {
     if (!this.session || !this.hostConnected || this.paused || this.botTimer) return;
     const first = this.autoDecision();
     if (!first) return;
-    const delay = first.type === 'rollForLife' ? Math.max(1500, this.deps.botDelayMs ?? 700) : (this.deps.botDelayMs ?? 700);
+    const g = this.session.game;
+    const delay =
+      first.type === 'rollForLife'
+        ? Math.max(1500, this.deps.botDelayMs ?? 700)
+        : g.phase === 'summary'
+          ? this.summaryPause()
+          : (this.deps.botDelayMs ?? 700);
     this.botTimer = this.deps.setTimer(() => {
       this.botTimer = null;
       if (!this.hostConnected || this.paused) return;

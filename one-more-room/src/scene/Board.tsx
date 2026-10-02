@@ -114,7 +114,7 @@ function Wall({ w, index, register }: { w: WallSeg; index: number; register: (i:
     return [body, cap, glass];
   }, [w.color, w.outer]);
   useMemo(() => register(index, mats), [index, mats, register]);
-  const windows = w.outer && len > 2.4 ? Math.floor(len / 3) : 0;
+  const windows = w.outer && len > 2.4 && w.height > 1 ? Math.floor(len / 3) : 0;
   return (
     <group position={[cx, 0, cz]} rotation={[0, ang, 0]}>
       <mesh position={[0, w.height / 2, 0]} material={mats[0]} castShadow receiveShadow>
@@ -246,7 +246,7 @@ export function VersusLabels() {
     <group>
       {VERSUS_SPACES.map((id) => {
         const [x, , z] = nodePos(id, 0);
-        return <Label key={id} pos={[x, 0.95, z]} lines={['⚔ Versus']} scale={0.42} color="#f0a6e6" />;
+        return <Label key={id} pos={[x, 0.95, z]} lines={['⚔ Versus']} scale={0.42} color="#f0a6e6" nearOnly />;
       })}
     </group>
   );
@@ -258,14 +258,19 @@ export function RoomLabels({ roomNames }: { roomNames: Record<number, string> })
     <group>
       {Object.keys(ROOMS).map((idStr) => {
         const id = Number(idStr);
-        const [x, , z] = nodePos(id, 0);
-        return <Label key={id} pos={[x, 1.05, z + 0.6]} lines={[roomNames[id] ?? ROOMS[id].defaultName]} scale={0.5} />;
+        // In the middle of the room, low down: away from the corridor and from pieces' heads.
+        const plot = ROOM_PLOTS.find((p) => p.node === id);
+        const [nx, , nz] = nodePos(id, 0);
+        const x = plot ? (plot.rect.x0 + plot.rect.x1) / 2 : nx;
+        const z = plot ? (plot.rect.z0 + plot.rect.z1) / 2 : nz + 0.6;
+        const away = Math.hypot(x - nx, z - nz) < 0.9 ? 0.9 : 0; // rooms centred on their space: nudge the label off it
+        return <Label key={id} pos={[x + away, 0.55, z + away]} lines={[roomNames[id] ?? ROOMS[id].defaultName]} scale={0.5} nearOnly />;
       })}
     </group>
   );
 }
 
-export function Label({ pos, lines, scale = 0.5, dim = false, color }: { pos: V3; lines: string[]; scale?: number; dim?: boolean; color?: string }) {
+export function Label({ pos, lines, scale = 0.5, dim = false, color, nearOnly = false }: { pos: V3; lines: string[]; scale?: number; dim?: boolean; color?: string; nearOnly?: boolean }) {
   const { tex, aspect } = useMemo(
     () => labelTexture(lines, { fg: dim ? '#b8aec8' : color ?? '#fff3d6', border: color ? color : dim ? undefined : 'rgba(255,211,107,0.55)' }),
     [lines.join('\n'), dim, color], // eslint-disable-line react-hooks/exhaustive-deps
@@ -280,7 +285,11 @@ export function Label({ pos, lines, scale = 0.5, dim = false, color }: { pos: V3
     const f = Math.min(2.4, Math.max(0.55, d / 11));
     s.scale.set(h * aspect * f, h * f, 1);
     const near = Math.min(1, Math.max(0, (d - 4) / 3));
-    (s.material as THREE.SpriteMaterial).opacity = base * near;
+    // In the follow view only labels close to the moving piece show.
+    const far = nearOnly && camInfo.follow ? Math.hypot(s.position.x - camInfo.focus[0], s.position.z - camInfo.focus[2]) : 0;
+    const keep = far > 7 ? 0 : far > 5 ? 1 - (far - 5) / 2 : 1;
+    (s.material as THREE.SpriteMaterial).opacity = base * near * keep;
+    s.visible = keep > 0.01;
   });
   return (
     <sprite ref={ref} position={pos} scale={[h * aspect, h, 1]} renderOrder={5}>
