@@ -1577,7 +1577,8 @@ kbd {
 }
 .arena-view .rope-arena {
   position: absolute !important;
-  inset: 0 0 52px 0; /* the score chips get their own strip under the names */
+  inset: 0 0 auto 0;
+  height: calc(100% - 52px) !important; /* the score chips get their own strip under the names */
 }
 .arena-overlay {
   position: absolute;

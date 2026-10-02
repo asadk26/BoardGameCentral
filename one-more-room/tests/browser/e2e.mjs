@@ -22,6 +22,7 @@ const ARGS = ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignor
 const SAVE_KEY = 'one-more-room/save';
 const ONLY = process.env.ONLY ? process.env.ONLY.split(',').map(Number) : null;
 const run = (n) => !ONLY || ONLY.includes(n);
+const STATIC_PORT = String(Number(process.env.PORT || 8795) + 100);
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -256,45 +257,46 @@ try {
     await page.keyboard.press('Space'); // ready
     await page.waitForTimeout(900);
     check('practice comes first, labelled and not scored', /Practice/.test(await page.locator('.arena-card').innerText()));
-    // Press only in a calm moment of the rope cycle (feet on the floor, not stumbling,
-    // well before the next pass) so slow software rendering can't shift the test.
-    const calm = async () => {
-      for (let i = 0; i < 80; i++) {
-        const a = (await arena(page))[0];
-        const sinceLast = a?.lastBottom == null ? Infinity : a.t - a.lastBottom;
-        if (a && a.t > 0 && a.y === 0 && sinceLast > 450 && a.nextBottom != null && a.nextBottom - a.t > 700) return a;
-        await page.waitForTimeout(40);
+    // Software WebGL draws a frame only every second or two here, so these checks
+    // read the judge's own count of jumps (what the arena draws from), not a sampled
+    // pose. Mid-air height and landing are covered by the unit tests.
+    const practiceNow = () => arena(page).then((a) => (a[0]?.sweeps === 3 ? a[0] : null));
+    const nextFrame = async (prev, ok) => {
+      for (const t0 = Date.now(); Date.now() - t0 < 10000; ) {
+        const a = await practiceNow();
+        if (a && a.t !== prev.t && ok(a)) return a;
+        await page.waitForTimeout(30);
       }
-      return (await arena(page))[0];
+      return (await practiceNow()) ?? prev;
     };
-    const a0 = await calm();
-    await page.keyboard.press('Space');
-    let a1 = a0;
-    // Software WebGL draws a frame every few hundred ms; wait for the next drawn frame.
-    for (const t0 = Date.now(); Date.now() - t0 < 2000 && (a1.t === a0.t || (a1.jumps === a0.jumps && a1.presses === a0.presses)); ) {
-      await page.waitForTimeout(30);
-      a1 = (await arena(page))[0];
-    }
-    // (Mid-air height is checked by the unit tests: software WebGL draws too rarely to sample it.)
-    check('a press makes the character jump', a1.jumps === a0.jumps + 1 && a1.presses === a0.presses + 1, `frame gap ${Math.round(a1.t - a0.t)} ms`);
-    await page.screenshot({ path: `${OUT}/13-rope-practice-jump.png` });
-    // Holding the key (auto-repeat) and tapping mid-air add nothing.
-    await page.waitForTimeout(700);
-    const h0 = (await calm()).jumps;
+    let p0 = null;
+    for (const t0 = Date.now(); !p0 && Date.now() - t0 < 10000; ) p0 = await practiceNow();
+    // Holding the key (auto-repeat), then two quick taps while still in the air.
     await page.keyboard.down('Space');
     for (let i = 0; i < 6; i++) await page.keyboard.down('Space'); // repeats while held
     await page.keyboard.up('Space');
     await page.keyboard.press('Space');
     await page.keyboard.press('Space');
-    await page.waitForTimeout(100);
-    let h = (await arena(page))[0];
-    for (const t0 = Date.now(); Date.now() - t0 < 2000 && h.jumps === h0; ) {
-      await page.waitForTimeout(30);
-      h = (await arena(page))[0];
+    const p1 = await nextFrame(p0, (a) => a.presses >= p0.presses + 3);
+    check('a press makes the character jump; holding, key-repeat and mid-air taps add nothing', p1.presses === p0.presses + 3 && p1.jumpsTotal === p0.jumpsTotal + 1, `${p1.presses - p0.presses} presses → ${p1.jumpsTotal - p0.jumpsTotal} jump`);
+    // Once landed, the next press is a new jump.
+    await page.waitForTimeout(900);
+    // (A press during a MISS stumble, or in the instant after landing, is ignored by design; then try again.)
+    let again = false;
+    let why = '';
+    for (let k = 0; k < 3 && !again; k++) {
+      const q0 = await nextFrame(p1, () => true);
+      await page.keyboard.press('Space');
+      const q1 = await nextFrame(q0, (a) => a.presses > q0.presses);
+      again = q1.jumpsTotal === q0.jumpsTotal + 1;
+      const stumbling =
+        q1.stumbleAt.some((b) => q1.lastPress >= b && q1.lastPress < b + 380) || q1.landings.some((e) => q1.lastPress >= e && q1.lastPress < e + 140); // still stumbling or just landed
+      why = `${q0.jumpsTotal} → ${q1.jumpsTotal}, press at ${Math.round(q1.lastPress)} ms${stumbling ? ' (stumbling)' : ''}`;
+      if (!again && !stumbling) break;
+      await page.waitForTimeout(500);
     }
-    await page.waitForTimeout(400);
-    const h1 = (await arena(page))[0].jumps;
-    check('holding, key-repeat and mid-air taps make exactly one jump', h1 === h0 + 1, `${h0} → ${h1}`);
+    check('after landing, one more press is one more jump', again, why);
+    await page.screenshot({ path: `${OUT}/13-rope-practice-jump.png` });
     await page.getByRole('button', { name: 'Skip practice' }).click().catch(() => {});
     await page.waitForTimeout(600);
     await page.screenshot({ path: `${OUT}/14-rope-countdown.png` });
@@ -494,7 +496,12 @@ try {
         if (await arrows.count()) {
           if (!seen.forkPhone) {
             seen.forkPhone = true;
-            const tvWays = await tv.locator('.fork-btn').count();
+            // The TV draws the ways as numbered floor arrows (the phone holds the buttons).
+            let tvWays = 0;
+            for (let i = 0; i < 20 && !tvWays; i++) {
+              tvWays = await tv.evaluate(() => window.__omr.forkArrows?.().length ?? 0);
+              if (!tvWays) await tv.waitForTimeout(100);
+            }
             check('the phone shows the same numbered ways as the TV', (await arrows.count()) === tvWays && tvWays > 0, `${await arrows.count()} vs ${tvWays}`);
             await p.screenshot({ path: `${OUT}/32-phone-fork.png` });
           }
@@ -577,10 +584,10 @@ try {
     const siteRoot = mkdtempSync(path.join(tmpdir(), 'omr-pages-'));
     mkdirSync(path.join(siteRoot, 'BoardGameCentral'));
     symlinkSync(path.join(ROOT, 'dist'), path.join(siteRoot, 'BoardGameCentral', 'one-more-room'));
-    const staticServer = spawn('python3', ['-m', 'http.server', '8796', '--bind', '127.0.0.1', '--directory', siteRoot], { stdio: 'ignore' });
+    const staticServer = spawn('python3', ['-m', 'http.server', STATIC_PORT, '--bind', '127.0.0.1', '--directory', siteRoot], { stdio: 'ignore' });
     try {
       await new Promise((r) => setTimeout(r, 1200));
-      const PAGES = 'http://127.0.0.1:8796/BoardGameCentral/one-more-room/';
+      const PAGES = `http://127.0.0.1:${STATIC_PORT}/BoardGameCentral/one-more-room/`;
       const sp = await newPage();
       await sp.goto(PAGES);
       await sp.getByRole('button', { name: /Host a phone room/ }).click();

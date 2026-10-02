@@ -88,7 +88,7 @@ function ArenaJumper({ j, x, feed, sounds }: { j: Jumper; x: number; feed: React
     seen.current = { jumps: nJumps, stumbles: nStumbles };
     // For automated checks: what this jumper is doing on screen right now.
     const dbg = ((globalThis as unknown as { __omrArena?: Record<number, unknown> }).__omrArena ??= {});
-    dbg[j.piece] = { y, jumps: nJumps, stumbles: nStumbles, t, sweeps: f.sched.sweeps, presses: (f.presses[j.piece] ?? []).length, nextBottom: f.sched.bottoms.find((b) => b > t) ?? null, lastBottom: f.sched.bottoms[passed - 1] ?? null };
+    dbg[j.piece] = { y, jumps: nJumps, stumbles: nStumbles, t, sweeps: f.sched.sweeps, jumpsTotal: tl.jumps.length, stumbleAt: tl.stumbles, landings: tl.jumps.map((q) => q.end), lastPress: (f.presses[j.piece] ?? []).at(-1) ?? null, presses: (f.presses[j.piece] ?? []).length, nextBottom: f.sched.bottoms.find((b) => b > t) ?? null, lastBottom: f.sched.bottoms[passed - 1] ?? null };
     const g = body.current;
     if (g) {
       g.position.set(x, y + (j.ghost ? 0.06 : 0), 0);
