@@ -67,6 +67,8 @@ export interface AppState {
   personalization: Personalization;
   setupPieces: SetupPiece[];
   setupMode: 'ffa' | 'teams';
+  /** Advanced: allow fewer than four pieces (off by default). */
+  fewerPieces: boolean;
   settings: Settings;
   cameraMode: 'follow' | 'overview';
   tipDismissed: boolean;
@@ -115,12 +117,25 @@ function safeRemove(key: string) {
   }
 }
 
+/** The normal game: four pieces. Seats nobody claims are bots (steady reflexes, not perfect). */
+export const DEFAULT_PIECES = MAX_PIECES;
+
+export function fillBot(character: CharacterId, i: number): SetupPiece {
+  return { names: [`${CHARACTERS.find((c) => c.id === character)!.name} Bot`], character, kind: 'bot', bot: { ...defaultBotProfile(i), skill: 'steady' } };
+}
+
+/** Pad a lineup with bots up to `count` pieces, each in a costume nobody else wears. */
+export function fillWithBots(pieces: SetupPiece[], count: number = DEFAULT_PIECES): SetupPiece[] {
+  const next = pieces.slice(0, count);
+  while (next.length < count) {
+    const free = CHARACTERS.find((c) => !next.some((p) => p.character === c.id))!;
+    next.push(fillBot(free.id, next.length));
+  }
+  return next;
+}
+
 function defaultSetupPieces(): SetupPiece[] {
-  return [
-    { names: [DEFAULT_PLAYER_NAMES[0]], character: CHARACTERS[0].id, kind: 'human' },
-    { names: [DEFAULT_PLAYER_NAMES[1]], character: CHARACTERS[1].id, kind: 'bot', bot: defaultBotProfile(1) },
-    { names: [DEFAULT_PLAYER_NAMES[2]], character: CHARACTERS[2].id, kind: 'bot', bot: defaultBotProfile(2) },
-  ];
+  return fillWithBots([{ names: [DEFAULT_PLAYER_NAMES[0]], character: CHARACTERS[0].id, kind: 'human' }]);
 }
 
 function loadSettings(): Settings {
@@ -154,8 +169,8 @@ function sanitizeSeat(p: Partial<SetupPiece>, i: number): SeatSetup {
   return { kind: 'human' };
 }
 
-function loadPrefs(): { personalization: Personalization; setupPieces: SetupPiece[]; setupMode: 'ffa' | 'teams' } {
-  const d = { personalization: defaultPersonalization(), setupPieces: defaultSetupPieces(), setupMode: 'ffa' as const };
+function loadPrefs(): { personalization: Personalization; setupPieces: SetupPiece[]; setupMode: 'ffa' | 'teams'; fewerPieces: boolean } {
+  const d = { personalization: defaultPersonalization(), setupPieces: defaultSetupPieces(), setupMode: 'ffa' as const, fewerPieces: false };
   try {
     const raw = safeGet(PREFS_KEY);
     if (!raw) return d;
@@ -168,16 +183,20 @@ function loadPrefs(): { personalization: Personalization; setupPieces: SetupPiec
       pieces.every((p) => ids.has(p.character) && Array.isArray(p.names) && p.names.length >= 1 && p.names.length <= 2) &&
       new Set(pieces.map((p) => p.character)).size === pieces.length;
     const mode = o.setupMode === 'teams' ? 'teams' : 'ffa';
+    // Fewer than four pieces only when someone chose that under Advanced; older saved lineups are filled with bots.
+    const fewerPieces = o.fewerPieces === true;
+    const lineup: SetupPiece[] = ok
+      ? pieces.map((p, i) => {
+          const seat = sanitizeSeat(p, i);
+          const names = (seat.kind === 'bot' || mode === 'ffa' ? p.names.slice(0, 1) : p.names).map((n, k) => cleanText(n, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[(i * 2 + k) % DEFAULT_PLAYER_NAMES.length]));
+          return { names, character: p.character, ...seat };
+        })
+      : d.setupPieces;
     return {
       personalization: sanitizePersonalization(o.personalization),
       setupMode: mode,
-      setupPieces: ok
-        ? pieces.map((p, i) => {
-            const seat = sanitizeSeat(p, i);
-            const names = (seat.kind === 'bot' || mode === 'ffa' ? p.names.slice(0, 1) : p.names).map((n, k) => cleanText(n, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[(i * 2 + k) % DEFAULT_PLAYER_NAMES.length]));
-            return { names, character: p.character, ...seat };
-          })
-        : d.setupPieces,
+      fewerPieces,
+      setupPieces: fewerPieces ? lineup : fillWithBots(lineup),
     };
   } catch {
     return d;
@@ -202,6 +221,7 @@ let state: AppState = {
   personalization: prefs.personalization,
   setupPieces: prefs.setupPieces,
   setupMode: prefs.setupMode,
+  fewerPieces: prefs.fewerPieces,
   settings: loadSettings(),
   cameraMode: 'follow',
   tipDismissed: false,
@@ -266,7 +286,7 @@ export function updateSettings(patch: Partial<Settings>) {
 }
 
 export function savePrefs() {
-  safeSet(PREFS_KEY, JSON.stringify({ personalization: state.personalization, setupPieces: state.setupPieces, setupMode: state.setupMode }));
+  safeSet(PREFS_KEY, JSON.stringify({ personalization: state.personalization, setupPieces: state.setupPieces, setupMode: state.setupMode, fewerPieces: state.fewerPieces }));
 }
 
 function persist() {
@@ -335,7 +355,7 @@ function memoryFor(seat: number): BotMemory {
 export function act(action: Action) {
   const s = state;
   if (!s.session || s.modal) return;
-  if (s.busy && action.type !== 'select' && action.type !== 'challengeResult') return; // no stale actions mid-animation
+  if (s.busy && action.type !== 'challengeResult') return; // no stale actions mid-animation
   if (s.mode === 'room') {
     transport?.send(action);
     return;
@@ -347,18 +367,8 @@ export function act(action: Action) {
   director.play(r.events, before, r.session.game);
   afterEvents(r.session.game, r.events);
   if (action.type === 'nominate') setState({});
-  if (action.type !== 'select') persist();
-  else persistSoon();
+  persist();
   pumpBots();
-}
-
-let persistTimer: number | null = null;
-function persistSoon() {
-  if (persistTimer !== null) clearTimeout(persistTimer);
-  persistTimer = window.setTimeout(() => {
-    persistTimer = null;
-    persist();
-  }, 250);
 }
 
 export function isBotSeat(seat: number): boolean {
@@ -424,13 +434,15 @@ export function botInputsFor(ch: NonNullable<GameState['challenge']>): Record<nu
   return out;
 }
 
-export function startGame(pieces: SetupPiece[] = state.setupPieces) {
+export function startGame(lineup: SetupPiece[] = state.setupPieces) {
+  // Four pieces unless fewer were chosen under Advanced: empty seats never silently disappear.
+  const pieces = state.fewerPieces ? lineup : fillWithBots(lineup);
   const seed = (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
   const game = createGame({
     pieces: pieces.map((p, i) => {
       const bot = p.kind === 'bot';
       const names = (bot ? p.names.slice(0, 1) : p.names).map((n, k) => cleanText(n, TEXT_LIMITS.playerName, DEFAULT_PLAYER_NAMES[(i * 2 + k) % DEFAULT_PLAYER_NAMES.length]));
-      return { character: p.character, controllers: bot ? [`${names[0]} (bot)`] : names, bot };
+      return { character: p.character, controllers: bot ? [/bot\b/i.test(names[0]) ? names[0] : `${names[0]} Bot`] : names, bot };
     }),
     seed,
   });

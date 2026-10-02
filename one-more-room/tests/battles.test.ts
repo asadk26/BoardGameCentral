@@ -4,11 +4,11 @@
 
 import { describe, expect, it } from 'vitest';
 import { ITEM_WEIGHTS, itemFromDraw, STRIDE_ALLOWANCE, VERSUS_SPACES, TRAP_ELIGIBLE, SUPER_REAPER, type ItemId } from '../src/engine/config';
-import { dispatch, encounterOptions, itemBlock, legalRoutes, newSession, previewMove, undo } from '../src/engine/engine';
+import { apply, dispatch, encounterOptions, itemBlock, moveLandings, newSession, previewMove, undo } from '../src/engine/engine';
 import { nextFloat, rollDie } from '../src/engine/rng';
 import { publicView, seatView } from '../src/engine/view';
 import type { GameState } from '../src/engine/types';
-import { act, jumps, living, move, resolve, rolled, setup } from './helpers';
+import { act, jumps, living, move, resolve, rolled, setup, skipMove, walk } from './helpers';
 
 /** Three pieces: 0 living far away at 16, ghosts 1 (acting) and 2. */
 function trio(n1: number, n2: number, extra: Partial<GameState> = {}): GameState {
@@ -71,10 +71,11 @@ describe('starting a ghost battle', () => {
     expect(two.log.some((e) => e.kind === 'versusInactive' && e.reason === 'noGhosts')).toBe(true);
   });
 
-  it('a stay never starts a battle, even on a Versus space or a shared space', () => {
-    let s = rolled(trio(5, 5), 4);
-    s = act(act(s, { type: 'select', dest: 'stay' }), { type: 'confirmMove' });
+  it('only a landing starts a battle: walking over a Versus space or a ghost does nothing', () => {
+    // From 1, a 6 walks over 3 (a ghost) and 5 (Versus) to 7.
+    const s = move(trio(1, 3), 7, 6);
     expect(s.phase).toBe('summary');
+    expect(s.options).toBeNull();
   });
 
   it('both stay ghosts: no points, no moves, no transfer; the winner gets one item', () => {
@@ -129,8 +130,7 @@ describe('starting a ghost battle', () => {
     let t = s;
     for (let guard = 0; t.round === 1 && guard < 20; guard++) {
       if (t.phase === 'summary') t = act(t, { type: 'nextTurn' });
-      else if (t.phase === 'turnStart') t = act(rolled(t, 3), { type: 'select', dest: 'stay' });
-      else if (t.phase === 'choose') t = act(t, { type: 'confirmMove' });
+      else if (t.phase === 'turnStart') t = skipMove(t);
       else if (t.phase === 'hunt') t = act(t, { type: 'declineHunt' });
       else break;
     }
@@ -163,7 +163,6 @@ describe('starting a ghost battle', () => {
     const p = previewMove(s, 3)!;
     expect(p.battleTargets).toEqual([2]);
     expect(previewMove(s, 5)!.versus).toBe(true);
-    expect(previewMove(s, 'stay')!.battleTargets).toEqual([]);
     expect(s.rewardRng).toBe(rolled(trio(1, 3), 4).rewardRng);
   });
 });
@@ -200,12 +199,14 @@ describe('keep or replace', () => {
   it('undo and replay draw the same reward; reward randomness is never public', () => {
     const play = (ses: ReturnType<typeof newSession>) => {
       ses = dispatch(ses, { type: 'roll' }).session;
-      ses = dispatch(ses, { type: 'select', dest: 3 }).session;
-      ses = dispatch(ses, { type: 'confirmMove' }).session;
+      ses = dispatch(ses, { type: 'step', at: 1, left: 2, to: 2 }).session; // straight on to 3
       ses = dispatch(ses, { type: 'battle', opponent: 2 }).session;
       return dispatch(ses, { type: 'challengeResult', id: ses.game.challenge!.id, inputs: { 1: jumps(ses.game.challenge!, 10), 2: [] } }).session;
     };
-    const start = newSession(trio(1, 3));
+    // A table whose first roll is a 2 (from 1, exactly onto the ghost on 3).
+    let seed = 1;
+    while (act(setup(3, { living: 0, nodes: [16, 1, 3], acting: 1, seed }), { type: 'roll' }).die !== 2) seed++;
+    const start = newSession(setup(3, { living: 0, nodes: [16, 1, 3], acting: 1, seed }));
     const first = play(start);
     const reward = first.game.pieces[1].item;
     expect(reward).not.toBeNull();
@@ -219,25 +220,29 @@ describe('keep or replace', () => {
 });
 
 describe('Second Roll', () => {
-  it('replaces the die for good with one fresh roll; the allowance floor stays 3', () => {
+  it('replaces the die for good with one fresh roll, and the move is exactly the new number', () => {
     let lower = false;
-    let floor = false;
-    for (let seed = 1; seed < 60 && !(lower && floor); seed++) {
+    for (let seed = 1; seed < 60 && !lower; seed++) {
       let s = withItem(setup(3, { living: 0, nodes: [16, 1, 28], acting: 1, seed }), 1, 'secondRoll', 0);
       s = rolled(s, 6);
-      s = act(s, { type: 'select', dest: 7 });
       const [expected] = rollDie(s.rng);
       const t = act(s, { type: 'useItem', item: 'secondRoll' });
       expect(t.die).toBe(expected);
-      expect(t.allowance).toBe(Math.max(3, expected));
+      expect(t.allowance).toBe(expected);
+      expect(t.move!.remaining).toBe(expected);
       expect(t.rollInfo).toEqual({ kind: 'die', rerolledFrom: 6 });
-      expect(t.selection.dest).toBeNull();
       expect(t.pieces[1].item).toBeNull();
       expect(t.log.some((e) => e.kind === 'itemUsed' && e.item === 'secondRoll')).toBe(true);
       if (expected < 6) lower = true;
-      if (expected < 3) floor = true;
     }
-    expect(lower && floor).toBe(true);
+    expect(lower).toBe(true);
+  });
+
+  it('not once the piece has taken a step', () => {
+    let s = withItem(setup(3, { living: 0, nodes: [16, 1, 28], acting: 1 }), 1, 'secondRoll', 0);
+    s = act(rolled(s, 5), { type: 'step', at: 1, left: 5, to: 2 }); // walks on to the fork at 4
+    expect(s.phase).toBe('choose');
+    expect(itemBlock(s, 'secondRoll')).toMatch(/before moving/);
   });
 
   it('only after rolling and before moving', () => {
@@ -261,9 +266,11 @@ describe('Ghost Switch', () => {
     expect(s.challenge).toBeNull();
     s = act(s, { type: 'roll' });
     expect(s.phase).toBe('choose');
-    // A stay after the swap is not a landing.
-    s = act(act(s, { type: 'select', dest: 'stay' }), { type: 'confirmMove' });
-    expect(s.phase).toBe('summary');
+    // Swapping onto a Versus space is not a landing either.
+    const v = act(withItem(trio(1, 5), 1, 'ghostSwitch', 0), { type: 'useItem', item: 'ghostSwitch', target: 2 });
+    expect(v.pieces[1].node).toBe(5);
+    expect(v.phase).toBe('turnStart');
+    expect(v.options).toBeNull();
   });
 
   it('never targets the living piece or a ghost on the same space; with no target it is not spent', () => {
@@ -277,7 +284,7 @@ describe('Ghost Switch', () => {
 });
 
 describe('Ghostly Stride', () => {
-  it('moves up to 6 instead of rolling, with no randomness drawn', () => {
+  it('moves exactly 6 instead of rolling, with no randomness drawn', () => {
     let s = withItem(trio(1, 28), 1, 'ghostlyStride', 0);
     const rng = s.rng;
     s = act(s, { type: 'useItem', item: 'ghostlyStride' });
@@ -285,10 +292,12 @@ describe('Ghostly Stride', () => {
     expect(s.die).toBeNull();
     expect(s.allowance).toBe(STRIDE_ALLOWANCE);
     expect(s.rollInfo).toEqual({ kind: 'stride' });
-    const reach = [...legalRoutes(s).keys()];
+    const reach = moveLandings(s);
     expect(reach).toContain(7);
     expect(reach).not.toContain(8);
-    expect(reach).toContain(2); // may stop early
+    expect(reach).not.toContain(2); // no stopping early
+    expect(walk(s, 7).pieces[1].node).toBe(7);
+    expect(apply(s, { type: 'step', at: 1, left: 6, to: 0 }).error).toBeUndefined();
     expect(dispatch(newSession(s), { type: 'roll' }).error).toBeDefined();
   });
 });

@@ -45,8 +45,8 @@ export const GHOST_SPAWNS: readonly number[] = [8, 16, 24];
 
 // ── Movement ────────────────────────────────────────────────────────────
 
-/** A ghost always drifts at least this far, whatever it rolls. */
-export const GHOST_MIN_MOVE = 3;
+// Every piece moves exactly the number it rolls, one space at a time,
+// choosing a direction only where the corridor forks (see graph.exitsFrom).
 
 // ── Turn order and protection policy (tuning knobs, not game modes) ─────
 

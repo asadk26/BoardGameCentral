@@ -8,6 +8,7 @@ import {
   NODE_COUNT,
   ROOMS,
   ROUNDS,
+  STRIDE_ALLOWANCE,
   TEXT_LIMITS,
   TRAP_COUNT,
   trapEligible,
@@ -27,8 +28,11 @@ export const SETTINGS_KEY = 'one-more-room/settings';
  * v3 = One Life (one living piece, points per round held);
  * v4 = One Life with ghost battles and items. v3 saves migrate to v4 when
  * no trap sits on a new Versus space.
+ * v5 = exact-roll movement, one step at a time (a move in progress is saved
+ * with its remaining steps). v4 saves migrate: a piece that had rolled but not
+ * yet moved keeps its roll and moves exactly that far.
  */
-export const SAVE_SCHEMA = 4;
+export const SAVE_SCHEMA = 5;
 
 export interface Personalization {
   mansionName: string;
@@ -82,7 +86,7 @@ export function validGame(g: unknown): g is GameState {
   if (!g || typeof g !== 'object') return false;
   const s = g as GameState;
   const chars = new Set(CHARACTERS.map((c) => c.id));
-  if (s.schema !== 4 || !Array.isArray(s.pieces) || s.pieces.length < 2 || s.pieces.length > MAX_PIECES) return false;
+  if (s.schema !== 5 || !Array.isArray(s.pieces) || s.pieces.length < 2 || s.pieces.length > MAX_PIECES) return false;
   const started = s.phase !== 'placement' && s.phase !== 'lifeRoll';
   const living = s.pieces.filter((p) => p && p.alive).length;
   return (
@@ -111,6 +115,8 @@ export function validGame(g: unknown): g is GameState {
     s.battlesThisRound.every((k) => typeof k === 'string') &&
     (s.phase !== 'reward' || (!!s.pendingReward && isItem(s.pendingReward.current) && isItem(s.pendingReward.offered))) &&
     (s.phase !== 'hunt' || !!s.options) &&
+    (s.phase !== 'choose' ||
+      (!!s.move && isInt(s.move.remaining, 1, 6) && Array.isArray(s.move.path) && s.move.path.length >= 1 && s.move.path.every((n) => isInt(n, 0, NODE_COUNT - 1)))) &&
     new Set(s.pieces.map((p) => p.character)).size === s.pieces.length &&
     (started ? living === 1 : living === 0) &&
     s.pieces.reduce((sum, p) => sum + p.score, 0) <= ROUNDS &&
@@ -168,6 +174,24 @@ function migrate3(g: unknown): GameState | null {
   return out as unknown as GameState;
 }
 
+/** Schema 4 → 5: a rolled-but-unmoved piece now moves exactly its roll (or six for Ghostly Stride). */
+function migrate4(g: unknown): GameState | null {
+  if (!g || typeof g !== 'object') return null;
+  const s = g as Record<string, unknown> & { pieces?: Array<{ node: number; alive: boolean }>; schedule?: number[]; slot?: number };
+  if (s.schema !== 4) return null;
+  const rest: Record<string, unknown> = { ...s };
+  delete rest.selection;
+  let move = null;
+  let allowance = s.allowance;
+  if (s.phase === 'choose') {
+    const steps = (s.rollInfo as { kind?: string } | null)?.kind === 'stride' ? STRIDE_ALLOWANCE : ((s.die as number | null) ?? 1);
+    const node = s.pieces?.[s.schedule?.[s.slot ?? 0] ?? 0]?.node ?? 0;
+    move = { remaining: steps, prev: null, path: [node], usedSecret: false, usedWall: false };
+    allowance = steps;
+  }
+  return { ...rest, schema: 5, move, allowance } as unknown as GameState;
+}
+
 export function deserialize(raw: string | null): LoadResult {
   if (raw === null) return { ok: false, reason: 'missing' };
   let parsed: SaveFile;
@@ -192,6 +216,15 @@ export function deserialize(raw: string | null): LoadResult {
       );
       return { ok: false, reason: layoutClash ? 'layout' : 'corrupt' };
     }
+    parsed.session = { ...old, game, turnStart, previousTurnStart: prev };
+    parsed.schema = 4;
+  }
+  if (parsed.schema === 4 && parsed.session) {
+    const old = parsed.session;
+    const game = migrate4(old.game);
+    const turnStart = migrate4(old.turnStart);
+    const prev = old.previousTurnStart === null ? null : migrate4(old.previousTurnStart);
+    if (!game || !turnStart || (old.previousTurnStart !== null && !prev)) return { ok: false, reason: 'corrupt' };
     parsed.session = { ...old, game, turnStart, previousTurnStart: prev };
     parsed.schema = SAVE_SCHEMA;
   }

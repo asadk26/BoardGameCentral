@@ -28,6 +28,8 @@ export interface PublicPiece {
   /** Controller slots in order: [odd rounds, even rounds] for a pair. */
   members: PublicMember[];
   bot?: BotProfile;
+  /** A bot holding a free seat until someone joins. */
+  auto?: boolean;
   /** The TV keyboard plays this piece's challenges (poor phone sync). */
   localControl?: boolean;
 }
@@ -84,8 +86,9 @@ export type ClientMsg =
   | { t: 'joinTeam'; piece: number; name: string }
   | { t: 'setCharacter'; character: CharacterId }
   | { t: 'leaveSeat' }
-  | { t: 'addBot'; character: CharacterId; bot: BotProfile }
-  | { t: 'removePiece'; piece: number }
+  /** Advanced: play with fewer than four pieces (bot seats only are removed). */
+  | { t: 'setPieceCount'; count: number }
+  | { t: 'setBot'; piece: number; bot: BotProfile }
   | { t: 'start' }
   | { t: 'replaceWithBot'; piece: number }
   | { t: 'handover'; piece: number; slot: number; to: string }

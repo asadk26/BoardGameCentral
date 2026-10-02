@@ -5,7 +5,7 @@ export type Phase =
   | 'placement' // every piece secretly nominates one corridor
   | 'lifeRoll' // everyone rolls a die; the highest starts alive
   | 'turnStart' // the scheduled piece rolls its die
-  | 'choose' // pick a destination (or stay)
+  | 'choose' // moving: paused at a fork (or at the start) to pick a direction
   | 'pick' // the living piece on a Reaper's Challenge picks a ghost
   | 'hunt' // after landing: challenge the living piece, battle a ghost, or end the action
   | 'challenge' // Haunted Jump Rope is being played
@@ -105,6 +105,18 @@ export interface PendingReward {
   offered: ItemId;
 }
 
+/** A move in progress: exactly `remaining` more steps from the current space. */
+export interface MoveProgress {
+  remaining: number;
+  /** The space the piece just came from (never stepped straight back to, unless a dead end). */
+  prev: number | null;
+  /** Every space visited so far this move, starting where it began. */
+  path: number[];
+  /** One secret passage per move. */
+  usedSecret: boolean;
+  usedWall: boolean;
+}
+
 /** How the acting piece got its movement this action. */
 export interface RollInfo {
   kind: 'die' | 'stride';
@@ -118,8 +130,8 @@ export type LogEntry =
   | { kind: 'spawn'; piece: number; node: number; alive: boolean }
   | { kind: 'roundStart'; round: number; schedule: number[] }
   | { kind: 'roll'; piece: number; die: number; allowance: number }
-  | { kind: 'move'; piece: number; path: number[]; usesSecret: boolean; usesWall: boolean }
-  | { kind: 'stay'; piece: number; node: number }
+  /** One stretch of movement: from the first node to the last, with `remaining` steps still to go after it. */
+  | { kind: 'move'; piece: number; path: number[]; usesSecret: boolean; usesWall: boolean; remaining: number }
   | { kind: 'trapRevealed'; node: number; effect: 'reaper' | 'seance' | 'poltergeist'; piece: number }
   | { kind: 'seanceDormant'; node: number; piece: number; super: boolean }
   | { kind: 'superReaper'; piece: number; effect: 'seance' | 'reaper' }
@@ -136,7 +148,7 @@ export type LogEntry =
   | { kind: 'gameOver' };
 
 export interface GameState {
-  schema: 4;
+  schema: 5;
   seed: number;
   rng: number;
   /** A separate stream for challenge seeds, so seeds shown to phones reveal nothing else. */
@@ -153,14 +165,15 @@ export interface GameState {
   slot: number;
   /** Count of actions started so far this game (1-based). */
   actionNumber: number;
-  /** The acting piece's roll, and its movement allowance. */
+  /** The acting piece's roll, and how many spaces it moves in all this action. */
   die: number | null;
   allowance: number;
   /** Die or Ghostly Stride; Second Roll's discarded result. Null before moving is decided. */
   rollInfo: RollInfo | null;
   /** The one item used in this action, if any. */
   itemUsed: ItemId | null;
-  selection: { dest: number | 'stay' | null };
+  /** The move in progress (phase 'choose'), or null. */
+  move: MoveProgress | null;
   /** Where the acting piece stood when its action began. */
   origin: number | null;
   /** True once this action has used its one minigame. */
@@ -192,8 +205,8 @@ export type Action =
   | { type: 'nominate'; piece: number; node: number }
   | { type: 'rollForLife' }
   | { type: 'roll' }
-  | { type: 'select'; dest: number | 'stay' | null }
-  | { type: 'confirmMove' }
+  /** Take the next step from `at` (with `left` steps remaining) to `to`; straight corridors then continue on their own. */
+  | { type: 'step'; at: number; left: number; to: number }
   | { type: 'pickOpponent'; option: number }
   | { type: 'hunt' }
   | { type: 'battle'; opponent: number }
@@ -212,11 +225,9 @@ export interface ActionResult {
 /** What a destination is publicly known to do (never from hidden traps). */
 export type KnownEffect = 'seance' | 'reaper' | 'poltergeist' | 'dormant' | null;
 
+/** What a possible landing space is publicly known to mean for the acting piece. */
 export interface MovePreview {
-  dest: number | 'stay';
-  path: number[];
-  usesSecret: boolean;
-  usesWall: boolean;
+  dest: number;
   /** A publicly known effect at the destination. */
   known: KnownEffect;
   /** Super Reaper: which effect it has right now. */

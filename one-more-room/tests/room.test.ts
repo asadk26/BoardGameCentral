@@ -60,14 +60,18 @@ function harness(seed = 1) {
 type H = ReturnType<typeof harness>;
 
 /** Build a lobby from a team layout such as [2, 1, 1, 1] (people per piece; 0 = a bot). */
+/**
+ * Build a lobby from a team layout such as [2, 1, 1, 1] (people per piece; 0 = a bot).
+ * Rooms start with four bot seats; a shorter layout uses the Advanced piece count.
+ */
 function lobby(layout: number[], seed = 1) {
   const h = harness(seed);
   if (layout.some((x) => x > 1)) h.room.handle('host', { t: 'setMode', mode: 'teams' });
+  if (layout.length !== 4) h.room.handle('host', { t: 'setPieceCount', count: layout.length });
   const people: Participant[][] = [];
   layout.forEach((count, i) => {
     const character = CHARACTERS[i].id as CharacterId;
     if (count === 0) {
-      h.room.handle('host', { t: 'addBot', character, bot: { personality: 'greedy', skill: 'steady' } });
       people.push([]);
       return;
     }
@@ -126,43 +130,89 @@ function play(h: H, opts: { maxSteps?: number; until?: () => boolean; skill?: ke
   }
 }
 
-describe('lobby: modes, pieces, teams and characters', () => {
-  it('Free-for-all: one person per piece, distinct characters, no pairs', () => {
-    const h = lobby([1, 1]);
-    const c = h.room.join('Cy');
-    h.room.handle(c.id, { t: 'claimPiece', character: CHARACTERS[0].id, name: 'Cy' });
-    expect(h.rejected(c.id)[0]).toMatch(/already uses that character/);
-    h.room.handle(c.id, { t: 'joinTeam', piece: 0, name: 'Cy' });
-    expect(h.rejected(c.id)[1]).toMatch(/Team Battle/);
-    h.room.handle(c.id, { t: 'claimPiece', character: 'vampire', name: 'Cy' });
-    expect(h.room.pieces.map((p) => p.character)).toEqual([CHARACTERS[0].id, CHARACTERS[1].id, 'vampire']);
-    // A person can switch character in the lobby, but not to a taken one.
-    h.room.handle(c.id, { t: 'setCharacter', character: CHARACTERS[1].id });
-    expect(h.room.pieces[2].character).toBe('vampire');
-    h.room.handle(c.id, { t: 'setCharacter', character: 'skeleton' });
-    expect(h.room.pieces[2].character).toBe('skeleton');
+describe('lobby: four pieces by default, bots in every free seat', () => {
+  it('a new room has four bot seats; each person who joins takes one over', () => {
+    const h = harness(1);
+    expect(h.room.pieces.map((p) => p.kind)).toEqual(['bot', 'bot', 'bot', 'bot']);
+    const people = ['Ana', 'Ben', 'Cy', 'Dee'].map((n) => h.room.join(n));
+    const kinds = () => h.room.pieces.map((p) => (p.kind === 'bot' ? 'B' : 'H')).join('');
+    h.room.handle(people[0].id, { t: 'claimPiece', character: 'witch', name: 'Ana' });
+    expect(h.room.pieces.length).toBe(4);
+    expect(h.room.pieces.filter((p) => p.kind === 'phone').length).toBe(1);
+    h.room.handle(people[1].id, { t: 'claimPiece', character: 'zombie', name: 'Ben' });
+    expect(kinds().split('').filter((k) => k === 'B').length).toBe(2); // two people + two bots
+    h.room.handle(people[2].id, { t: 'claimPiece', character: 'skeleton', name: 'Cy' });
+    expect(kinds().split('').filter((k) => k === 'B').length).toBe(1);
+    h.room.handle(people[3].id, { t: 'claimPiece', character: 'goblin', name: 'Dee' });
+    expect(kinds()).toBe('HHHH');
+    expect(new Set(h.room.pieces.map((p) => p.character)).size).toBe(4);
+    // A fifth person can't add a piece; they can watch (or join a pair in Team Battle).
+    const extra = h.room.join('Eve');
+    h.room.handle(extra.id, { t: 'claimPiece', character: 'vampire', name: 'Eve' });
+    expect(h.rejected(extra.id)[0]).toMatch(/All 4 pieces/);
   });
 
-  it('uneven teams start: five people as 2+1+1+1 and 2+2+1, six as 2+2+1+1, eight on four pieces', () => {
-    for (const layout of [[2, 1, 1, 1], [2, 2, 1], [2, 2, 1, 1], [2, 2, 2, 2], [1, 0], [2, 0, 0]]) {
-      const h = lobby(layout);
+  it('two people start a four-piece game: the other two seats are bots, never a two-piece game', () => {
+    for (const people of [1, 2, 3]) {
+      const h = harness(people);
+      for (let i = 0; i < people; i++) h.room.handle(h.room.join(`P${i}`).id, { t: 'claimPiece', character: CHARACTERS[i + 2].id, name: `P${i}` });
       h.room.handle('host', { t: 'start' });
       const g = h.room.session!.game;
-      expect(g.pieces.length).toBe(layout.length);
-      expect(g.pieces.map((p) => (p.bot ? 0 : p.controllers.length))).toEqual(layout);
-      expect(new Set(g.pieces.map((p) => p.character)).size).toBe(layout.length);
+      expect(g.pieces.length).toBe(4);
+      expect(g.pieces.filter((p) => p.bot).length).toBe(4 - people);
+      expect(new Set(g.pieces.map((p) => p.character)).size).toBe(4);
     }
   });
 
-  it('caps: four pieces, two people per piece, eight phones; a ninth phone can only watch', () => {
-    const h = lobby([2, 2, 2, 2]);
-    const extra = h.room.join('Nine');
-    h.room.handle(extra.id, { t: 'claimPiece', character: 'skeleton', name: 'Nine' });
-    h.room.handle(extra.id, { t: 'joinTeam', piece: 0, name: 'Nine' });
-    expect(h.rejected(extra.id).length).toBe(2);
-    expect(h.room.pieceOf(extra.id)).toBeNull();
-    h.room.handle('host', { t: 'setMode', mode: 'ffa' });
-    expect(h.rejected('host')[0]).toMatch(/Split the pairs/);
+  it('a pair takes one piece; the other seats stay bots', () => {
+    const h = lobby([2, 0, 0, 0]);
+    h.room.handle('host', { t: 'start' });
+    const g = h.room.session!.game;
+    expect(g.pieces.map((p) => (p.bot ? 0 : p.controllers.length))).toEqual([2, 0, 0, 0]);
+  });
+
+  it('claiming a bot’s costume takes that bot’s seat; a person’s costume is refused; leaving hands the seat back to a bot', () => {
+    const h = harness(2);
+    const a = h.room.join('Ana');
+    const botChar = h.room.pieces[2].character;
+    h.room.handle(a.id, { t: 'claimPiece', character: botChar, name: 'Ana' });
+    expect(h.room.pieceOf(a.id)).toBe(2);
+    const b = h.room.join('Ben');
+    h.room.handle(b.id, { t: 'claimPiece', character: botChar, name: 'Ben' });
+    expect(h.rejected(b.id)[0]).toMatch(/already uses that character/);
+    h.room.handle(a.id, { t: 'leaveSeat' });
+    expect(h.room.pieces.length).toBe(4);
+    expect(h.room.pieces[2]).toMatchObject({ kind: 'bot', auto: true, character: botChar });
+  });
+
+  it('Advanced: fewer pieces is an explicit host choice that only removes bot seats', () => {
+    const h = lobby([1, 1, 0, 0]);
+    h.room.handle('host', { t: 'setPieceCount', count: 1 });
+    expect(h.rejected('host').pop()).toMatch(/2–4/);
+    h.room.handle('host', { t: 'setPieceCount', count: 2 });
+    expect(h.room.pieces.map((p) => p.kind)).toEqual(['phone', 'phone']);
+    h.room.handle('host', { t: 'setPieceCount', count: 4 });
+    expect(h.room.pieces.length).toBe(4);
+    h.room.handle('host', { t: 'start' });
+    expect(h.room.session!.game.pieces.length).toBe(4);
+  });
+
+  it('Free-for-all has no pairs; Team Battle allows mixed solo and paired pieces up to eight phones', () => {
+    const h = lobby([1, 1, 0, 0]);
+    const c = h.room.join('Cy');
+    h.room.handle(c.id, { t: 'joinTeam', piece: 0, name: 'Cy' });
+    expect(h.rejected(c.id)[0]).toMatch(/Team Battle/);
+    for (const layout of [[2, 1, 1, 1], [2, 2, 1, 0], [2, 2, 1, 1], [2, 2, 2, 2]]) {
+      const t = lobby(layout);
+      t.room.handle('host', { t: 'start' });
+      expect(t.room.session!.game.pieces.map((p) => (p.bot ? 0 : p.controllers.length))).toEqual(layout);
+    }
+    const full = lobby([2, 2, 2, 2]);
+    const nine = full.room.join('Nine');
+    full.room.handle(nine.id, { t: 'joinTeam', piece: 0, name: 'Nine' });
+    expect(full.room.pieceOf(nine.id)).toBeNull();
+    full.room.handle('host', { t: 'setMode', mode: 'ffa' });
+    expect(full.rejected('host')[0]).toMatch(/Split the pairs/);
   });
 });
 

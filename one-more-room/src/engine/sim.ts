@@ -6,22 +6,25 @@
 import { CHARACTERS, SUPER_REAPER } from './config';
 import { botRopeInputs, type ChallengeInput } from './challenges';
 import { botAction, newBotMemory, reflexOf, type BotMemory, type BotProfile } from './bots';
-import { actingPiece, createGame, dispatch, finalScores, knownEffectAt, legalRoutes, livingPiece, newSession, type ScoreLine, type Session } from './engine';
+import { actingPiece, createGame, dispatch, finalScores, knownEffectAt, livingPiece, moveExits, moveLandings, newSession, type ScoreLine, type Session } from './engine';
 import { seatView, type SeatView } from './view';
 import type { Action, GameState, LogEntry } from './types';
 
 /** A strategy override: return an action to force a behaviour, or null to defer to the bot. */
 export type Strategy = (view: SeatView) => Action | null;
 
-function choose(s: GameState, dest: number | 'stay'): Action {
-  return s.selection.dest === dest ? { type: 'confirmMove' } : { type: 'select', dest };
+/** The next step toward a landing the current move can reach. */
+export function headTo(s: GameState, dest: number): Action {
+  const exits = moveExits(s);
+  const way = exits.find((e) => moveLandings(s, e.to).includes(dest)) ?? exits[0];
+  return { type: 'step', at: s.pieces[actingPiece(s)].node, left: s.move!.remaining, to: way.to };
 }
 
-/** Never moves, living or ghost (and never challenges). */
+/** Wanders without aim (always the lowest-numbered way on) and never challenges. */
 export const camper: Strategy = (view) => {
   const s = view.state;
   if (actingPiece(s) !== view.piece) return null;
-  if (s.phase === 'choose') return choose(s, 'stay');
+  if (s.phase === 'choose') return { type: 'step', at: s.pieces[view.piece].node, left: s.move!.remaining, to: moveExits(s)[0].to };
   if (s.phase === 'hunt') return { type: 'declineHunt' };
   return null;
 };
@@ -30,9 +33,9 @@ export const camper: Strategy = (view) => {
 export const remoteSeeker: Strategy = (view) => {
   const s = view.state;
   if (actingPiece(s) !== view.piece || s.phase !== 'choose') return null;
-  const reach = [...legalRoutes(s).keys()];
+  const reach = moveLandings(s);
   const target = reach.find((d) => d === SUPER_REAPER) ?? reach.find((d) => knownEffectAt(s, d) === 'reaper');
-  return target === undefined ? null : choose(s, target);
+  return target === undefined ? null : headTo(s, target);
 };
 
 /** On a Reaper's Challenge the living piece always picks this one (the known weak ghost). */
@@ -139,7 +142,7 @@ export function simulateGame(opts: { seed: number; profiles: BotProfile[]; strat
     }
     if (!action) throw new Error(`No bot action in phase ${g.phase}`);
     if (action.type === 'roll') est += 4;
-    if (action.type === 'confirmMove') est += 8;
+    if (action.type === 'step') est += 2.5; // a fork decision
     if (action.type === 'nextTurn') {
       est += 2;
       stats.maxMinigamesInAction = Math.max(stats.maxMinigamesInAction, minigamesThisAction);
@@ -160,10 +163,11 @@ export function simulateGame(opts: { seed: number; profiles: BotProfile[]; strat
         stats.challengesByRound.push(0);
       }
       if (e.kind === 'move') {
-        lastMoveUsedWall = e.usesWall;
+        lastMoveUsedWall ||= e.usesWall;
+        est += 0.4 * (e.path.length - 1); // walking the steps
         if (e.usesWall) stats.wallMoves++;
       }
-      if (e.kind === 'stay') lastMoveUsedWall = false;
+      if (e.kind === 'roll' || (e.kind === 'itemUsed' && e.item === 'ghostlyStride')) lastMoveUsedWall = false;
       if (e.kind === 'challenge') {
         const key = `${e.challenge.host}:${e.challenge.participants.length}`;
         stats.challenges[key] = (stats.challenges[key] ?? 0) + 1;

@@ -38,7 +38,17 @@ interface PieceSlot {
   members: string[];
   bot?: BotProfile;
   botName?: string;
+  /** A bot filling an empty seat: the next person to join takes it over. */
+  auto?: boolean;
   localControl?: boolean;
+}
+
+/** The normal game has four pieces; free seats are played by bots until someone claims them. */
+export const DEFAULT_PIECE_COUNT = MAX_PIECES;
+const FILL_PERSONALITIES: BotProfile['personality'][] = ['greedy', 'cautious', 'mischievous', 'greedy'];
+
+function autoBot(character: CharacterId, i: number): PieceSlot {
+  return { character, kind: 'bot', members: [], bot: { personality: FILL_PERSONALITIES[i % 4], skill: 'steady' }, botName: `${CHARACTERS.find((c) => c.id === character)!.name} Bot`, auto: true };
 }
 
 interface Run {
@@ -100,6 +110,12 @@ export class Room {
     this.hostToken = token(deps.random);
     this.lastActivity = deps.now();
     this.mansion = mansion;
+    this.pieces = CHARACTERS.slice(0, DEFAULT_PIECE_COUNT).map((c, i) => autoBot(c.id, i));
+  }
+
+  /** A character no piece uses yet. */
+  private freeCharacter(): CharacterId {
+    return CHARACTERS.find((c) => !this.pieces.some((p) => p.character === c.id))!.id;
   }
 
   // ── who is who ────────────────────────────────────────────────────────
@@ -144,6 +160,7 @@ export class Room {
       kind: s.kind,
       members: s.members.map((m) => this.member(m)),
       bot: s.bot,
+      auto: s.auto,
       localControl: s.localControl,
     }));
   }
@@ -285,16 +302,21 @@ export class Room {
       case 'claimPiece': {
         if (!me || !inLobby) return reply({ t: 'rejected', reason: 'Pieces are fixed once the game starts.' });
         if (!CHARACTERS.some((c) => c.id === msg.character)) return reply({ t: 'rejected', reason: 'Unknown character.' });
-        const takenBy = this.pieces.findIndex((p) => p.character === msg.character);
+        const takenBy = this.pieces.findIndex((p) => p.character === msg.character && !p.auto);
         if (takenBy >= 0 && takenBy !== myPiece) return reply({ t: 'rejected', reason: 'Another piece already uses that character. In Team Battle, join that team instead.' });
         me.name = cleanText(msg.name, TEXT_LIMITS.playerName, me.name);
         if (myPiece !== null && this.pieces[myPiece].members.length === 1) {
+          const bot = this.pieces.findIndex((p) => p.auto && p.character === msg.character);
+          if (bot >= 0) this.pieces[bot] = autoBot(this.pieces[myPiece].character, bot);
           this.pieces[myPiece].character = msg.character;
           return this.broadcast();
         }
-        if (this.pieces.length >= MAX_PIECES) return reply({ t: 'rejected', reason: `The board holds ${MAX_PIECES} pieces. Join a team, or wait for a free piece.` });
+        // Take over a bot seat: the one already wearing this costume, else the first free one.
+        const seat = this.pieces.findIndex((p) => p.auto && p.character === msg.character);
+        const target = seat >= 0 ? seat : this.pieces.findIndex((p) => p.auto);
+        if (target < 0) return reply({ t: 'rejected', reason: `All ${this.pieces.length} pieces have people. Join a team, or watch.` });
         if (myPiece !== null) this.leave(me.id);
-        this.pieces.push({ character: msg.character, kind: 'phone', members: [me.id] });
+        this.pieces[target] = { character: msg.character, kind: 'phone', members: [me.id] };
         return this.broadcast();
       }
       case 'joinTeam': {
@@ -315,7 +337,9 @@ export class Room {
         if (!me || !inLobby || myPiece === null) return reply({ t: 'rejected', reason: 'Choose a piece first.' });
         if (!CHARACTERS.some((c) => c.id === msg.character)) return reply({ t: 'rejected', reason: 'Unknown character.' });
         const takenBy = this.pieces.findIndex((p) => p.character === msg.character);
-        if (takenBy >= 0 && takenBy !== myPiece) return reply({ t: 'rejected', reason: 'Another piece already uses that character.' });
+        if (takenBy >= 0 && takenBy !== myPiece && !this.pieces[takenBy].auto) return reply({ t: 'rejected', reason: 'Another piece already uses that character.' });
+        // A bot wearing it simply swaps costumes with this person.
+        if (takenBy >= 0 && takenBy !== myPiece) this.pieces[takenBy] = autoBot(this.pieces[myPiece].character, takenBy);
         this.pieces[myPiece].character = msg.character;
         return this.broadcast();
       }
@@ -324,17 +348,20 @@ export class Room {
         this.leave(me.id);
         return this.broadcast();
       }
-      case 'addBot': {
-        if (!isHost || !inLobby) return reply({ t: 'rejected', reason: 'Only the host can add bots before the start.' });
-        if (this.pieces.length >= MAX_PIECES) return reply({ t: 'rejected', reason: `The board holds ${MAX_PIECES} pieces.` });
-        if (!CHARACTERS.some((c) => c.id === msg.character) || this.pieces.some((s) => s.character === msg.character)) return reply({ t: 'rejected', reason: 'That character is taken.' });
-        if (!BOT_PROFILE_OK(msg.bot)) return reply({ t: 'rejected', reason: 'Bad bot profile.' });
-        this.pieces.push({ character: msg.character, kind: 'bot', members: [], bot: msg.bot, botName: `${CHARACTERS.find((c) => c.id === msg.character)!.name} Bot` });
+      case 'setPieceCount': {
+        // Advanced: fewer than four pieces. Only bot seats are added or removed, never people.
+        if (!isHost || !inLobby) return reply({ t: 'rejected', reason: 'Only the host sets the piece count, before the start.' });
+        const n = msg.count;
+        const people = this.pieces.filter((p) => !p.auto).length;
+        if (!Number.isInteger(n) || n < MIN_PIECES || n > MAX_PIECES) return reply({ t: 'rejected', reason: `${MIN_PIECES}–${MAX_PIECES} pieces.` });
+        if (n < people) return reply({ t: 'rejected', reason: 'More people than that have joined.' });
+        while (this.pieces.length < n) this.pieces.push(autoBot(this.freeCharacter(), this.pieces.length));
+        for (let i = this.pieces.length - 1; i >= 0 && this.pieces.length > n; i--) if (this.pieces[i].auto) this.pieces.splice(i, 1);
         return this.broadcast();
       }
-      case 'removePiece': {
-        if (!isHost || !inLobby || !this.pieces[msg.piece]) return reply({ t: 'rejected', reason: 'Cannot remove that piece.' });
-        this.pieces.splice(msg.piece, 1);
+      case 'setBot': {
+        if (!isHost || !inLobby || !this.pieces[msg.piece] || this.pieces[msg.piece].kind !== 'bot' || !BOT_PROFILE_OK(msg.bot)) return reply({ t: 'rejected', reason: 'Cannot change that bot.' });
+        this.pieces[msg.piece].bot = msg.bot;
         return this.broadcast();
       }
       case 'start': {
@@ -436,7 +463,7 @@ export class Room {
           if (decider !== myPiece)
             return reply({ t: 'rejected', id: msg.id, reason: g.phase === 'reward' ? 'Waiting for the battle winner to choose.' : 'Not your turn.' });
           if (this.controllerOf(myPiece) !== me.id) return reply({ t: 'rejected', id: msg.id, reason: 'Your teammate controls your piece this round.' });
-          if (a.type !== 'select' && (typeof msg.rev !== 'number' || msg.rev < this.phaseRev)) return reply({ t: 'rejected', id: msg.id, reason: 'stale' });
+          if (a.type !== 'step' && (typeof msg.rev !== 'number' || msg.rev < this.phaseRev)) return reply({ t: 'rejected', id: msg.id, reason: 'stale' });
         }
         this.apply(a, msg.id, from);
         return;
@@ -491,7 +518,8 @@ export class Room {
     if (i === null) return;
     const p = this.pieces[i];
     p.members = p.members.filter((m) => m !== pid);
-    if (p.kind === 'phone' && p.members.length === 0) this.pieces.splice(i, 1);
+    // An empty seat goes back to a bot, so the board keeps its pieces.
+    if (p.kind === 'phone' && p.members.length === 0) this.pieces[i] = autoBot(p.character, i);
   }
 
   private startGame() {
@@ -524,7 +552,7 @@ export class Room {
     this.session = r.session;
     const g = r.session.game;
     const phaseChanged = before.phase !== g.phase || before.actionNumber !== g.actionNumber;
-    if (action.type !== 'select') this.notice = null;
+    this.notice = null;
     this.syncRun();
     this.broadcast(r.events);
     if (phaseChanged) this.phaseRev = this.rev;

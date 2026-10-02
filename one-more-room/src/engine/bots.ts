@@ -3,9 +3,9 @@
 // state or its RNG. Personality (what they value) is separate from reflex
 // skill (how well they jump in Haunted Jump Rope).
 
-import { curseMultiplier, GHOST_MIN_MOVE, ITEM_POWER, STRIDE_ALLOWANCE, SUPER_REAPER, TRAP_COUNT, TRAP_ELIGIBLE, type ItemId } from './config';
-import { inAttackRange, ordinaryDistance, pieceRoutes } from './graph';
-import { actingPiece, itemBlock, knownEffectAt, legalRoutes, livingPiece, movementAllowance, previewMove, switchTargets } from './engine';
+import { curseMultiplier, ITEM_POWER, STRIDE_ALLOWANCE, SUPER_REAPER, TRAP_COUNT, TRAP_ELIGIBLE, type ItemId } from './config';
+import { exactReach, inAttackRange, ordinaryDistance } from './graph';
+import { actingPiece, itemBlock, knownEffectAt, livingPiece, moveExits, moveLandings, previewMove, switchTargets } from './engine';
 import { nextFloat } from './rng';
 import type { Action, GameState, MovePreview } from './types';
 import type { SeatView } from './view';
@@ -22,8 +22,8 @@ export interface BotProfile {
 export interface BotMemory {
   /** The bot's own stream: nothing to do with the game's RNG. */
   rng: number;
-  /** The move decided for the current action, so select → confirm never wavers. */
-  plan?: { key: string; dest: number | 'stay' };
+  /** The landing chosen for the current move, so every fork heads the same way. */
+  plan?: { key: string; dest: number };
 }
 
 export function newBotMemory(seed: number): BotMemory {
@@ -56,15 +56,12 @@ function rand(mem: BotMemory): number {
   return v;
 }
 
-// Where a ghost standing on `node` can end its move, for each possible roll.
+// Where a ghost standing on `node` can end its move, for each possible roll (exactly that many steps).
 const reachCache = new Map<number, Array<Set<number>>>();
 function ghostReach(node: number): Array<Set<number>> {
   let r = reachCache.get(node);
   if (!r) {
-    r = [1, 2, 3, 4, 5, 6].map((die) => {
-      const set = new Set<number>([node, ...pieceRoutes(node, movementAllowance(die, false), true).keys()]);
-      return set;
-    });
+    r = [1, 2, 3, 4, 5, 6].map((die) => new Set<number>(exactReach(node, die, true)));
     reachCache.set(node, r);
   }
   return r;
@@ -110,7 +107,7 @@ function evaluateLiving(view: SeatView, pv: MovePreview, profile: BotProfile, me
   const s = view.state;
   const me = s.pieces[view.piece];
   const w = WEIGHTS[profile.personality];
-  const end = pv.dest === 'stay' ? me.node : pv.dest;
+  const end = pv.dest;
   const n = s.pieces.length;
   const loseDuel = duelOdds(s);
   let risk = 0;
@@ -121,11 +118,10 @@ function evaluateLiving(view: SeatView, pv: MovePreview, profile: BotProfile, me
   let v = -risk * w.danger;
   if (pv.known === 'reaper') v -= loseDuel * 1.2;
   if (pv.known === 'seance') v -= ((n - 1) / n) * (1.2 - w.chaos * 0.3);
-  if (pv.dest !== 'stay') {
-    const odds = unknownTrapOdds(s, view.ownNomination, end);
-    // Two in six effects are Séances, two are Reaper duels; Poltergeists just move us.
-    v -= odds * ((2 / 6) * ((n - 1) / n) + (2 / 6) * loseDuel) * w.unknown;
-  }
+  const odds = unknownTrapOdds(s, view.ownNomination, end);
+  // Two in six effects are Séances, two are Reaper duels; Poltergeists just move us.
+  v -= odds * ((2 / 6) * ((n - 1) / n) + (2 / 6) * loseDuel) * w.unknown;
+  if (end === me.node) v -= 0.02; // ending where we began rarely helps
   // Keep away from the old lair and dead ends where ghosts cluster.
   for (let g = 0; g < n; g++) if (g !== view.piece) v += Math.min(4, ordinaryDistance(s.pieces[g].node, end)) * 0.03;
   return v + rand(mem) * 0.05;
@@ -133,10 +129,9 @@ function evaluateLiving(view: SeatView, pv: MovePreview, profile: BotProfile, me
 
 function evaluateGhost(view: SeatView, pv: MovePreview, profile: BotProfile, mem: BotMemory): number {
   const s = view.state;
-  const me = s.pieces[view.piece];
   const w = WEIGHTS[profile.personality];
   const living = livingPiece(s);
-  const end = pv.dest === 'stay' ? me.node : pv.dest;
+  const end = pv.dest;
   const n = s.pieces.length;
   const win = duelOdds(s);
   let v = 0;
@@ -148,21 +143,22 @@ function evaluateGhost(view: SeatView, pv: MovePreview, profile: BotProfile, mem
   // A ghost battle for an item: a side objective when the life is out of reach.
   if (!pv.canChallenge && !pv.known && (pv.battleTargets.length || pv.versus)) v = Math.max(v, lootValue(s, view.piece, w));
   // An unknown corridor might hide something; for a ghost that is mostly upside.
-  if (pv.dest !== 'stay' && !pv.canChallenge && !pv.known) v += unknownTrapOdds(s, view.ownNomination, end) * 0.2 * w.chaos;
+  if (!pv.canChallenge && !pv.known) v += unknownTrapOdds(s, view.ownNomination, end) * 0.2 * w.chaos;
   return v + rand(mem) * 0.04;
 }
 
-function planMove(view: SeatView, profile: BotProfile, mem: BotMemory): number | 'stay' {
+/** The landing this bot wants, among every space its exact move can end on. */
+function planMove(view: SeatView, profile: BotProfile, mem: BotMemory): number {
   const s = view.state;
   const me = s.pieces[view.piece];
-  let best: { dest: number | 'stay'; v: number } | null = null;
-  for (const dest of [...legalRoutes(s).keys(), 'stay' as const]) {
+  let best: { dest: number; v: number } | null = null;
+  for (const dest of moveLandings(s)) {
     const pv = previewMove(s, dest);
     if (!pv) continue;
     const v = me.alive ? evaluateLiving(view, pv, profile, mem) : evaluateGhost(view, pv, profile, mem);
     if (!best || v > best.v) best = { dest, v };
   }
-  return best ? best.dest : 'stay';
+  return best ? best.dest : me.node;
 }
 
 /** Choose the next action for `view.piece`, or null if it has nothing to do right now. */
@@ -186,10 +182,13 @@ export function botAction(view: SeatView, profile: BotProfile, mem: BotMemory): 
     case 'choose': {
       const reroll = planSecondRoll(view);
       if (reroll) return reroll;
-      const key = `${s.actionNumber}:${s.die}:${s.rollInfo?.kind}:${s.itemUsed}`;
-      if (mem.plan?.key !== key) mem.plan = { key, dest: planMove(view, profile, mem) };
-      if (s.selection.dest !== mem.plan.dest) return { type: 'select', dest: mem.plan.dest };
-      return { type: 'confirmMove' };
+      const m = s.move!;
+      const key = `${s.actionNumber}:${s.allowance}:${s.rollInfo?.kind}:${s.itemUsed}`;
+      if (mem.plan?.key !== key || !moveLandings(s).includes(mem.plan.dest)) mem.plan = { key, dest: planMove(view, profile, mem) };
+      const exits = moveExits(s);
+      const dest = mem.plan.dest;
+      const way = exits.find((e) => moveLandings(s, e.to).includes(dest)) ?? exits[0];
+      return { type: 'step', at: s.pieces[me].node, left: m.remaining, to: way.to };
     }
     case 'pick': {
       // Pick the ghost whose win would hurt least: the one with the fewest points.
@@ -223,9 +222,8 @@ function planItemBeforeRoll(view: SeatView): Action | null {
   const item: ItemId | null = me.item;
   if (!item || me.alive || item === 'secondRoll') return null;
   const living = s.pieces[livingPiece(s)];
-  const reach = (from: number, allowance: number) =>
-    inAttackRange(from, living.node) || [...pieceRoutes(from, allowance, true).keys()].some((d) => inAttackRange(d, living.node));
-  if (reach(me.node, GHOST_MIN_MOVE)) return null; // already a sure shot
+  const reach = (from: number, steps: number) => exactReach(from, steps, true).some((d) => inAttackRange(d, living.node));
+  if (threatChance(me.node, living.node) >= 0.5) return null; // a roll is already likely to reach
   if (item === 'ghostlyStride' && !itemBlock(s, 'ghostlyStride') && reach(me.node, STRIDE_ALLOWANCE)) return { type: 'useItem', item: 'ghostlyStride' };
   if (item === 'ghostSwitch' && !itemBlock(s, 'ghostSwitch', switchTargets(s)[0])) {
     const mine = ordinaryDistance(me.node, living.node);
@@ -242,7 +240,7 @@ function planSecondRoll(view: SeatView): Action | null {
   const s = view.state;
   const me = s.pieces[view.piece];
   if (me.item !== 'secondRoll' || itemBlock(s, 'secondRoll') || s.die === null || s.die > 3) return null;
-  const useful = [...legalRoutes(s).keys()].some((d) => {
+  const useful = moveLandings(s).some((d) => {
     const pv = previewMove(s, d);
     return !!pv && (pv.canChallenge || pv.known === 'reaper' || pv.superReaper !== null);
   });
@@ -257,5 +255,5 @@ export function defaultBotProfile(i: number): BotProfile {
 
 // Exposed for balance tooling: whether the Super Reaper or a known tile is reachable.
 export function reachableKnownTiles(s: GameState): number[] {
-  return [...legalRoutes(s).keys()].filter((d) => d === SUPER_REAPER || knownEffectAt(s, d) !== null);
+  return moveLandings(s).filter((d) => d === SUPER_REAPER || knownEffectAt(s, d) !== null);
 }
