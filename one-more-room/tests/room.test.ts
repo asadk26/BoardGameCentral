@@ -6,7 +6,8 @@ import { describe, expect, it } from 'vitest';
 import { Room, type Participant } from '../src/net/room';
 import type { RoomView, ServerMsg } from '../src/net/protocol';
 import { botAction, newBotMemory, type BotMemory } from '../src/engine/bots';
-import { botRopeInputs, challengeDurationMs, SKILLS } from '../src/engine/challenges';
+import { airTime, botRopeInputs, judgeRope, ropeSchedule, SKILLS } from '../src/engine/challenges';
+import { MAX_PRESS_LAG_MS } from '../src/net/room';
 import { CHARACTERS, ROUNDS, TRAP_ELIGIBLE, type CharacterId } from '../src/engine/config';
 import { actingPiece } from '../src/engine/engine';
 
@@ -60,14 +61,18 @@ function harness(seed = 1) {
 type H = ReturnType<typeof harness>;
 
 /** Build a lobby from a team layout such as [2, 1, 1, 1] (people per piece; 0 = a bot). */
+/**
+ * Build a lobby from a team layout such as [2, 1, 1, 1] (people per piece; 0 = a bot).
+ * Rooms start with four bot seats; a shorter layout uses the Advanced piece count.
+ */
 function lobby(layout: number[], seed = 1) {
   const h = harness(seed);
   if (layout.some((x) => x > 1)) h.room.handle('host', { t: 'setMode', mode: 'teams' });
+  if (layout.length !== 4) h.room.handle('host', { t: 'setPieceCount', count: layout.length });
   const people: Participant[][] = [];
   layout.forEach((count, i) => {
     const character = CHARACTERS[i].id as CharacterId;
     if (count === 0) {
-      h.room.handle('host', { t: 'addBot', character, bot: { personality: 'greedy', skill: 'steady' } });
       people.push([]);
       return;
     }
@@ -87,28 +92,35 @@ function lobby(layout: number[], seed = 1) {
 /** Drive every phone like a person would, from the views it receives, until the game ends or `until` holds. */
 function play(h: H, opts: { maxSteps?: number; until?: () => boolean; skill?: keyof typeof SKILLS } = {}) {
   const mems = new Map<string, BotMemory>();
-  const submitted = new Set<string>();
+  // Each phone's planned presses for the current rope, in server time: pressed (and stamped) when the clock gets there.
+  const plans = new Map<string, number[]>();
   for (let step = 0; step < (opts.maxSteps ?? 6000); step++) {
     if (opts.until?.()) return;
     const g = h.room.session?.game;
     if (!g || g.phase === 'gameOver') return;
     let acted = false;
+    let nextDue = Infinity;
     for (const p of h.room.participants.values()) {
       if (!p.connected) continue;
       const v = h.lastView(p.id);
       if (!v?.game || !v.you || v.you.piece === null) continue;
       const piece = v.you.piece;
       if (v.run && v.game.challenge && v.run.id === v.game.challenge.id && v.game.challenge.participants.includes(piece) && v.you.inControl) {
-        const key = `${v.run.id}:${v.run.attempt}:${piece}`;
-        if (!v.run.ready.includes(piece)) {
-          h.room.handle(p.id, { t: 'ready', challengeId: v.run.id, attempt: v.run.attempt });
+        const run = v.run;
+        const press = (at: number) => h.room.handle(p.id, { t: 'press', challengeId: run.id, attempt: run.attempt, at });
+        if (run.stage === 'ready' && !run.ready.includes(piece)) {
+          press(h.now());
           acted = true;
-        } else if (v.run.startAt !== null && !submitted.has(key) && !v.run.submitted.includes(piece)) {
+        } else if (run.stage === 'countdown' && run.startAt !== null) {
           const ch = v.game.challenge;
-          if (h.now() < v.run.startAt + challengeDurationMs(ch.seed)) h.advance(v.run.startAt + challengeDurationMs(ch.seed) - h.now() + 10);
-          h.room.handle(p.id, { t: 'challengeInput', challengeId: v.run.id, attempt: v.run.attempt, inputs: botRopeInputs(ch.seed, piece, SKILLS[opts.skill ?? 'steady']) });
-          submitted.add(key);
-          acted = true;
+          const key = `${run.id}:${run.attempt}:${piece}`;
+          if (!plans.has(key)) plans.set(key, botRopeInputs(ch.seed, piece, SKILLS[opts.skill ?? 'steady'], ch.multipliers[ch.participants.indexOf(piece)]).map((i) => run.startAt! + i.t));
+          const due = plans.get(key)!;
+          while (due.length && due[0] <= h.now()) {
+            press(due.shift()!);
+            acted = true;
+          }
+          if (due.length) nextDue = Math.min(nextDue, due[0]);
         }
         continue;
       }
@@ -122,47 +134,93 @@ function play(h: H, opts: { maxSteps?: number; until?: () => boolean; skill?: ke
         acted = true;
       }
     }
-    if (!acted) h.advance(200);
+    if (!acted) h.advance(Math.max(1, Math.min(200, nextDue - h.now())));
   }
 }
 
-describe('lobby: modes, pieces, teams and characters', () => {
-  it('Free-for-all: one person per piece, distinct characters, no pairs', () => {
-    const h = lobby([1, 1]);
-    const c = h.room.join('Cy');
-    h.room.handle(c.id, { t: 'claimPiece', character: CHARACTERS[0].id, name: 'Cy' });
-    expect(h.rejected(c.id)[0]).toMatch(/already uses that character/);
-    h.room.handle(c.id, { t: 'joinTeam', piece: 0, name: 'Cy' });
-    expect(h.rejected(c.id)[1]).toMatch(/Team Battle/);
-    h.room.handle(c.id, { t: 'claimPiece', character: 'vampire', name: 'Cy' });
-    expect(h.room.pieces.map((p) => p.character)).toEqual([CHARACTERS[0].id, CHARACTERS[1].id, 'vampire']);
-    // A person can switch character in the lobby, but not to a taken one.
-    h.room.handle(c.id, { t: 'setCharacter', character: CHARACTERS[1].id });
-    expect(h.room.pieces[2].character).toBe('vampire');
-    h.room.handle(c.id, { t: 'setCharacter', character: 'skeleton' });
-    expect(h.room.pieces[2].character).toBe('skeleton');
+describe('lobby: four pieces by default, bots in every free seat', () => {
+  it('a new room has four bot seats; each person who joins takes one over', () => {
+    const h = harness(1);
+    expect(h.room.pieces.map((p) => p.kind)).toEqual(['bot', 'bot', 'bot', 'bot']);
+    const people = ['Ana', 'Ben', 'Cy', 'Dee'].map((n) => h.room.join(n));
+    const kinds = () => h.room.pieces.map((p) => (p.kind === 'bot' ? 'B' : 'H')).join('');
+    h.room.handle(people[0].id, { t: 'claimPiece', character: 'witch', name: 'Ana' });
+    expect(h.room.pieces.length).toBe(4);
+    expect(h.room.pieces.filter((p) => p.kind === 'phone').length).toBe(1);
+    h.room.handle(people[1].id, { t: 'claimPiece', character: 'zombie', name: 'Ben' });
+    expect(kinds().split('').filter((k) => k === 'B').length).toBe(2); // two people + two bots
+    h.room.handle(people[2].id, { t: 'claimPiece', character: 'skeleton', name: 'Cy' });
+    expect(kinds().split('').filter((k) => k === 'B').length).toBe(1);
+    h.room.handle(people[3].id, { t: 'claimPiece', character: 'goblin', name: 'Dee' });
+    expect(kinds()).toBe('HHHH');
+    expect(new Set(h.room.pieces.map((p) => p.character)).size).toBe(4);
+    // A fifth person can't add a piece; they can watch (or join a pair in Team Battle).
+    const extra = h.room.join('Eve');
+    h.room.handle(extra.id, { t: 'claimPiece', character: 'vampire', name: 'Eve' });
+    expect(h.rejected(extra.id)[0]).toMatch(/All 4 pieces/);
   });
 
-  it('uneven teams start: five people as 2+1+1+1 and 2+2+1, six as 2+2+1+1, eight on four pieces', () => {
-    for (const layout of [[2, 1, 1, 1], [2, 2, 1], [2, 2, 1, 1], [2, 2, 2, 2], [1, 0], [2, 0, 0]]) {
-      const h = lobby(layout);
+  it('two people start a four-piece game: the other two seats are bots, never a two-piece game', () => {
+    for (const people of [1, 2, 3]) {
+      const h = harness(people);
+      for (let i = 0; i < people; i++) h.room.handle(h.room.join(`P${i}`).id, { t: 'claimPiece', character: CHARACTERS[i + 2].id, name: `P${i}` });
       h.room.handle('host', { t: 'start' });
       const g = h.room.session!.game;
-      expect(g.pieces.length).toBe(layout.length);
-      expect(g.pieces.map((p) => (p.bot ? 0 : p.controllers.length))).toEqual(layout);
-      expect(new Set(g.pieces.map((p) => p.character)).size).toBe(layout.length);
+      expect(g.pieces.length).toBe(4);
+      expect(g.pieces.filter((p) => p.bot).length).toBe(4 - people);
+      expect(new Set(g.pieces.map((p) => p.character)).size).toBe(4);
     }
   });
 
-  it('caps: four pieces, two people per piece, eight phones; a ninth phone can only watch', () => {
-    const h = lobby([2, 2, 2, 2]);
-    const extra = h.room.join('Nine');
-    h.room.handle(extra.id, { t: 'claimPiece', character: 'skeleton', name: 'Nine' });
-    h.room.handle(extra.id, { t: 'joinTeam', piece: 0, name: 'Nine' });
-    expect(h.rejected(extra.id).length).toBe(2);
-    expect(h.room.pieceOf(extra.id)).toBeNull();
-    h.room.handle('host', { t: 'setMode', mode: 'ffa' });
-    expect(h.rejected('host')[0]).toMatch(/Split the pairs/);
+  it('a pair takes one piece; the other seats stay bots', () => {
+    const h = lobby([2, 0, 0, 0]);
+    h.room.handle('host', { t: 'start' });
+    const g = h.room.session!.game;
+    expect(g.pieces.map((p) => (p.bot ? 0 : p.controllers.length))).toEqual([2, 0, 0, 0]);
+  });
+
+  it('claiming a bot’s costume takes that bot’s seat; a person’s costume is refused; leaving hands the seat back to a bot', () => {
+    const h = harness(2);
+    const a = h.room.join('Ana');
+    const botChar = h.room.pieces[2].character;
+    h.room.handle(a.id, { t: 'claimPiece', character: botChar, name: 'Ana' });
+    expect(h.room.pieceOf(a.id)).toBe(2);
+    const b = h.room.join('Ben');
+    h.room.handle(b.id, { t: 'claimPiece', character: botChar, name: 'Ben' });
+    expect(h.rejected(b.id)[0]).toMatch(/already uses that character/);
+    h.room.handle(a.id, { t: 'leaveSeat' });
+    expect(h.room.pieces.length).toBe(4);
+    expect(h.room.pieces[2]).toMatchObject({ kind: 'bot', auto: true, character: botChar });
+  });
+
+  it('Advanced: fewer pieces is an explicit host choice that only removes bot seats', () => {
+    const h = lobby([1, 1, 0, 0]);
+    h.room.handle('host', { t: 'setPieceCount', count: 1 });
+    expect(h.rejected('host').pop()).toMatch(/2–4/);
+    h.room.handle('host', { t: 'setPieceCount', count: 2 });
+    expect(h.room.pieces.map((p) => p.kind)).toEqual(['phone', 'phone']);
+    h.room.handle('host', { t: 'setPieceCount', count: 4 });
+    expect(h.room.pieces.length).toBe(4);
+    h.room.handle('host', { t: 'start' });
+    expect(h.room.session!.game.pieces.length).toBe(4);
+  });
+
+  it('Free-for-all has no pairs; Team Battle allows mixed solo and paired pieces up to eight phones', () => {
+    const h = lobby([1, 1, 0, 0]);
+    const c = h.room.join('Cy');
+    h.room.handle(c.id, { t: 'joinTeam', piece: 0, name: 'Cy' });
+    expect(h.rejected(c.id)[0]).toMatch(/Team Battle/);
+    for (const layout of [[2, 1, 1, 1], [2, 2, 1, 0], [2, 2, 1, 1], [2, 2, 2, 2]]) {
+      const t = lobby(layout);
+      t.room.handle('host', { t: 'start' });
+      expect(t.room.session!.game.pieces.map((p) => (p.bot ? 0 : p.controllers.length))).toEqual(layout);
+    }
+    const full = lobby([2, 2, 2, 2]);
+    const nine = full.room.join('Nine');
+    full.room.handle(nine.id, { t: 'joinTeam', piece: 0, name: 'Nine' });
+    expect(full.room.pieceOf(nine.id)).toBeNull();
+    full.room.handle('host', { t: 'setMode', mode: 'ffa' });
+    expect(full.rejected('host')[0]).toMatch(/Split the pairs/);
   });
 });
 
@@ -385,7 +443,7 @@ describe('disconnects, handover and pause', () => {
     const ch = h.room.session!.game.challenge!;
     const piece = ch.participants.find((p) => h.room.pieces[p].kind === 'phone')!;
     const who = h.room.controllerOf(piece)!;
-    h.room.handle(who, { t: 'ready', challengeId: run.id, attempt: run.attempt });
+    h.room.handle(who, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() });
     h.room.disconnect(who);
     expect(h.room.run!.paused).toMatch(/reconnect/);
     expect(h.room.run!.attempt).toBe(1);
@@ -397,7 +455,10 @@ describe('disconnects, handover and pause', () => {
     play(h, { until: () => !h.room.session!.game.challenge });
     const outcomes = [...(h.box.get('host') ?? [])].flatMap((m) => (m.t === 'view' ? m.events : [])).filter((e) => e.kind === 'outcome' && e.outcome.challengeId === ch.id);
     expect(outcomes.length).toBe(1);
-    expect(h.room.session!.game.pieces.map((p) => p.score)).toEqual(scoresBefore);
+    // Scores only ever come from bells: still exactly one point per completed round.
+    const g = h.room.session!.game;
+    expect(g.pieces.reduce((n, p) => n + p.score, 0)).toBe(g.round - 1 + (g.phase === 'gameOver' ? 1 : 0));
+    expect(g.pieces.reduce((n, p) => n + p.score, 0)).toBeGreaterThanOrEqual(scoresBefore.reduce((n, x) => n + x, 0));
   });
 
   it('the host hands a disconnected controller’s slot to another phone before a challenge starts; the old phone loses authority', () => {
@@ -419,9 +480,9 @@ describe('disconnects, handover and pause', () => {
     const run = g.room.run!;
     for (const p of g.room.session!.game.challenge!.participants) {
       const c = g.room.controllerOf(p);
-      if (c) g.room.handle(c, { t: 'ready', challengeId: run.id, attempt: run.attempt });
+      if (c) g.room.handle(c, { t: 'press', challengeId: run.id, attempt: run.attempt, at: g.now() });
     }
-    if (g.room.run!.startAt !== null) {
+    if (g.room.run!.stage !== 'ready') {
       g.room.handle('host', { t: 'handover', piece: 0, slot: 1, to: g.room.join('Late').id });
       expect(g.rejected('host').pop()).toMatch(/Wait until this challenge ends/);
     }
@@ -440,5 +501,119 @@ describe('disconnects, handover and pause', () => {
     h.room.handle('host', { t: 'pause', on: false });
     play(h, { until: () => h.room.session!.game.phase === 'turnStart' });
     expect(h.room.session!.game.phase).toBe('turnStart');
+  });
+});
+
+describe('Jump on the phone, rope on the TV', () => {
+  /** A table with one phone (P0a) and three bots, at the first challenge that phone takes part in. */
+  function phoneChallenge(seed: number) {
+    for (let s = seed; s < seed + 80; s++) {
+      const h = lobby([1, 0, 0, 0], s);
+      h.room.handle('host', { t: 'start' });
+      play(h, { until: () => !!h.room.run && h.room.session!.game.challenge!.participants.includes(0) });
+      if (h.room.run && h.room.session!.game.challenge!.participants.includes(0)) return h;
+    }
+    throw new Error('no phone challenge');
+  }
+
+  it('Jump means ready; the first rope of a match has an unscored practice, later ropes just a countdown', () => {
+    const h = phoneChallenge(1);
+    const me = h.people[0][0].id;
+    let run = h.room.run!;
+    expect(run.stage).toBe('ready');
+    expect(h.lastView('host')!.run!.practice).toBe(true);
+    h.room.handle(me, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() });
+    run = h.room.run!;
+    expect(run.stage).toBe('practice');
+    // Practice presses show on the TV but are never scored.
+    h.advance(1200 + 1500);
+    h.room.handle(me, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() });
+    expect(h.lastView('host')!.run!.practicePresses[0].length).toBe(1);
+    h.advance(10_000);
+    expect(h.room.run!.stage).toBe('countdown');
+    expect(h.room.run!.presses.get(0)).toBeUndefined();
+    // Finish this rope, then the next one for this phone has no practice.
+    play(h, { until: () => !h.room.session!.game.challenge });
+    play(h, { until: () => !!h.room.run && h.room.session!.game.challenge!.participants.includes(0), maxSteps: 20000 });
+    if (h.room.run) {
+      expect(h.lastView('host')!.run!.practice).toBe(false);
+      const r2 = h.room.run;
+      h.room.handle(me, { t: 'press', challengeId: r2.id, attempt: r2.attempt, at: h.now() });
+      expect(h.room.run!.stage).toBe('countdown');
+    }
+  });
+
+  it('the host can skip practice', () => {
+    const h = phoneChallenge(2);
+    const run = h.room.run!;
+    h.room.handle(h.people[0][0].id, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() });
+    expect(h.room.run!.stage).toBe('practice');
+    h.room.handle('host', { t: 'skipPractice' });
+    expect(h.room.run!.stage).toBe('countdown');
+  });
+
+  it('under LAN jitter, presses are judged at the moment they were pressed, and the TV draws exactly what is judged', () => {
+    const h = phoneChallenge(3);
+    const me = h.people[0][0].id;
+    let run = h.room.run!;
+    h.room.handle(me, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() });
+    h.room.handle('host', { t: 'skipPractice' });
+    run = h.room.run!;
+    const ch = h.room.session!.game.challenge!;
+    const k = ch.participants.indexOf(0);
+    const startAt = run.startAt!;
+    // A person pressing at the centre of each jump; each press reaches the room 5–120 ms later, with a ±15 ms clock estimate error.
+    let x = 12345;
+    const rnd = () => (x = (Math.imul(x, 1103515245) + 12345) >>> 0) / 2 ** 32;
+    const truth = ropeSchedule(ch.seed).bottoms.slice(0, 8).map((b) => startAt + b - airTime(ch.multipliers[k]) / 2);
+    const sent = truth.map((t) => ({ t, at: Math.round(t + (rnd() * 30 - 15)), arrive: t + 5 + rnd() * 115 }));
+    let maxDelay = 0;
+    let maxError = 0;
+    for (const p of sent) {
+      h.advance(Math.max(0, p.arrive - h.now()));
+      h.room.handle(me, { t: 'press', challengeId: run.id, attempt: run.attempt, at: p.at });
+      const tv = h.lastView('host')!.run!.presses[0];
+      const shown = tv[tv.length - 1] + startAt;
+      maxDelay = Math.max(maxDelay, h.now() - p.t); // press → on the TV
+      maxError = Math.max(maxError, Math.abs(shown - p.t)); // where the TV draws the jump vs the real press
+    }
+    const judgedInputs = [...h.room.run!.presses.get(0)!];
+    expect(h.lastView('host')!.run!.presses[0]).toEqual(judgedInputs);
+    expect(maxError).toBeLessThanOrEqual(15);
+    expect(maxDelay).toBeLessThanOrEqual(120);
+    // The judge's view of these presses: all eight cleared.
+    expect(judgeRope(ch.seed, [0], [judgedInputs.map((t) => ({ t }))], [ch.multipliers[k]]).scores[0]).toBe(8);
+    console.log(`press→TV delay ≤ ${Math.round(maxDelay)} ms; drawn vs real press ≤ ${Math.round(maxError)} ms (simulated 5–120 ms LAN jitter, ±15 ms clock error)`);
+  });
+
+  it('a press stamped too far back counts at most MAX_PRESS_LAG_MS before arrival (no big catch-up jumps), and a lagging phone is flagged', () => {
+    const h = phoneChallenge(4);
+    const me = h.people[0][0].id;
+    let run = h.room.run!;
+    h.room.handle(me, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() });
+    h.room.handle('host', { t: 'skipPractice' });
+    run = h.room.run!;
+    h.advance(run.startAt! - h.now() + 2000);
+    for (let i = 0; i < 4; i++) {
+      h.room.handle(me, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() - 600 });
+      h.advance(800);
+    }
+    const presses = h.room.run!.presses.get(0)!;
+    const arrival0 = run.startAt! + 2000;
+    expect(presses[0]).toBe(arrival0 - MAX_PRESS_LAG_MS - run.startAt!);
+    expect(h.lastView('host')!.run!.lagging).toContain(0);
+  });
+
+  it('presses during the countdown and after the rope ends are ignored; nobody can submit a score', () => {
+    const h = phoneChallenge(5);
+    const me = h.people[0][0].id;
+    let run = h.room.run!;
+    h.room.handle(me, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() });
+    h.room.handle('host', { t: 'skipPractice' });
+    run = h.room.run!;
+    h.room.handle(me, { t: 'press', challengeId: run.id, attempt: run.attempt, at: h.now() });
+    expect(h.room.run!.presses.get(0)).toBeUndefined();
+    h.room.handle(me, { t: 'action', id: 'cheat', rev: h.room.rev, action: { type: 'challengeResult', id: run.id, inputs: {} } });
+    expect(h.rejected(me).pop()).toMatch(/decided by the room/);
   });
 });

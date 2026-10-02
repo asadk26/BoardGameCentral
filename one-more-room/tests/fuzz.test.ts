@@ -4,7 +4,7 @@
 
 import { expect, it } from 'vitest';
 import { CHARACTERS, NODE_COUNT, ROUNDS, TRAP_ELIGIBLE } from '../src/engine/config';
-import { actingPiece, completedRounds, createGame, dispatch, itemBlock, legalRoutes, newSession, switchTargets, undo, undoInfo } from '../src/engine/engine';
+import { actingPiece, completedRounds, createGame, dispatch, itemBlock, moveExits, newSession, switchTargets, undo, undoInfo } from '../src/engine/engine';
 import { botRopeInputs, SKILLS } from '../src/engine/challenges';
 import type { Action, GameState } from '../src/engine/types';
 
@@ -25,6 +25,13 @@ function check(g: GameState, prev: GameState | null) {
   }
   expect(g.seancesUsed).toBeLessThanOrEqual(2);
   if (g.phase === 'challenge') expect(g.challenge).not.toBeNull();
+  if (g.phase === 'choose') expect(g.move).not.toBeNull();
+  else expect(g.move).toBeNull();
+  // Every landing used exactly the steps rolled: a completed move's path is allowance + 1 long.
+  const moves = g.log.filter((e) => e.kind === 'move');
+  if (moves.length && g.phase !== 'choose' && g.phase !== 'turnStart' && g.allowance) {
+    expect(moves.reduce((n, e) => n + (e.kind === 'move' ? e.path.length - 1 : 0), 0)).toBe(g.allowance);
+  }
   if (g.phase === 'reward') expect(g.pendingReward).not.toBeNull();
   g.pieces.forEach((p) => {
     if (p.alive) expect(p.item).toBeNull();
@@ -89,10 +96,10 @@ it('random full games keep every invariant', () => {
           uses++;
           continue;
         }
-        const dests = [...legalRoutes(g).keys()];
-        const dest = dests.length && rnd() < 0.85 ? dests[Math.floor(rnd() * dests.length)] : 'stay';
-        s = dispatch(s, { type: 'select', dest }).session;
-        a = { type: 'confirmMove' };
+        const exits = moveExits(g);
+        expect(exits.length).toBeGreaterThan(0);
+        expect(g.move!.remaining).toBeGreaterThan(0);
+        a = { type: 'step', at: g.pieces[actingPiece(g)].node, left: g.move!.remaining, to: exits[Math.floor(rnd() * exits.length)].to };
       } else if (g.phase === 'pick') a = { type: 'pickOpponent', option: g.pick!.options[Math.floor(rnd() * g.pick!.options.length)] };
       else if (g.phase === 'hunt') {
         const o = g.options!;

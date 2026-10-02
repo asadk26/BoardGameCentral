@@ -3,11 +3,11 @@
 // the whole table; the reward stream and pending draws never reach a view.
 
 import type { RefObject } from 'react';
-import { CHARACTERS, type ItemId } from '../engine/config';
+import { CHARACTERS, curseMultiplier, type ItemId } from '../engine/config';
 import { actingPiece, itemBlock, livingPiece, switchTargets } from '../engine/engine';
 import type { Action, GameState } from '../engine/types';
 import type { Personalization } from '../engine/save';
-import { BATTLE_LABEL, CHALLENGE_LABEL, curseLine, ITEM_INFO, itemTooltip, placeName } from '../text';
+import { BATTLE_LABEL, CHALLENGE_LABEL, cursePhrase, ITEM_INFO, itemTooltip, placeName } from '../text';
 import './items.css';
 
 type Btn = 'btn' | 'pbtn';
@@ -78,7 +78,7 @@ export function ItemActions({
     return (
       <div className="item-actions" role="group" aria-label={`Use ${info.name}`}>
         <p className="item-hint small">
-          <ItemBadge item={item} /> {base ?? 'Swap places with another ghost, then roll as usual. Nothing triggers from the swap.'}
+          <ItemBadge item={item} /> {base ?? 'Swap places with a ghost'}
         </p>
         {!base &&
           targets.map((t) => (
@@ -131,7 +131,8 @@ export function EncounterChoices({
   const o = game.options;
   if (!o) return null;
   const living = game.pieces[livingPiece(game)];
-  const curse = curseLine(living.streak);
+  const m = curseMultiplier(living.streak);
+  const curse = m < 1 ? `${living.name}: ${cursePhrase(m)}` : null;
   const battle = [...o.sameSpace.map((i) => ({ i, versus: false })), ...o.versus.map((i) => ({ i, versus: true }))];
   let first = true;
   const ref = () => {
@@ -141,30 +142,19 @@ export function EncounterChoices({
   };
   return (
     <div className="encounter">
-      <p className="prompt">Choose one — starting a Haunted Jump Rope ends your action.</p>
+      <p className="prompt big-prompt">Choose one</p>
       {o.living && (
         <div className="enc-group enc-life">
           <div className="enc-kind">❤ {CHALLENGE_LABEL}</div>
-          <p className="small">
-            <b>{living.name}</b> is within reach. Win and you take the life (and their space); lose and you are thrown back two spaces.
-          </p>
-          {curse && (
-            <p className="muted small">
-              {living.name}: {curse}
-            </p>
-          )}
           <button ref={ref()} className={`${btn} primary big risky`} disabled={disabled} onClick={() => send({ type: 'hunt' })}>
-            Challenge for the life 👻
+            Challenge {living.name} 👻
           </button>
+          {curse && <p className="muted small">{curse}</p>}
         </div>
       )}
       {battle.length > 0 && (
         <div className="enc-group enc-battle">
           <div className="enc-kind">⚔ {BATTLE_LABEL}</div>
-          <p className="small">
-            {o.versus.length ? 'From this Versus space you may battle any ghost, wherever it is. ' : ''}
-            Both stay ghosts. The winner gets one random item; the loser loses nothing. Nobody moves.
-          </p>
           {battle.map(({ i, versus }) => {
             const p = game.pieces[i];
             return (
@@ -175,20 +165,17 @@ export function EncounterChoices({
                 disabled={disabled}
                 onClick={() => send({ type: 'battle', opponent: i })}
                 style={{ ['--pc' as string]: colorOf(p.character) }}
+                title={versus ? `From the Versus space: battle any ghost (${placeName(p.node, pz)})` : 'On this space'}
               >
                 ⚔ Battle {p.name}
-                <small>
-                  {' '}
-                  · {versus ? `anywhere (${placeName(p.node, pz)})` : 'on this space'}
-                  {p.item ? ` · holds ${ITEM_INFO[p.item].name}` : ''}
-                </small>
+                {p.item && <small> · has {ITEM_INFO[p.item].name}</small>}
               </button>
             );
           })}
         </div>
       )}
       <button ref={ref()} className={btn} disabled={disabled} onClick={() => send({ type: 'declineHunt' })}>
-        End the action
+        End turn
       </button>
     </div>
   );
@@ -215,10 +202,7 @@ export function RewardChoice({
   const who = game.pieces[pr.piece];
   return (
     <div className="reward">
-      <p className="prompt">
-        <b>{who.name}</b> won the ghost battle! One item per piece —{' '}
-        {canChoose ? 'keep yours or take the new one.' : `waiting for ${who.name} to keep or replace.`}
-      </p>
+      <p className="prompt big-prompt">{canChoose ? 'Keep or replace?' : `${who.name}: keep or replace?`}</p>
       <div className="reward-cards">
         <ItemCard item={pr.current} label="Held now" />
         <ItemCard item={pr.offered} label="Just won" fresh />

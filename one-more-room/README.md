@@ -1,8 +1,9 @@
 # One More Room: One Life
 
-A Halloween board game in a miniature 3D haunted mansion for **2–4 pieces**. A
-piece is one person, a pair of teammates, or a bot, so up to eight people can
-play. There is **one life** in the mansion. One piece holds it; every other
+A Halloween board game in a miniature 3D haunted mansion for **four pieces**.
+A piece is one person, a pair of teammates, or a bot, so up to eight people can
+play. Bots fill every seat nobody takes, so two people get a full four-piece
+game without touching a setting (fewer pieces is an *Advanced* option). There is **one life** in the mansion. One piece holds it; every other
 piece is a ghost trying to steal it. Whoever holds the life when a round's bell
 rings scores a point. Ten rounds, and the most points wins.
 
@@ -28,11 +29,15 @@ phone controller through a small room service on your home network.
     whatever it is by then; nobody gains or loses an action.
   * When all have acted, the holder scores **+1**.
 * **Moving.**
-  * Roll one die. The living piece moves up to its roll. A ghost always drifts
-    at least 3 ("Rolled 1 • Ghost drift: 3 spaces").
-  * You may stay. Pieces never block each other.
-  * Everyone may use one secret passage per move. Only ghosts may use the two
-    dotted wall links (7↔10 and 22↔25).
+  * Roll one die and walk **exactly** that many spaces, living or ghost. There
+    is no staying and no minimum.
+  * The piece walks one space at a time. On a single path it carries on by
+    itself; at a fork it stops and shows big numbered arrows on the floor
+    (the same numbers on the phone). Pick one by clicking the arrow, pressing
+    its number, or tapping it on the phone.
+  * No turning straight back, unless it is a dead end. Loops are fine.
+  * Pieces never block each other. Everyone may use one secret passage per
+    move. Only ghosts may use the two dotted wall links (7↔10 and 22↔25).
 * **Stealing the life.**
   * A ghost ending its action on the living piece’s space, or one *ordinary*
     edge away, may challenge. Wall links and passages don’t count as adjacent.
@@ -40,26 +45,35 @@ phone controller through a small room service on your home network.
     the defender’s space. The loser is pushed exactly two ordinary steps away (to
     a free space, preferring where it started its action, then the lowest id).
   * The living piece can never start a challenge.
-* **Haunted Jump Rope.**
-  * Eight shared sweeps, one press per sweep; holding or mashing never counts
-    twice. The rope **speeds up after every sweep** (about 1.3 s between floor
-    passes at first, 0.8 s by the eighth, sudden death at top speed), the same
-    for everyone. The most clean jumps wins.
+* **Haunted Jump Rope.** Played on the TV with the real characters; a phone
+  is just one big **Jump** button.
+  * One press is one jump. The character leaves the floor at once, follows a
+    real arc, and must land before it can jump again, so holding or mashing
+    does nothing extra. A jump clears the rope only if the feet are above it
+    as it passes; what you see is exactly what is judged. Caught: a short
+    stumble and a MISS.
+  * Eight shared sweeps that **speed up** (1.4 s between floor passes at
+    first, about 0.9 s by the eighth, sudden death at top speed), the same for
+    everyone. The most clean jumps wins; the rope stops early once the score
+    is settled.
+  * The match's first rope shows a short demo and three unscored practice
+    sweeps (the host can skip). Later ropes are a ready screen and a 3-2-1
+    countdown.
   * Tied leaders (only they) take up to four sudden-death sweeps. Then the lower
     mean timing error on the eight sweeps wins. An exact tie gets the Reaper’s
     seeded, announced verdict.
   * Exactly one piece holds the life afterwards.
-* **The curse.** The longer the living piece keeps the life, the narrower its
-  personal jump window: ×1.0 after 0–1 rounds held, ×0.9 after 2, ×0.8 after 3,
-  ×0.7 after 4 or more (the cap).
+* **The curse.** The longer the living piece keeps the life, the **shorter and
+  lower its jumps** (Curse I–III): ×1.0 after 0–1 rounds held, ×0.9 after 2,
+  ×0.8 after 3, ×0.7 after 4 or more (the cap). The time the feet are above the
+  rope shrinks from about 470 ms to 410, 360 and 300 ms.
   * The multiplier is frozen when a challenge starts, and the same rule applies
     to humans and bots.
   * Losing the life resets the streak at once. A successful defence neither
     resets nor adds to it.
-  * Each lane shows its own window, and its ✓/✗ comes from the same judge that
-    decides the game.
+  * Each ✓ and MISS on the TV comes from the same judge that decides the game.
 * **Traps** trigger only when a movement ends on them (living or ghost). Passing
-  over, staying, and forced moves never trigger or reveal anything.
+  over and forced moves never trigger or reveal anything.
   * *Reaper’s Challenge.* A ghost landing here duels the living piece from
     anywhere. The living piece landing here picks a ghost. Nobody moves, and the
     tile stays active.
@@ -82,8 +96,8 @@ life *is* coming back to life.
 
 Ghosts can also fight each other, for an item rather than the life.
 
-* **Starting one.** After an ordinary move (not a stay, a Poltergeist throw, or
-  a trap minigame), a ghost may:
+* **Starting one.** After an ordinary move (not a Poltergeist throw or a trap
+  minigame), a ghost may:
   * battle a ghost standing on the **same space** (adjacency or passing through
     is not enough; if several are there, it picks one); or
   * from a **⚔ Versus space** (spaces **5** and **23**, visible in both cameras
@@ -95,7 +109,7 @@ Ghosts can also fight each other, for an item rather than the life.
   controller gets the usual ready and countdown. Each pair battles **once per
   round**. The living piece gets nothing on a Versus space; with two pieces a
   Versus space explains that there is no other ghost.
-* It is the same **Haunted Jump Rope**, with the normal window for both (no
+* It is the same **Haunted Jump Rope**, with full-height jumps for both (no
   curse). The life, scores, streaks and the round's order never change. The
   loser keeps everything.
 * **Reward.** The winner draws one item after the result, from its own seeded
@@ -105,12 +119,12 @@ Ghosts can also fight each other, for an item rather than the life.
     turn. Winning the same item changes nothing.
   * No trading, dropping or stacking.
 * **Items** (ghosts only, one per action, never in the action that won it):
-  * *Second Roll:* after rolling, before moving. One new die replaces the old
-    one for good (a ghost still drifts at least 3).
+  * *Second Roll:* after rolling, before moving. Only before the first step. One
+    new die replaces the old one for good.
   * *Ghost Switch:* before rolling. Swap places with another ghost on a
     different space. Nothing triggers from the swap; then roll and move as
     usual.
-  * *Ghostly Stride:* before rolling, instead of rolling. Move up to 6 spaces;
+  * *Ghostly Stride:* before rolling, instead of rolling. Walk exactly 6 spaces;
     no die is rolled.
   * Gaining the life by any route (challenge, Reaper, Séance) clears the item.
 
@@ -159,9 +173,18 @@ there explains that and never shows a join code or QR code.
    phone room**. The lobby shows a room code, a QR code, and a join link that
    uses the laptop’s network address, never `localhost`.
 4. Phones scan the QR code (or open the link and type the code), pick a name and
-   a costume, and in Team Battle can **join a teammate’s piece**. The host can
-   add bots, then presses **Start**.
-5. During play, the host menu can **pause**, **hand a disconnected controller’s
+   a costume, and in Team Battle can **join a teammate’s piece**. Every seat
+   nobody takes is a **bot** (labelled BOT on the TV), so the game always has
+   four pieces; the host presses **Start · N humans + M bots**. Fewer pieces is
+   under *Advanced*.
+5. **The jump rope is played on the TV.** The phone shows your name and one big
+   **Jump** button: watch your character on the TV and press as the rope
+   reaches its feet. Presses carry the phone's clock (synced to the room's), so
+   the TV judges when you pressed, not when the message arrived. A press that
+   arrives more than 250 ms late is clamped to its arrival time, and a phone
+   with poor timing is flagged on the TV so the host can move that piece to
+   the TV keyboard.
+6. During play, the host menu can **pause**, **hand a disconnected controller’s
    slot to another phone** (never mid-challenge), hand a whole piece to a bot, or
    let a piece jump on the **TV keyboard**. A phone that refreshes rejoins its
    own piece. If someone drops mid-challenge, it freezes and restarts from a
@@ -225,11 +248,14 @@ No public room service is deployed or offered.
 Local games save in this browser’s `localStorage` under keys starting with
 `one-more-room/`. Nothing else in storage is read or changed.
 
-* The save (schema 4) holds: the action order and used slots, who holds the
+* The save (schema 5) holds: a move in progress (steps left, where it came
+  from, passages used), so a reload resumes a walk at the same fork; the action order and used slots, who holds the
   life, streaks, scores, controllers, trap truth and public knowledge, the
   Séance count, any pending challenge, and the RNGs. It also holds items, the
   action each item was won in, this round's battle pairs, and any pending
   keep-or-replace choice, so a reload never re-draws or duplicates a reward.
+* Schema-4 saves are migrated: a move that was waiting for a destination
+  restarts its walk with the same roll.
 * One Life saves from before ghost battles (schema 3) are migrated with empty
   inventories. A schema-3 save whose hidden trap sits on a new Versus space
   (5 or 23) can't continue on the new board. The player is told so and offered
@@ -246,8 +272,33 @@ Local games save in this browser’s `localStorage` under keys starting with
 `npm run balance` simulates games with bots of equal reflex skill, so the
 numbers show the rules’ structure rather than who jumps best. **These are
 simulation estimates.** They say nothing about fun, and the minutes come from a
-simple per-action time model, not from real tables. Figures below are from 400
-games per setting:
+simple per-action time model, not from real tables.
+
+### Exact-roll movement (current rules)
+
+Moves now walk exactly the roll, with no stay and no ghost minimum. 300 games
+per setting, equal *steady* bots, ghost battles on; the earlier "up to the
+roll" figures (tables further down) in brackets:
+
+| Measure | 2 pieces | 3 pieces | 4 pieces |
+|---|---|---|---|
+| Encounters per round | 0.63 (0.76) | 1.41 (1.61) | 2.22 (2.67) |
+| Life swaps per round | 0.36 (0.43) | 0.67 (0.85) | 0.99 (1.31) |
+| Rounds without any encounter | 38% (25%) | 9% (4%) | 1% (1%) |
+| Average longest living streak | 4.3 (3.7) | — | — |
+| First holder's win share (fair) | — | 37% (33%) | 25% (25%) |
+| Estimated minutes (model) | ~7 | ~12 | ~17 |
+
+Exact rolls make the chase a little less certain: a ghost one space away
+can't simply stop next to the life. Four pieces stays busy (an encounter in
+99% of rounds, a swap about once a round) and fair to the first holder. Two
+pieces gets quiet (38% of rounds with no encounter), which is one reason four
+pieces, filled with bots, is the default. Nothing was retuned in response.
+
+### Before exact-roll movement
+
+Figures below are from 400 games per setting, with the older "up to the roll,
+ghosts at least 3" movement:
 
 | Measure | 2 pieces | 3 pieces | 4 pieces |
 |---|---|---|---|
@@ -282,7 +333,7 @@ What this shows:
   is in `POLICY.rotateHunters` in `src/engine/config.ts`.
 * **The first holder has no lasting advantage**, and in 4-piece games is
   slightly behind (21% of wins against a fair 25%). The Super Reaper is four
-  steps from two ghost spawns, and ghosts always move at least 3, so the first
+  steps from two ghost spawns, and (under those older rules) ghosts always moved at least 3, so the first
   holder is usually attacked in round 1. Alternative ghost spawns (16/22/25,
   17/22/25, 15/22/25 and others) all measured within noise of the default, so
   the defaults stayed.
@@ -354,6 +405,21 @@ What this shows (bots, not people):
 The most valuable next human test is whether **choosing to fight another ghost
 is fun**, or just a distraction from the chase for the life.
 
+## Checklist for a first real playtest
+
+The browser checks run headless with software graphics: they can't feel input
+delay, Wi-Fi jitter, sound or a real TV. On real hardware:
+
+1. Host a phone room on the TV, join with **two phones**. The lobby should show
+   two HUMAN and two BOT pieces without touching a setting; press Start.
+2. Watch one move with a fork: the piece walks by itself, stops, and big
+   numbered arrows appear on the TV floor and on the phone. Pick on the phone.
+3. On the first rope, try the three practice sweeps on the phones **while
+   looking at the TV**. Jumps should feel instant and fair; if the TV says a
+   phone's timing is poor, check the Wi-Fi (or use the TV keyboard).
+4. Play on with the curse: a cursed character's jumps should look visibly
+   shorter.
+
 ## Not in this iteration
 
 * **Draw for Your Life / Deadly Charades** stays deferred. It needs a drawing or
@@ -368,7 +434,7 @@ src/
   engine/            the rules — pure, deterministic TypeScript, no rendering
     config.ts        board graph, spawns, traps, curse, rope timings, turn-order policy
     graph.ts         adjacency, ghost wall links, routes, ordinary distance and attack range
-    challenges.ts    Haunted Jump Rope schedule and judge (2–4 jumpers, curse windows), bot reflexes
+    challenges.ts    Haunted Jump Rope schedule and judge (jump physics, 2–4 jumpers, curse), bot reflexes
     engine.ts        life roll, schedules, moves, hunts, traps, relocation, scoring, undo
     view.ts          public and per-piece views (the hidden-information boundary)
     bots.ts          personalities (cautious / greedy / mischievous) over filtered views

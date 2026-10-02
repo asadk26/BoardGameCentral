@@ -412,18 +412,6 @@ function Candelabra({ p, s = 1 }: { p: Vec; s?: number }) {
   );
 }
 
-function Portrait({ p, r = 0, c = '#6d3f7a' }: { p: Vec; r?: number; c?: string }) {
-  return (
-    <group position={p} rotation={[0, r, 0]}>
-      <BoxP p={[0, 0, 0]} s={[0.55, 0.7, 0.05]} c="#b5892f" metal={0.6} rough={0.35} />
-      <BoxP p={[0, 0, 0.03]} s={[0.42, 0.56, 0.02]} c={c} cast={false} />
-      <SphP p={[0, 0.06, 0.05]} rad={0.1} c="#e9d9c0" s={[1, 1.2, 0.3]} />
-      <SphP p={[-0.035, 0.08, 0.08]} rad={0.015} c="#7ff5e6" e="#7ff5e6" ei={1} />
-      <SphP p={[0.035, 0.08, 0.08]} rad={0.015} c="#7ff5e6" e="#7ff5e6" ei={1} />
-    </group>
-  );
-}
-
 function Armor({ p, r = 0 }: { p: Vec; r?: number }) {
   return (
     <group position={p} rotation={[0, r, 0]}>
@@ -436,23 +424,6 @@ function Armor({ p, r = 0 }: { p: Vec; r?: number }) {
         <coneGeometry args={[0.06, 0.16, 4]} />
         <M c="#c7ccd6" metal={0.8} rough={0.3} />
       </mesh>
-    </group>
-  );
-}
-
-function Stairs({ p }: { p: Vec }) {
-  return (
-    <group position={p}>
-      {Array.from({ length: 7 }, (_, i) => (
-        <BoxP key={i} p={[0, 0.08 + i * 0.16, -i * 0.28]} s={[2.4 - i * 0.05, 0.16 + i * 0.32, 0.3]} c={i % 2 ? '#5a2233' : '#63283a'} r={[0, 0, 0]} />
-      ))}
-      {[-1, 1].map((s) => (
-        <group key={s}>
-          <BoxP p={[s * 1.25, 0.8, -0.9]} s={[0.1, 0.1, 2.2]} c="#3d2216" r={[-0.52, 0, 0]} />
-          <CylP p={[s * 1.25, 0.35, 0.1]} a={[0.07, 0.07, 0.7]} c="#3d2216" />
-          <SphP p={[s * 1.25, 0.75, 0.1]} rad={0.09} c="#d8a657" />
-        </group>
-      ))}
     </group>
   );
 }
@@ -472,43 +443,6 @@ function Rug({ p, s, c, border }: { p: Vec; s: [number, number]; c: string; bord
   );
 }
 
-function Chandelier({ p }: { p: Vec }) {
-  const ref = useRef<THREE.Group>(null);
-  useFrame(({ clock }) => {
-    if (ref.current) ref.current.rotation.z = Math.sin(clock.elapsedTime * 0.7) * 0.03;
-  });
-  return (
-    <group position={p} ref={ref}>
-      <mesh position={[0, 0.6, 0]}>
-        <cylinderGeometry args={[0.01, 0.01, 1.2, 4]} />
-        <meshBasicMaterial color="#1a1020" />
-      </mesh>
-      <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[0.5, 0.03, 6, 24]} />
-        <M c="#d8a657" metal={0.8} rough={0.3} />
-      </mesh>
-      {Array.from({ length: 6 }, (_, i) => {
-        const a = (i / 6) * Math.PI * 2;
-        return <Candle key={i} p={[Math.cos(a) * 0.5, 0, Math.sin(a) * 0.5]} h={0.12} />;
-      })}
-    </group>
-  );
-}
-
-function Window({ p, r = 0 }: { p: Vec; r?: number }) {
-  return (
-    <group position={p} rotation={[0, r, 0]}>
-      <mesh>
-        <planeGeometry args={[0.7, 0.8]} />
-        <meshBasicMaterial color="#6f7fd8" transparent opacity={0.55} toneMapped={false} />
-      </mesh>
-      <BoxP p={[0, 0, 0.01]} s={[0.04, 0.8, 0.02]} c="#2a1d14" cast={false} />
-      <BoxP p={[0, 0, 0.01]} s={[0.7, 0.04, 0.02]} c="#2a1d14" cast={false} />
-    </group>
-  );
-}
-
-/** All furnishings, laid out around the fixed node coordinates. */
 export function MansionProps({ round }: { round: number }) {
   return (
     <group>
@@ -518,7 +452,6 @@ export function MansionProps({ round }: { round: number }) {
       <Pumpkin p={[-5.5, 0.45, 6.2]} s={0.8} />
       <Pumpkin p={[-6.7, 0, 6.5]} s={1.1} />
       <BoxP p={[-3.25, 0.3, 5.5]} s={[0.4, 0.6, 0.6]} c="#6b3f22" />
-      <Cobweb p={[-7.0, 0.75, 5.1]} r={[0, Math.PI / 4, 0]} s={0.9} />
 
       {/* Dining room (node 7 at -10,4) */}
       <Rug p={[-10.7, 0.02, 5.6]} s={[2.6, 1.5]} c="#6b1f2e" border="#d8a657" />
@@ -529,8 +462,6 @@ export function MansionProps({ round }: { round: number }) {
         <Chair key={`b${x}`} p={[x, 0, 6.2]} r={Math.PI} />,
       ])}
       <Pumpkin p={[-11.2, 0.45, 5.6]} s={0.5} lit />
-      <Portrait p={[-12.15, 0.8, 4.0]} r={Math.PI / 2} c="#7a2a3a" />
-      <Cobweb p={[-12.2, 0.75, 6.6]} r={[0, Math.PI * 0.75, 0]} />
 
       {/* Conservatory (node 10 at -8,0) */}
       <Plant p={[-8.7, 0, -2.2]} s={1.3} />
@@ -548,15 +479,11 @@ export function MansionProps({ round }: { round: number }) {
       <Trunk p={[-1.5, 0, -5.4]} r={-0.4} c="#4a3a5c" />
       <SheetFurniture p={[-1.6, 0, -6.5]} />
       <Candle p={[-2.8, 0, -5.2]} />
-      <Cobweb p={[-3.05, 0.75, -6.95]} r={[0, Math.PI / 4, 0]} />
-      <Window p={[-2.0, 0.9, -6.9]} />
 
       {/* Ghost's lair (node 16 at 0,-4) */}
       <Rug p={[0, 0.02, -5.4]} s={[1.5, 2.6]} c="#1f3b52" border="#5ff2e0" />
-      <Portrait p={[0, 0.85, -6.85]} c="#23324a" />
       <Candle p={[-0.55, 0, -6.3]} h={0.3} />
       <Candle p={[0.55, 0, -6.3]} h={0.26} />
-      <Cobweb p={[0.9, 0.75, -6.95]} r={[0, -Math.PI / 4, Math.PI / 2]} />
 
       {/* Crypt (node 17 at 2,-4) */}
       <BoxP p={[2.0, 0.22, -6.1]} s={[1.4, 0.44, 0.7]} c="#6c6f80" />
@@ -565,7 +492,6 @@ export function MansionProps({ round }: { round: number }) {
       <Tombstone p={[2.7, 0, -5.0]} r={-0.3} s={0.9} />
       <Candle p={[2.8, 0, -6.6]} h={0.3} />
       <Candle p={[1.2, 0, -6.6]} h={0.22} />
-      <Cobweb p={[3.05, 0.75, -6.95]} r={[0, -Math.PI / 4, 0]} />
 
       {/* Laboratory (node 22 at 8,0) */}
       <Table p={[8.0, 0, -2.2]} s={[1.8, 0.6]} c="#3a3440" />
@@ -584,21 +510,18 @@ export function MansionProps({ round }: { round: number }) {
         <SphP p={[0, 0.88, 0]} rad={0.1} c="#bff" e="#7ff5e6" ei={1.5} />
       </group>
       <Cauldron p={[8.7, 0, -1.1]} c="#7dff6a" s={0.9} />
-      <Cobweb p={[9.15, 0.75, -2.85]} r={[0, -Math.PI / 4, 0]} />
 
       {/* Nursery (node 25 at 10,4) */}
       <RockingHorse p={[11.3, 0, 5.6]} r={-0.6} />
       <Crib p={[10.2, 0, 6.1]} />
       <Blocks p={[11.6, 0, 4.0]} />
       <Rug p={[10.8, 0.02, 5.4]} s={[2.4, 1.6]} c="#6b4a7a" border="#f29ad6" />
-      <Cobweb p={[12.2, 0.75, 6.6]} r={[0, -Math.PI * 0.75, 0]} />
 
       {/* Library (node 29 at 4,6) */}
       <Bookshelf p={[5.9, 0, 5.2]} w={2.2} />
       <Bookshelf p={[6.9, 0, 6.2]} r={-Math.PI / 2} w={1.4} />
       <Chair p={[5.3, 0, 6.3]} r={Math.PI * 0.8} c="#7a2a3a" />
       <Candle p={[4.8, 0, 6.6]} h={0.3} />
-      <Cobweb p={[7.05, 0.75, 5.05]} r={[0, -Math.PI / 4, 0]} />
 
       {/* Entrance hall */}
       <Rug p={[0, 0.02, 8.3]} s={[5.2, 2.4]} c="#6b1f2e" border="#d8a657" />
@@ -608,9 +531,8 @@ export function MansionProps({ round }: { round: number }) {
       <Candelabra p={[2.6, 0, 7.4]} s={1.2} />
 
       {/* Grand hall between the wings */}
-      <Stairs p={[0, 0, -0.6]} />
+      {/* (The old grand staircase stood here; it hid pieces in the Lair and the north corridors.) */}
       <Rug p={[0, 0.02, 3.2]} s={[4.4, 4.6]} c="#3a1f4a" border="#d8a657" />
-      <Chandelier p={[0, 2.4, 3.2]} />
       <Clock p={[-2.3, 0, 0.3]} round={round} />
       <Armor p={[2.3, 0, 0.4]} r={-0.3} />
       <Armor p={[-2.3, 0, 5.2]} r={0.3} />
@@ -635,10 +557,8 @@ export function MansionProps({ round }: { round: number }) {
 
       {/* Far west and east galleries */}
       <Armor p={[-12.3, 0, -2.8]} r={0.8} />
-      <Portrait p={[-12.7, 0.8, 0.8]} r={Math.PI / 2} />
       <Bookshelf p={[-12.55, 0, -0.9]} r={Math.PI / 2} w={1.6} />
       <Armor p={[12.3, 0, -2.8]} r={-0.8} />
-      <Portrait p={[12.7, 0.8, 0.8]} r={-Math.PI / 2} c="#2e5e4e" />
       <Bookshelf p={[12.55, 0, -0.9]} r={-Math.PI / 2} w={1.6} />
       <Candelabra p={[-11.8, 0, 1.6]} />
       <Candelabra p={[11.8, 0, 1.6]} />
@@ -646,8 +566,6 @@ export function MansionProps({ round }: { round: number }) {
       {/* Corners of the north gallery */}
       <Pumpkin p={[-4.3, 0, -7.0]} s={1.1} lit />
       <Pumpkin p={[4.3, 0, -7.0]} s={1.1} lit />
-      <Cobweb p={[-4.85, 1.1, -7.55]} r={[0, Math.PI / 4, 0]} s={1.2} />
-      <Cobweb p={[4.85, 1.1, -7.55]} r={[0, -Math.PI / 4, 0]} s={1.2} />
     </group>
   );
 }

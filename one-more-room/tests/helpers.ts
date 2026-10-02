@@ -2,7 +2,8 @@
 // exact number of clean jumps from a challenge's own schedule.
 
 import { CHARACTERS, CHALLENGE, type TrapEffect } from '../src/engine/config';
-import { apply, buildSchedule, createGame, movementAllowance } from '../src/engine/engine';
+import { apply, buildSchedule, createGame, encounterOptions, moveExits, moveLandings, movementAllowance } from '../src/engine/engine';
+import { exactReach } from '../src/engine/graph';
 import { ropeSchedule, type ChallengeInput } from '../src/engine/challenges';
 import type { Action, Challenge, GameState } from '../src/engine/types';
 
@@ -61,23 +62,42 @@ export function setup(n: number, opts: { living: number; nodes: number[]; acting
   };
 }
 
-/** Put the acting piece straight into choosing with a given die. */
+/** Put the acting piece at the start of an exact move of `die` spaces (no randomness drawn). */
 export function rolled(s: GameState, die: number): GameState {
-  const me = s.pieces[s.schedule[s.slot]];
-  return {
-    ...s,
-    phase: 'choose',
-    die,
-    allowance: movementAllowance(die, me.alive),
-    rollInfo: { kind: 'die' },
-    selection: { dest: null },
-  };
+  const node = s.pieces[s.schedule[s.slot]].node;
+  return { ...s, phase: 'choose', die, allowance: movementAllowance(die), rollInfo: { kind: 'die' }, move: { remaining: die, prev: null, path: [node], usedSecret: false, usedWall: false } };
 }
 
-export function move(s: GameState, dest: number | 'stay', die = 6): GameState {
-  let t = rolled(s, die);
-  t = act(t, { type: 'select', dest });
-  return act(t, { type: 'confirmMove' });
+/** Walk the move in progress to `dest`, taking at each fork a way from which `dest` can still be the landing. */
+export function walk(s: GameState, dest: number): GameState {
+  for (let guard = 0; s.phase === 'choose' && guard < 12; guard++) {
+    const exits = moveExits(s);
+    const way = exits.find((e) => moveLandings(s, e.to).includes(dest));
+    if (!way) throw new Error(`Can't land on ${dest} from ${s.pieces[s.schedule[s.slot]].node} with ${s.move?.remaining} left`);
+    s = act(s, { type: 'step', at: s.pieces[s.schedule[s.slot]].node, left: s.move!.remaining, to: way.to });
+  }
+  return s;
+}
+
+/**
+ * Roll (without randomness) and move exactly onto `dest`. Uses `die` when the
+ * landing is exactly that far, otherwise the smallest roll that lands there.
+ */
+export function move(s: GameState, dest: number, die?: number): GameState {
+  const node = s.pieces[s.schedule[s.slot]].node;
+  const ghost = !s.pieces[s.schedule[s.slot]].alive;
+  const fits = (d: number) => exactReach(node, d, ghost).includes(dest);
+  const d = die !== undefined && fits(die) ? die : [1, 2, 3, 4, 5, 6].find(fits);
+  if (d === undefined) throw new Error(`No roll lands ${node} → ${dest}`);
+  return walk(rolled(s, d), dest);
+}
+
+/** Test shortcut: end the acting piece's movement where it stands (as if it had just landed there, no trap). */
+export function skipMove(s: GameState): GameState {
+  const pi = s.schedule[s.slot];
+  const o = encounterOptions(s, pi, false);
+  const any = o.living || o.sameSpace.length > 0 || o.versus.length > 0;
+  return { ...s, die: 1, rollInfo: { kind: 'die' }, move: null, phase: any ? 'hunt' : 'summary', options: any ? o : null, turnDirty: true };
 }
 
 /** Inputs with exactly `clean` perfect jumps (from the first sweep), optionally including sudden death. */
@@ -85,7 +105,7 @@ export function jumps(ch: Challenge, clean: number, suddenDeath = 0): ChallengeI
   const sch = ropeSchedule(ch.seed);
   const main = sch.bottoms.slice(0, Math.min(clean, CHALLENGE.rope.sweeps));
   const extra = sch.bottoms.slice(CHALLENGE.rope.sweeps, CHALLENGE.rope.sweeps + suddenDeath);
-  return [...main, ...extra].map((b) => ({ t: b - CHALLENGE.rope.idealMs }));
+  return [...main, ...extra].map((b) => ({ t: b - CHALLENGE.rope.airMs / 2 }));
 }
 
 /** Resolve the current challenge with a number of clean jumps per piece (default 0). */

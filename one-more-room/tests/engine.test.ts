@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CHALLENGE, CHARACTERS, curseMultiplier, ENTRANCE, GHOST_SPAWNS, ROUNDS, SUPER_REAPER, TRAP_ELIGIBLE, trapEligible } from '../src/engine/config';
-import { inAttackRange, ordinaryDistance, pieceRoutes } from '../src/engine/graph';
+import { exactReach, exitsFrom, inAttackRange, ORDINARY_ADJ, ordinaryDistance, SECRET_ADJ, WALL_ADJ } from '../src/engine/graph';
 import {
   activeController,
   apply,
@@ -10,20 +10,21 @@ import {
   createGame,
   dispatch,
   finalScores,
-  legalRoutes,
+  moveExits,
+  moveLandings,
   newSession,
   previewMove,
   retreatNode,
   undo,
   undoInfo,
 } from '../src/engine/engine';
-import { judgeRope, ropeSchedule } from '../src/engine/challenges';
+import { airTime, judgeRope, ropeSchedule } from '../src/engine/challenges';
 import { publicView, seatView } from '../src/engine/view';
 import { defaultPersonalization, deserialize, serialize } from '../src/engine/save';
 import { simulateGame } from '../src/engine/sim';
 import { botAction, defaultBotProfile, newBotMemory } from '../src/engine/bots';
 import type { GameState } from '../src/engine/types';
-import { act, aliveCount, DEFAULT_TRAPS, game, jumps, living, move, resolve, rolled, setup } from './helpers';
+import { act, aliveCount, DEFAULT_TRAPS, game, jumps, living, move, resolve, rolled, setup, skipMove, walk } from './helpers';
 
 describe('setup: the life roll and spawns', () => {
   it('the highest roll starts alive; only tied leaders reroll; ghosts spawn apart', () => {
@@ -83,7 +84,7 @@ describe('schedules: every piece acts exactly once per round', () => {
     // A=0 alive at the entrance; B, C, D hunt in seat order in round 1.
     let s = setup(4, { living: 0, nodes: [0, 2, 5, 20] });
     expect(s.schedule).toEqual([0, 1, 2, 3]);
-    s = move(s, 'stay');
+    s = skipMove(s);
     s = act(s, { type: 'nextTurn' });
     // B: to 1, next to A, and challenges.
     s = move(s, 1, 1);
@@ -122,7 +123,7 @@ describe('schedules: every piece acts exactly once per round', () => {
   it('a pending piece that wins life in a Séance takes its scheduled action as the living piece', () => {
     // Round 1: 0 alive; 1 lands on the Séance tile 14 and wins; 2 still acts — now as a ghost.
     let s = setup(3, { living: 0, nodes: [0, 13, 18] });
-    s = move(s, 'stay');
+    s = skipMove(s);
     s = act(s, { type: 'nextTurn' });
     s = move(s, 14, 1);
     expect(s.challenge?.kind).toBe('seance');
@@ -163,7 +164,7 @@ describe('survival streak and the curse', () => {
 
   it('the curse is frozen into the challenge and only for the living piece', () => {
     let s = setup(2, { living: 0, nodes: [5, 6], acting: 1, streaks: [3, 0] });
-    s = move(s, 'stay');
+    s = skipMove(s);
     s = act(s, { type: 'hunt' });
     expect(s.challenge!.multipliers).toEqual([0.8, 1]);
     s = resolve(s, { 0: 8, 1: 2 });
@@ -173,7 +174,7 @@ describe('survival streak and the curse', () => {
 
   it('losing life resets the streak at once; reclaiming it in the same round starts from zero', () => {
     let s = setup(3, { living: 0, nodes: [5, 6, 30], acting: 1, streaks: [4, 0, 0] });
-    s = move(s, 'stay');
+    s = skipMove(s);
     s = act(s, { type: 'hunt' });
     s = resolve(s, { 0: 1, 1: 8 });
     expect(s.pieces[0].streak).toBe(0);
@@ -188,24 +189,22 @@ describe('survival streak and the curse', () => {
     expect(s.pieces[1].streak).toBe(0);
   });
 
-  it('a narrower window changes only how presses are judged, identically for anyone', () => {
+  it('the curse means shorter, lower jumps: a jump timed for a full hop lands too soon when cursed', () => {
     const seed = 424242;
     const sch = ropeSchedule(seed);
     const at = (lead: number) => sch.bottoms.slice(0, 8).map((b) => ({ t: b - lead }));
-    // Lead 400 ms: clean at the normal window (±180 around 250), a miss at 0.7 (±126).
-    const v1 = judgeRope(seed, [0, 1], [at(400), at(400)], [1, 0.7]);
-    expect(v1.scores).toEqual([8, 0]);
-    const v2 = judgeRope(seed, [0, 1], [at(400), at(400)], [0.7, 1]);
-    expect(v2.scores).toEqual([0, 8]);
-    // Perfect timing clears at every tier.
-    expect(judgeRope(seed, [0, 1], [at(250), at(250)], [0.7, 0.7]).scores).toEqual([8, 8]);
+    // Take-off 440 ms before the rope: a full jump (540 ms) is still high; a 0.7 jump (378 ms) has already landed.
+    expect(judgeRope(seed, [0, 1], [at(440), at(440)], [1, 0.7]).scores).toEqual([8, 0]);
+    expect(judgeRope(seed, [0, 1], [at(440), at(440)], [0.7, 1]).scores).toEqual([0, 8]);
+    // A jump centred on the rope clears at every tier.
+    for (const m of [1, 0.9, 0.8, 0.7]) expect(judgeRope(seed, [0], [at(airTime(m) / 2)], [m]).scores).toEqual([8]);
   });
 
   it('streak increments at the bell for the holder only', () => {
     let s = setup(2, { living: 0, nodes: [0, 16] });
-    s = move(s, 'stay');
+    s = skipMove(s);
     s = act(s, { type: 'nextTurn' });
-    s = move(s, 'stay');
+    s = skipMove(s);
     if (s.phase === 'hunt') s = act(s, { type: 'declineHunt' });
     s = act(s, { type: 'nextTurn' });
     expect(s.pieces[0].score).toBe(1);
@@ -215,31 +214,81 @@ describe('survival streak and the curse', () => {
 });
 
 describe('movement and catches', () => {
-  it('ghosts drift at least three spaces; the living move exactly their roll or less', () => {
-    const s = setup(2, { living: 0, nodes: [0, 16], acting: 1 });
-    const g = rolled(s, 1);
-    expect(g.allowance).toBe(3);
-    expect([...legalRoutes(g).keys()].some((d) => ordinaryDistance(16, d) === 3)).toBe(true);
+  it('everyone moves exactly the roll: a 1 is one space, a 2 two, living or ghost', () => {
+    const g = rolled(setup(2, { living: 0, nodes: [0, 16], acting: 1 }), 1);
+    expect(g.allowance).toBe(1);
+    expect(moveLandings(g)).toEqual([15, 17]);
     const l = rolled(setup(2, { living: 0, nodes: [0, 16] }), 1);
-    expect(l.allowance).toBe(1);
-    expect([...legalRoutes(l).keys()].sort((a, b) => a - b)).toEqual([1, 31]);
+    expect(moveLandings(l)).toEqual([1, 31]);
+    // No stopping short: a 3 from the entrance never ends one or two spaces away, nor where it began.
+    const three = moveLandings(rolled(setup(2, { living: 0, nodes: [0, 16] }), 3));
+    expect(three).toEqual([3, 29]);
+    for (const n of three) expect(ordinaryDistance(0, n)).toBe(3);
+  });
+
+  it('pauses only at forks; straight corridors walk on by themselves; the move ends exactly on the roll', () => {
+    // Living piece on 0 rolls 5 and heads for 1: it walks 1→2→3→4 alone and stops at the fork on 4 (to 5 or across to 12).
+    let s = rolled(setup(2, { living: 0, nodes: [0, 16] }), 5);
+    expect(moveExits(s).map((e) => e.to)).toEqual([1, 31]); // the start always offers its directions
+    s = act(s, { type: 'step', at: 0, left: 5, to: 1 });
+    expect(s.phase).toBe('choose');
+    expect(s.pieces[0].node).toBe(4);
+    expect(s.move!.remaining).toBe(1);
+    expect(moveExits(s).map((e) => e.to)).toEqual([5, 12]);
+    expect(s.log.filter((e) => e.kind === 'move').map((e) => (e.kind === 'move' ? e.path : []))).toEqual([[0, 1, 2, 3, 4]]);
+    s = act(s, { type: 'step', at: 4, left: 1, to: 12 });
+    expect(s.pieces[0].node).toBe(12);
+    expect(s.move).toBeNull();
+    expect(s.phase).not.toBe('choose');
+  });
+
+  it('never turns straight back along the edge it just used (the board has no dead ends, so this never locks)', () => {
+    for (let n = 0; n < 32; n++) {
+      for (const prev of [...ORDINARY_ADJ[n], ...SECRET_ADJ[n], ...WALL_ADJ[n]]) {
+        for (const ghost of [true, false]) {
+          const ex = exitsFrom(n, prev, false, ghost);
+          expect(ex.length).toBeGreaterThan(0);
+          if (ORDINARY_ADJ[n].length + (ghost ? WALL_ADJ[n].length : 0) + SECRET_ADJ[n].length > 1) expect(ex.some((e) => e.to === prev)).toBe(false);
+        }
+      }
+    }
+    // Loops are fine: a long roll can come round a corridor loop.
+    expect(exactReach(4, 6, false).length).toBeGreaterThan(0);
+  });
+
+  it('a stale or repeated step is refused and moves nothing', () => {
+    const s = rolled(setup(2, { living: 0, nodes: [0, 16] }), 5);
+    const t = act(s, { type: 'step', at: 0, left: 5, to: 1 });
+    // The same tap again (the piece is now on 4 with 1 left) does nothing.
+    expect(apply(t, { type: 'step', at: 0, left: 5, to: 1 }).error).toBe('stale');
+    expect(apply(t, { type: 'step', at: 4, left: 1, to: 3 }).error).toBeDefined(); // straight back is closed
+    expect(apply(s, { type: 'step', at: 0, left: 5, to: 2 }).error).toBeDefined(); // not adjacent
   });
 
   it('only ghosts use the wall links; everyone may use one secret passage per move', () => {
-    expect(pieceRoutes(7, 1, true).has(10)).toBe(true);
-    expect(pieceRoutes(7, 1, false).has(10)).toBe(false);
-    expect(pieceRoutes(8, 1, false).has(24)).toBe(true);
-    expect(pieceRoutes(8, 1, true).get(24)!.usesSecret).toBe(true);
-    // Two passages in one move are never allowed: 8→24 then back is not a route, nor 24→...→27→11.
-    for (const r of pieceRoutes(8, 6, true).values()) expect(r.path.filter((n, k) => k > 0 && (([8, 24].includes(n) && [8, 24].includes(r.path[k - 1])) || ([11, 27].includes(n) && [11, 27].includes(r.path[k - 1])))).length).toBeLessThanOrEqual(1);
+    expect(exitsFrom(7, null, false, true).some((e) => e.to === 10 && e.kind === 'w')).toBe(true);
+    expect(exitsFrom(7, null, false, false).some((e) => e.to === 10)).toBe(false);
+    expect(exitsFrom(8, null, false, false).some((e) => e.to === 24 && e.kind === 's')).toBe(true);
+    // After a passage, no second one in the same move.
+    expect(exitsFrom(27, 28, true, true).some((e) => e.kind === 's')).toBe(false);
+    let s = rolled(setup(2, { living: 0, nodes: [0, 8], acting: 1 }), 4);
+    s = act(s, { type: 'step', at: 8, left: 4, to: 24 });
+    expect(s.move!.usedSecret).toBe(true);
+    expect(moveExits(s).some((e) => e.kind === 's')).toBe(false);
   });
 
-  it('pieces never block routes and the entrance is an ordinary space for ghosts', () => {
-    const s = rolled(setup(3, { living: 0, nodes: [0, 2, 3], acting: 1 }), 3);
-    const routes = legalRoutes(s);
-    expect(routes.has(0)).toBe(true); // a ghost may enter the entrance
-    expect(routes.has(4)).toBe(true); // straight past the piece on 3
-    const t = move(setup(3, { living: 0, nodes: [0, 2, 3], acting: 1 }), 1, 3);
+  it('passing over a trap never triggers it; only the landing counts', () => {
+    // Ghost on 28 rolls 3 to 31, straight over the hidden Poltergeist on 30.
+    const s = move(setup(2, { living: 0, nodes: [0, 28], acting: 1 }), 31, 3);
+    expect(s.pieces[1].node).toBe(31);
+    expect(s.traps.find((t) => t.node === 30)!.revealed).toBe(false);
+  });
+
+  it('pieces never block and the entrance is an ordinary space for ghosts', () => {
+    const s = rolled(setup(3, { living: 0, nodes: [1, 2, 3], acting: 1 }), 2);
+    expect(moveLandings(s)).toContain(0); // a ghost may enter the entrance
+    expect(moveLandings(s)).toContain(4); // straight past the piece on 3
+    const t = move(setup(3, { living: 0, nodes: [0, 2, 3], acting: 1 }), 1, 1);
     expect(t.phase).toBe('hunt'); // no camping safety at the entrance
   });
 
@@ -251,7 +300,7 @@ describe('movement and catches', () => {
     expect(canHunt(setup(2, { living: 0, nodes: [10, 7], acting: 1 }), 1)).toBe(false);
     expect(canHunt(setup(2, { living: 0, nodes: [24, 8], acting: 1 }), 1)).toBe(false);
     // A ghost already in range may stay and challenge.
-    const s = move(setup(2, { living: 0, nodes: [6, 5], acting: 1 }), 'stay');
+    const s = move(setup(2, { living: 0, nodes: [6, 3], acting: 1 }), 5, 2);
     expect(s.phase).toBe('hunt');
     // The living piece cannot start a catch by walking up to a ghost.
     const l = move(setup(2, { living: 0, nodes: [4, 6] }), 5, 1);
@@ -336,7 +385,7 @@ describe('traps', () => {
     // Next round, staying on the tile does nothing.
     let t = setup(3, { living: 0, nodes: [9, 16, 24], traps: DEFAULT_TRAPS.map((x) => ({ ...x })) });
     t = { ...t, traps: t.traps.map((x) => (x.node === 9 ? { ...x, revealed: true } : x)) };
-    t = move(t, 'stay');
+    t = skipMove(t);
     expect(t.phase).toBe('summary');
     // A ghost landing there later still triggers it.
     let u = setup(2, { living: 0, nodes: [0, 6], acting: 1 });
@@ -370,10 +419,11 @@ describe('traps', () => {
 
   it('the Super Reaper becomes a remote Reaper’s Challenge once both Séances are used, and previews say so', () => {
     const before = rolled(setup(2, { living: 0, nodes: [0, 4], acting: 1 }), 1);
+    expect(moveLandings(before)).toContain(SUPER_REAPER);
     expect(previewMove(before, SUPER_REAPER)!.superReaper).toBe('seance');
     const after = { ...before, seancesUsed: 2 };
     expect(previewMove(after, SUPER_REAPER)!.superReaper).toBe('reaper');
-    let s = act(act(after, { type: 'select', dest: SUPER_REAPER }), { type: 'confirmMove' });
+    let s = walk(after, SUPER_REAPER);
     expect(s.challenge).toMatchObject({ kind: 'duel', host: 'superReaper', contact: false });
     s = resolve(s, { 1: 8 });
     expect(living(s)).toBe(1);
@@ -422,17 +472,17 @@ describe('challenges: judging, tiebreaks and idempotence', () => {
     expect(aliveCount(same)).toBe(1);
     // Timing error breaks a tie that sudden death could not.
     const sch = ropeSchedule(ch.seed);
-    const sloppy = sch.bottoms.map((b) => ({ t: b - CHALLENGE.rope.idealMs - 60 }));
+    const sloppy = sch.bottoms.map((b) => ({ t: b - CHALLENGE.rope.airMs / 2 - 60 })); // every sweep cleared, 60 ms off centre
     const timed = act(s, { type: 'challengeResult', id: ch.id, inputs: { 0: jumps(ch, 8, 4), 1: sloppy, 2: [], 3: [] } });
     expect(timed.lastOutcome).toMatchObject({ winner: 0, decidedBy: 'timing' });
   });
 
-  it('the shared rope speeds up every sweep, and no two sweeps’ press windows ever overlap', () => {
+  it('the shared rope speeds up every sweep, but every gap leaves time to land and jump again', () => {
     const c = CHALLENGE.rope;
     for (let seed = 1; seed < 400; seed++) {
       const b = ropeSchedule(seed).bottoms;
       expect(b.length).toBe(c.sweeps + c.extraSweeps);
-      for (let i = 1; i < b.length; i++) expect(b[i] - b[i - 1]).toBeGreaterThan(c.windowMs + c.lateMs);
+      for (let i = 1; i < b.length; i++) expect(b[i] - b[i - 1]).toBeGreaterThan(c.airMs + c.groundMs);
     }
     // Averaged over seeds, each gap in the scored sweeps is shorter than the one before.
     const avgGap = (i: number) => {
@@ -447,16 +497,8 @@ describe('challenges: judging, tiebreaks and idempotence', () => {
     expect(avgGap(c.sweeps)).toBeLessThan(avgGap(1) * 0.7);
   });
 
-  it('holding or mashing never creates extra jumps', () => {
-    const seed = 99;
-    const sch = ropeSchedule(seed);
-    const mash = sch.bottoms.flatMap((b) => [0, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400].map((d) => ({ t: b - 700 + d })));
-    const v = judgeRope(seed, [0, 1], [mash, []], [1, 1]);
-    expect(v.scores[0]).toBe(0); // only the first press in each window counts, and it is far too early
-  });
-
   it('a result for a finished challenge is rejected, so nothing resolves twice', () => {
-    let s = move(setup(2, { living: 0, nodes: [5, 6], acting: 1 }), 'stay');
+    let s = move(setup(2, { living: 0, nodes: [5, 8], acting: 1 }), 6, 2);
     s = act(s, { type: 'hunt' });
     const id = s.challenge!.id;
     const r = resolve(s, { 1: 8 });
@@ -488,8 +530,9 @@ describe('hidden information', () => {
       effect: DEFAULT_TRAPS[k].effect,
     }));
     const b = rolled(setup(3, { living: 0, nodes: [0, 16, 24], acting: 1, traps: otherTraps }), 6);
-    expect([...legalRoutes(a).keys()]).toEqual([...legalRoutes(b).keys()]);
-    for (const d of legalRoutes(a).keys()) expect(previewMove(a, d)).toEqual(previewMove(b, d));
+    expect(moveExits(a)).toEqual(moveExits(b));
+    expect(moveLandings(a)).toEqual(moveLandings(b));
+    for (const d of moveLandings(a)) expect(previewMove(a, d)).toEqual(previewMove(b, d));
   });
 
   it('bots decide from seat views; the same view gives the same decision', () => {
@@ -502,12 +545,14 @@ describe('hidden information', () => {
 
 describe('undo, saves and controllers', () => {
   it('undo restores the action start with the same die and keeps the table’s memory of reveals', () => {
-    const start = setup(2, { living: 0, nodes: [29, 16] });
+    // A table whose first roll is a 1, so the living piece on 29 can step onto the hidden Poltergeist on 30.
+    let seed = 1;
+    while (act(setup(2, { living: 0, nodes: [29, 16], seed }), { type: 'roll' }).die !== 1) seed++;
+    const start = setup(2, { living: 0, nodes: [29, 16], seed });
     let ses = { ...newSession(start) };
     ses = dispatch(ses, { type: 'roll' }).session;
     const die = ses.game.die;
-    ses = dispatch(ses, { type: 'select', dest: 30 }).session; // the hidden Poltergeist, one step away
-    ses = dispatch(ses, { type: 'confirmMove' }).session;
+    ses = dispatch(ses, { type: 'step', at: 29, left: 1, to: 30 }).session;
     expect(ses.game.traps.find((t) => t.node === 30)!.revealed).toBe(true);
     expect(ses.known).toContainEqual({ node: 30, effect: 'poltergeist' });
     expect(undoInfo(ses).which).toBe('current');
@@ -518,12 +563,12 @@ describe('undo, saves and controllers', () => {
     expect(dispatch(back, { type: 'roll' }).session.game.die).toBe(die);
   });
 
-  it('saves round-trip as schema 4, migrate One Life v3 saves, and refuse older candy-rule saves', () => {
+  it('saves round-trip as schema 5, migrate One Life v3 and v4 saves, and refuse older candy-rule saves', () => {
     const ses = dispatch(newSession(game(3, 9)), { type: 'rollForLife' }).session;
     const raw = serialize(ses, defaultPersonalization());
     const back = deserialize(raw);
     expect(back.ok).toBe(true);
-    expect(deserialize(raw.replace('"schema":4', '"schema":2'))).toEqual({ ok: false, reason: 'incompatible' });
+    expect(deserialize(raw.replace('"schema":5', '"schema":2'))).toEqual({ ok: false, reason: 'incompatible' });
     expect(deserialize(JSON.stringify({ schema: 1, session: {} }))).toEqual({ ok: false, reason: 'incompatible' });
     // A save claiming two living pieces is corrupt.
     const bad = JSON.parse(raw);
@@ -537,7 +582,8 @@ describe('undo, saves and controllers', () => {
         schema: 3,
         pieces: (g.pieces as Array<Record<string, unknown>>).map(({ item: _i, itemAwardedAt: _a, ...p }) => p),
       } as Record<string, unknown>;
-      for (const k of ['rewardRng', 'rollInfo', 'itemUsed', 'options', 'battlesThisRound', 'pendingReward']) delete o[k];
+      for (const k of ['rewardRng', 'rollInfo', 'itemUsed', 'options', 'battlesThisRound', 'pendingReward', 'move']) delete o[k];
+      o.selection = { dest: null };
       return o;
     };
     const v3 = JSON.parse(raw);
@@ -547,7 +593,7 @@ describe('undo, saves and controllers', () => {
     const mig = deserialize(JSON.stringify(v3));
     expect(mig.ok).toBe(true);
     if (mig.ok) {
-      expect(mig.session.game.schema).toBe(4);
+      expect(mig.session.game.schema).toBe(5);
       expect(mig.session.game.pieces.every((p) => p.item === null && p.itemAwardedAt === null)).toBe(true);
       expect(mig.session.game.battlesThisRound).toEqual([]);
       expect(mig.session.game.traps).toEqual(ses.game.traps);
@@ -557,6 +603,35 @@ describe('undo, saves and controllers', () => {
     clash.session.game.traps[0].node = 5;
     clash.session.turnStart.traps[0].node = 5;
     expect(deserialize(JSON.stringify(clash))).toEqual({ ok: false, reason: 'layout' });
+    // A v4 save that had rolled a 4 (but not moved) resumes as an exact four-space move from the same space.
+    const mid = rolled(setup(3, { living: 0, nodes: [0, 16, 24], acting: 1 }), 4);
+    const v4game = { ...mid, schema: 4, selection: { dest: null } } as Record<string, unknown>;
+    delete v4game.move;
+    const v4 = { schema: 4, savedAt: '', personalization: defaultPersonalization(), session: { game: v4game, turnStart: { ...v4game, phase: 'turnStart', die: null, rollInfo: null }, previousTurnStart: null, known: [] } };
+    const m4 = deserialize(JSON.stringify(v4));
+    expect(m4.ok).toBe(true);
+    if (m4.ok) {
+      expect(m4.session.game.move).toEqual({ remaining: 4, prev: null, path: [16], usedSecret: false, usedWall: false });
+      expect(moveLandings(m4.session.game)).toEqual(moveLandings(mid));
+    }
+  });
+
+  it('a move saved at a fork resumes with the same remaining steps and triggers nothing twice', () => {
+    let s = rolled(setup(2, { living: 0, nodes: [0, 16] }), 5);
+    s = act(s, { type: 'step', at: 0, left: 5, to: 1 }); // walks to the fork on 4 with 1 left
+    const ses = { ...newSession(s), turnStart: s };
+    const back = deserialize(serialize(ses, defaultPersonalization()));
+    expect(back.ok).toBe(true);
+    if (!back.ok) return;
+    const g = back.session.game;
+    expect(g.pieces[0].node).toBe(4);
+    expect(g.move).toEqual(s.move);
+    expect(g.log.filter((e) => e.kind === 'trapRevealed')).toEqual([]);
+    const done = act(g, { type: 'step', at: 4, left: 1, to: 5 });
+    expect(done.pieces[0].node).toBe(5);
+    expect(done.move).toBeNull();
+    // Replaying the step after resuming does nothing.
+    expect(apply(done, { type: 'step', at: 4, left: 1, to: 5 }).error).toBeDefined();
   });
 
   it('pairs alternate controllers by round parity; solo pieces keep one', () => {

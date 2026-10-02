@@ -2,7 +2,8 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { CHARACTERS, NODE_COUNT, ROUNDS, type CharacterId } from '../engine/config';
-import { actingPiece, finalScores, legalRoutes, livingPiece, previewMove } from '../engine/engine';
+import { actingPiece, finalScores, livingPiece } from '../engine/engine';
+import { forkChoices, stepFor, type ForkChoice } from '../forks';
 import { inAttackRange } from '../engine/graph';
 import type { GameState } from '../engine/types';
 import { LifeFlame, Reapers, TransformBurst, useSpectral, WallLinks, type KnownTrap } from './Reaper';
@@ -10,9 +11,9 @@ import { director, type Popup } from '../director';
 import { getState, useStore, act, setState } from '../store';
 import { Base, CharacterModel } from './Characters';
 import { MansionProps } from './Props';
-import { Beacon, Corridors, Ground, Label, NodeHitAreas, Passages, PathDots, Ring, RoomLabels, Tiles, VersusLabels, Walls } from './Board';
+import { Beacon, Corridors, Ground, Label, NodeHitAreas, Passages, Ring, RoomLabels, Tiles, VersusLabels, Walls } from './Board';
 import { labelTexture, badgeTexture } from './labels';
-import { lineupPos, nodePos, playerHeading, playerSlot, type V3 } from './layout';
+import { lineupPos, NODE_TOP, nodePos, playerHeading, playerSlot, type V3 } from './layout';
 import { camInfo, hudInsets } from './shared';
 
 export const charColor = (id: CharacterId) => CHARACTERS.find((c) => c.id === id)!.color;
@@ -103,7 +104,7 @@ function Piece({ index, mode, rank, winner }: { index: number; mode: SceneMode; 
       </group>
       {isActive && <ActiveRing color={color} />}
       {p.alive && mode !== 'showcase' && <LifeFlame reduced={reduced} />}
-      <NameTag index={index} name={p.name} color={color} big={isActive || overview || mode === 'results'} y={mode === 'results' ? 1.75 : 1.05} />
+      <NameTag index={index} name={p.name} color={color} big={isActive || overview || mode === 'results'} y={mode === 'results' ? 1.75 : 1.05} overviewTag={overview && mode === 'game'} />
     </group>
   );
 }
@@ -121,7 +122,7 @@ function ActiveRing({ color }: { color: string }) {
   );
 }
 
-function NameTag({ index, name, color, big, y }: { index: number; name: string; color: string; big: boolean; y: number }) {
+function NameTag({ index, name, color, big, y, overviewTag = false }: { index: number; name: string; color: string; big: boolean; y: number; overviewTag?: boolean }) {
   const badge = useMemo(() => badgeTexture(String(index + 1), color), [index, color]);
   const tag = useMemo(() => labelTexture([`${index + 1} · ${name}`], { border: color, height: 80 }), [index, name, color]);
   if (!big)
@@ -130,9 +131,10 @@ function NameTag({ index, name, color, big, y }: { index: number; name: string; 
         <spriteMaterial map={badge} depthTest={false} transparent />
       </sprite>
     );
-  const h = 0.22;
+  // Seen from high above (overview), tags grow so every piece stays identifiable.
+  const h = overviewTag ? 0.5 : 0.22;
   return (
-    <sprite position={[0, y, 0]} scale={[h * tag.aspect, h, 1]} renderOrder={6}>
+    <sprite position={[0, overviewTag ? y + 0.35 : y, 0]} scale={[h * tag.aspect, h, 1]} renderOrder={6}>
       <spriteMaterial map={tag.tex} depthTest={false} transparent />
     </sprite>
   );
@@ -277,56 +279,132 @@ function PopupSprite({ p }: { p: Popup }) {
 
 // ── highlights driven by the current phase ──────────────────────────────
 
+const ARROW_SHAPE = (() => {
+  const sh = new THREE.Shape();
+  // An arrow lying on the floor, pointing along +y of the shape (→ +z in the world after rotation).
+  sh.moveTo(-0.17, -0.3);
+  sh.lineTo(0.17, -0.3);
+  sh.lineTo(0.17, 0.05);
+  sh.lineTo(0.36, 0.05);
+  sh.lineTo(0, 0.42);
+  sh.lineTo(-0.36, 0.05);
+  sh.lineTo(-0.17, 0.05);
+  sh.closePath();
+  const g = new THREE.ExtrudeGeometry(sh, { depth: 0.07, bevelEnabled: false });
+  g.rotateX(Math.PI / 2);
+  return g;
+})();
+
+/** One way on at a fork: a big coloured arrow on the floor with its number, clickable when this screen controls the move. */
+function ForkArrow({ choice, from, canPick, onPick, hovered, onHover }: { choice: ForkChoice; from: number; canPick: boolean; onPick: () => void; hovered: boolean; onHover: (on: boolean) => void }) {
+  const ref = useRef<THREE.Group>(null);
+  const [fx, , fz] = nodePos(from, 0);
+  const [tx, , tz] = nodePos(choice.to, 0);
+  const len = Math.hypot(tx - fx, tz - fz);
+  const along = Math.min(1.05, len * 0.5);
+  const x = fx + ((tx - fx) / len) * along;
+  const z = fz + ((tz - fz) / len) * along;
+  const badge = useMemo(() => badgeTexture(String(choice.num), choice.color), [choice.num, choice.color]);
+  const overview = useStore((st) => st.cameraMode === 'overview');
+  const big = overview ? 1.9 : 1;
+  useFrame(({ clock }) => {
+    if (!ref.current) return;
+    const s = big * (hovered ? 1.25 : 1) * (1 + Math.sin(clock.elapsedTime * 5) * 0.04);
+    ref.current.scale.setScalar(s);
+  });
+  return (
+    <group position={[x, NODE_TOP + 0.08, z]} rotation={[0, choice.yaw, 0]}>
+      <group ref={ref}>
+        <mesh geometry={ARROW_SHAPE} renderOrder={5}>
+          <meshBasicMaterial color={choice.color} toneMapped={false} transparent opacity={0.95} depthTest={false} />
+        </mesh>
+      </group>
+      <sprite position={[0, 0.55 * big, 0]} scale={[0.42 * big, 0.42 * big, 1]} renderOrder={7}>
+        <spriteMaterial map={badge} depthTest={false} transparent />
+      </sprite>
+      {canPick && (
+        <mesh
+          position={[0, 0.3, 0]}
+          onClick={(e) => {
+            e.stopPropagation();
+            onPick();
+          }}
+          onPointerOver={(e) => {
+            e.stopPropagation();
+            onHover(true);
+            document.body.style.cursor = 'pointer';
+          }}
+          onPointerOut={() => {
+            onHover(false);
+            document.body.style.cursor = '';
+          }}
+        >
+          <boxGeometry args={[0.9, 0.8, 1.0]} />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
+/** "3 left" floating over the moving piece. */
+function StepsLeft({ piece, left }: { piece: number; left: number }) {
+  const ref = useRef<THREE.Sprite>(null);
+  const tag = useMemo(() => labelTexture([`${left} left`], { fg: '#1a1024', bg: '#ffd23f', height: 84 }), [left]);
+  useFrame(() => {
+    const at = director.rendered.get(piece);
+    if (ref.current && at) ref.current.position.set(at[0], 1.95, at[2]);
+  });
+  return (
+    <sprite ref={ref} scale={[0.34 * tag.aspect, 0.34, 1]} renderOrder={8}>
+      <spriteMaterial map={tag.tex} depthTest={false} transparent />
+    </sprite>
+  );
+}
+
 function GameHighlights() {
   const game = useStore((s) => s.session?.game);
-  const hover = useStore((s) => s.hoverNode);
-  const overview = useStore((s) => s.cameraMode === 'overview');
   const busy = useStore((s) => s.busy);
+  const mode = useStore((s) => s.mode);
+  const seats = useStore((s) => s.seats);
+  const hoverNode = useStore((s) => s.hoverNode);
+  const overview = useStore((s) => s.cameraMode === 'overview');
+  const [hoverWay, setHoverWay] = useState<number | null>(null);
   if (!game || game.phase === 'placement' || game.phase === 'lifeRoll' || game.phase === 'gameOver') return null;
   const actingIdx = actingPiece(game);
   const me = game.pieces[actingIdx];
   const living = livingPiece(game);
   const livingNode = game.pieces[living].node;
-
-  let reachable: number[] = [];
-  let preview = null as ReturnType<typeof previewMove>;
-  if (game.phase === 'choose') {
-    reachable = [...legalRoutes(game).keys()];
-    const sel = game.selection.dest;
-    if (sel !== null) preview = previewMove(game, sel);
-  }
-  const pickable = new Set<number>(busy ? [] : reachable);
-  const hoverPreview = game.phase === 'choose' && hover !== null && hover !== game.selection.dest && reachable.includes(hover) ? previewMove(game, hover) : null;
+  const choices = game.phase === 'choose' && !busy ? forkChoices(game) : [];
+  // Only a local person picks on this screen; phones and bots choose for themselves (the TV still shows the arrows).
+  const canPick = mode === 'local' && seats[actingIdx]?.kind !== 'bot';
+  const pick = (to: number) => act(stepFor(game, to));
+  const shown = choices.find((c) => c.to === (hoverWay ?? hoverNode)) ?? null;
   // A ghost's attack range: the living piece's space and its ordinary neighbours.
-  const showRange = !me.alive && (game.phase === 'choose' || game.phase === 'hunt');
+  const showRange = !me.alive && (game.phase === 'choose' || game.phase === 'hunt' || game.phase === 'turnStart');
   const range = showRange ? Array.from({ length: NODE_COUNT }, (_, n) => n).filter((n) => inAttackRange(n, livingNode)) : [];
-
   return (
     <group>
-      {reachable.map((id) => (
-        <Ring key={`r${id}`} id={id} color={id === game.selection.dest ? '#fff1b8' : hover === id ? '#ffd36b' : '#f2a93b'} strength={id === game.selection.dest ? 2 : 1} pulse={id !== game.selection.dest} />
-      ))}
       {range.map((id) => (
         <Ring key={`a${id}`} id={id} color="#ff5a6a" radius={0.66} strength={0.7} pulse={false} />
       ))}
-      {hoverPreview && <PathDots path={hoverPreview.path} color="#ffd36b" size={0.05} />}
-      {preview && preview.dest !== 'stay' && (
-        <>
-          <PathDots path={preview.path} color="#fff1b8" />
-          <Beacon id={preview.dest} color={preview.canChallenge ? '#ff5a6a' : '#fff1b8'} />
-        </>
-      )}
+      {choices.map((c) => (
+        <ForkArrow key={c.to} choice={c} from={me.node} canPick={canPick} onPick={() => pick(c.to)} hovered={shown?.to === c.to} onHover={(on) => setHoverWay(on ? c.to : null)} />
+      ))}
+      {shown && shown.landings.map((n) => <Ring key={`l${n}`} id={n} color={shown.color} strength={1.2} pulse />)}
+      {game.phase === 'choose' && game.move && <StepsLeft piece={actingIdx} left={game.move.remaining} />}
       {game.phase === 'hunt' && !busy && <Beacon id={livingNode} color="#ff5a6a" />}
-      {me.alive && game.phase === 'choose' && preview && preview.threats.map((t) => <Ring key={`t${t}`} id={game.pieces[t].node} color="#7ff5e6" radius={0.6} strength={1.4} />)}
       {overview && game.phase === 'turnStart' && <Ring id={me.node} color={charColor(me.character)} radius={0.62} />}
-      <NodeHitAreas
-        pickable={pickable}
-        onHover={(id) => setState({ hoverNode: id })}
-        onPick={(id) => {
-          const g = getState().session?.game;
-          if (g?.phase === 'choose') act({ type: 'select', dest: id });
-        }}
-      />
+      {canPick && (
+        <NodeHitAreas
+          pickable={new Set(choices.map((c) => c.to))}
+          onHover={(id) => setState({ hoverNode: id })}
+          onPick={(id) => {
+            const g = getState().session?.game;
+            if (g?.phase === 'choose') act(stepFor(g, id));
+          }}
+        />
+      )}
     </group>
   );
 }
@@ -434,6 +512,21 @@ function CameraRig({ mode }: { mode: SceneMode }) {
       const v = new THREE.Vector3(...nodePos(id, 0.2)).project(c);
       return { x: ((v.x + 1) / 2) * sz.width, y: ((1 - v.y) / 2) * sz.height, visible: v.z < 1 && Math.abs(v.x) < 1 && Math.abs(v.y) < 1 };
     };
+    // The clickable fork arrows on screen: way target → canvas pixel of its arrow.
+    handle.forkArrows = () => {
+      const g = getState().session?.game;
+      if (!g) return [];
+      const { camera: c, size: sz } = get();
+      const from = g.pieces[actingPiece(g)]?.node ?? 0;
+      const [fx, , fz] = nodePos(from, 0);
+      return forkChoices(g).map((ch) => {
+        const [tx, , tz] = nodePos(ch.to, 0);
+        const len = Math.hypot(tx - fx, tz - fz);
+        const along = Math.min(1.05, len * 0.5);
+        const v = new THREE.Vector3(fx + ((tx - fx) / len) * along, NODE_TOP + 0.38, fz + ((tz - fz) / len) * along).project(c);
+        return { to: ch.to, num: ch.num, x: ((v.x + 1) / 2) * sz.width, y: ((1 - v.y) / 2) * sz.height };
+      });
+    };
   }, [get]);
 
   useFrame(({ clock }, dt) => {
@@ -497,11 +590,14 @@ function CameraRig({ mode }: { mode: SceneMode }) {
         lastTurn.current = g.actionNumber;
         if (calm) yaw.current = desiredYaw;
       }
-      yaw.current = dampAngle(yaw.current, desiredYaw, 1 - Math.exp(-dt * (calm ? 6 : 1.8)));
+      // While a fork waits for a choice the camera holds still, so "left" stays left on every screen.
+      const awaitingFork = g.phase === 'choose' && !st.busy;
+      if (!awaitingFork) yaw.current = dampAngle(yaw.current, desiredYaw, 1 - Math.exp(-dt * (calm ? 6 : 1.8)));
       const fwd = new THREE.Vector3(Math.sin(yaw.current), 0, Math.cos(yaw.current));
       focus.set(active[0], 0, active[2]);
-      desiredPos.copy(focus).addScaledVector(fwd, -5.0).add(new THREE.Vector3(0, 4.6, 0));
-      desiredLook.copy(focus).addScaledVector(fwd, 2.4).add(new THREE.Vector3(0, 0, 0));
+      // High and well back: the piece and the corridor ahead stay in view over the low walls.
+      desiredPos.copy(focus).addScaledVector(fwd, -5.6).add(new THREE.Vector3(0, 6.4, 0));
+      desiredLook.copy(focus).addScaledVector(fwd, 1.4);
       rate = calm ? 8 : 3.2;
     }
 
@@ -525,6 +621,7 @@ function CameraRig({ mode }: { mode: SceneMode }) {
     camera.lookAt(look.current);
     camInfo.position = [pos.current.x, pos.current.y, pos.current.z];
     camInfo.focus = [focus.x, 0, focus.z];
+    camInfo.follow = mode === 'game' && st.cameraMode === 'follow';
 
   });
   return null;

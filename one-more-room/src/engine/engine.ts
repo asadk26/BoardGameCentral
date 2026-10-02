@@ -9,7 +9,6 @@ import {
   CHARACTERS,
   curseMultiplier,
   ENTRANCE,
-  GHOST_MIN_MOVE,
   GHOST_SPAWNS,
   LIVING_SPAWN,
   MAX_CONTROLLERS_PER_PIECE,
@@ -32,7 +31,7 @@ import {
   type ItemId,
   type TrapEffect,
 } from './config';
-import { inAttackRange, ordinaryDistance, pieceRoutes, type PlayerRoute } from './graph';
+import { exitsFrom, inAttackRange, landingsFrom, ordinaryDistance, type Exit } from './graph';
 import { nextFloat, rollDie, seedFrom, shuffle } from './rng';
 import { judgeRope, type ChallengeInput } from './challenges';
 import type {
@@ -76,7 +75,7 @@ export function createGame({ pieces, seed, presetTraps }: NewGameOptions): GameS
   }
   const rng0 = seed >>> 0;
   const state: GameState = {
-    schema: 4,
+    schema: 5,
     seed: rng0,
     rng: seedFrom(`board:${rng0}`),
     challengeRng: seedFrom(`challenge:${rng0}`),
@@ -105,7 +104,7 @@ export function createGame({ pieces, seed, presetTraps }: NewGameOptions): GameS
     allowance: 0,
     rollInfo: null,
     itemUsed: null,
-    selection: { dest: null },
+    move: null,
     origin: null,
     minigameUsed: false,
     pick: null,
@@ -136,7 +135,7 @@ export function clone(state: GameState): GameState {
     ...state,
     pieces: state.pieces.map((p) => ({ ...p, controllers: p.controllers.slice() })),
     schedule: state.schedule.slice(),
-    selection: { ...state.selection },
+    move: state.move ? { ...state.move, path: state.move.path.slice() } : null,
     pick: state.pick ? { ...state.pick, options: state.pick.options.slice() } : null,
     options: state.options
       ? {
@@ -183,16 +182,33 @@ export function activeController(state: GameState, piece: number): number {
   return p.controllers.length >= 2 ? (state.round % 2 === 1 ? 0 : 1) : 0;
 }
 
-export function movementAllowance(die: number, alive: boolean): number {
-  return alive ? die : Math.max(GHOST_MIN_MOVE, die);
+/** Every piece moves exactly its roll, living or ghost. */
+export function movementAllowance(die: number): number {
+  return die;
 }
 
-/** Legal destinations for the acting piece. Never depends on hidden traps. */
-export function legalRoutes(state: GameState): Map<number, PlayerRoute> {
+/** The directions the acting piece may step in next (empty unless it is mid-move). Never depends on hidden traps. */
+export function moveExits(state: GameState): Exit[] {
   const i = actingPiece(state);
-  if (i < 0 || state.rollInfo === null) return new Map();
+  const m = state.move;
+  if (i < 0 || state.phase !== 'choose' || !m || m.remaining <= 0) return [];
   const p = state.pieces[i];
-  return pieceRoutes(p.node, state.allowance, !p.alive);
+  return exitsFrom(p.node, m.prev, m.usedSecret, !p.alive);
+}
+
+/** Where the move can end if the next step goes to `to` (every landing when omitted). */
+export function moveLandings(state: GameState, to?: number): number[] {
+  const i = actingPiece(state);
+  const m = state.move;
+  if (i < 0 || !m || m.remaining <= 0) return [];
+  const p = state.pieces[i];
+  const ghost = !p.alive;
+  const out = new Set<number>();
+  for (const e of exitsFrom(p.node, m.prev, m.usedSecret, ghost)) {
+    if (to !== undefined && e.to !== to) continue;
+    for (const n of landingsFrom(e.to, p.node, m.remaining - 1, m.usedSecret || e.kind === 's', ghost)) out.add(n);
+  }
+  return [...out].sort((a, b) => a - b);
 }
 
 /** The frozen order for a round: the living piece first, then the hunters by a rotating priority. */
@@ -278,7 +294,7 @@ function startAction(s: GameState) {
   s.allowance = 0;
   s.rollInfo = null;
   s.itemUsed = null;
-  s.selection = { dest: null };
+  s.move = null;
   s.origin = s.pieces[actingPiece(s)].node;
   s.minigameUsed = false;
   s.pick = null;
@@ -572,7 +588,7 @@ export function itemBlock(s: GameState, item: ItemId, target?: number): string |
   if (me.itemAwardedAt === s.actionNumber) return 'An item can’t be used in the action that won it';
   if (s.itemUsed) return 'Only one item per action';
   if (item === 'secondRoll') {
-    if (s.phase !== 'choose' || s.rollInfo?.kind !== 'die') return 'Second Roll is used after rolling, before moving';
+    if (s.phase !== 'choose' || s.rollInfo?.kind !== 'die' || !s.move || s.move.path.length > 1) return 'Second Roll is used after rolling, before moving';
     return null;
   }
   if (s.phase !== 'turnStart') return 'Use this before rolling';
@@ -626,43 +642,69 @@ export function knownEffectAt(state: GameState, node: number): KnownEffect {
 }
 
 /**
- * Forecast a move from public facts only: the route, a known effect at the
- * destination, and who would be within ordinary range afterwards. Hidden
- * traps are never consulted, so a preview can never promise a safe landing.
+ * Forecast a landing from public facts only: a known effect there, and who
+ * would be within ordinary range afterwards. Hidden traps are never
+ * consulted, so a preview can never promise a safe landing.
  */
-export function previewMove(state: GameState, dest: number | 'stay'): MovePreview | null {
+export function previewMove(state: GameState, dest: number): MovePreview | null {
   const pi = actingPiece(state);
-  if (pi < 0 || state.rollInfo === null) return null;
+  if (pi < 0) return null;
   const me = state.pieces[pi];
-  let route: PlayerRoute | null = null;
-  if (dest !== 'stay') {
-    route = legalRoutes(state).get(dest) ?? null;
-    if (!route) return null;
-  }
-  const end = dest === 'stay' ? me.node : dest;
-  const superReaper = dest !== 'stay' && end === SUPER_REAPER ? superReaperEffect(state) : null;
-  const known = dest === 'stay' ? null : superReaper ?? knownEffectAt(state, end);
+  const superReaper = dest === SUPER_REAPER ? superReaperEffect(state) : null;
+  const known = superReaper ?? knownEffectAt(state, dest);
   const living = livingPiece(state);
   const minigame = known === 'reaper' || known === 'seance';
-  const canChallenge = !me.alive && !minigame && known !== 'poltergeist' && inAttackRange(end, state.pieces[living].node);
-  const threats = me.alive ? state.pieces.map((_, i) => i).filter((i) => i !== pi && inAttackRange(state.pieces[i].node, end)) : [];
-  // Ghost battles need a voluntary landing on an ordinary space (never a stay).
-  const battleOk = !me.alive && dest !== 'stay' && !known && POLICY.ghostBattles;
+  const canChallenge = !me.alive && !minigame && known !== 'poltergeist' && inAttackRange(dest, state.pieces[living].node);
+  const threats = me.alive ? state.pieces.map((_, i) => i).filter((i) => i !== pi && inAttackRange(state.pieces[i].node, dest)) : [];
+  // Ghost battles need a normal landing on an ordinary space.
+  const battleOk = !me.alive && !known && POLICY.ghostBattles;
   const fresh = state.pieces.map((_, i) => i).filter((i) => i !== pi && !state.pieces[i].alive && !state.battlesThisRound.includes(pairKey(pi, i)));
-  const battleTargets = battleOk ? fresh.filter((i) => state.pieces[i].node === end) : [];
-  const versus = battleOk && VERSUS_SPACES.includes(end) && fresh.length > 0;
-  return {
-    dest,
-    path: route ? route.path : [me.node],
-    usesSecret: route?.usesSecret ?? false,
-    usesWall: route?.usesWall ?? false,
-    known,
-    superReaper,
-    canChallenge,
-    threats,
-    battleTargets,
-    versus,
-  };
+  const battleTargets = battleOk ? fresh.filter((i) => state.pieces[i].node === dest) : [];
+  const versus = battleOk && VERSUS_SPACES.includes(dest) && fresh.length > 0;
+  return { dest, known, superReaper, canChallenge, threats, battleTargets, versus };
+}
+
+/** Begin a move of exactly `steps` spaces from where the acting piece stands. */
+function beginMove(s: GameState, pi: number, steps: number, events: LogEntry[]) {
+  s.allowance = steps;
+  s.move = { remaining: steps, prev: null, path: [s.pieces[pi].node], usedSecret: false, usedWall: false };
+  s.phase = 'choose';
+  continueMove(s, pi, events, null);
+}
+
+/**
+ * Take `first` (if given), then keep walking while there is only one way on.
+ * Stops at a fork, or lands when the steps run out. Only the landing counts:
+ * nothing on the way triggers.
+ */
+function continueMove(s: GameState, pi: number, events: LogEntry[], first: Exit | null) {
+  const m = s.move!;
+  const me = s.pieces[pi];
+  const segment = [me.node];
+  let usesSecret = false;
+  let usesWall = false;
+  let next: Exit | null = first;
+  while (m.remaining > 0) {
+    if (!next) {
+      const exits = exitsFrom(me.node, m.prev, m.usedSecret, !me.alive);
+      if (exits.length !== 1) break;
+      next = exits[0];
+    }
+    m.prev = me.node;
+    me.facingFrom = me.node;
+    me.node = next.to;
+    m.remaining -= 1;
+    m.path.push(next.to);
+    segment.push(next.to);
+    if (next.kind === 's') m.usedSecret = usesSecret = true;
+    if (next.kind === 'w') m.usedWall = usesWall = true;
+    next = null;
+  }
+  if (segment.length > 1) events.push({ kind: 'move', piece: pi, path: segment, usesSecret, usesWall, remaining: m.remaining });
+  if (m.remaining === 0) {
+    s.move = null;
+    resolveLanding(s, pi, events);
+  }
 }
 
 // ── the action reducer ──────────────────────────────────────────────────
@@ -697,14 +739,12 @@ export function apply(state: GameState, action: Action): ActionResult {
 
     case 'roll': {
       if (s.phase !== 'turnStart') return fail(state, 'Cannot roll now');
-      const me = s.pieces[pi];
       let die: number;
       [die, s.rng] = rollDie(s.rng);
       s.die = die;
-      s.allowance = movementAllowance(die, me.alive);
       s.rollInfo = { kind: 'die' };
-      events.push({ kind: 'roll', piece: pi, die, allowance: s.allowance });
-      s.phase = 'choose';
+      events.push({ kind: 'roll', piece: pi, die, allowance: movementAllowance(die) });
+      beginMove(s, pi, movementAllowance(die), events);
       break;
     }
 
@@ -731,48 +771,31 @@ export function apply(state: GameState, action: Action): ActionResult {
       if (action.item === 'ghostlyStride') {
         // No die is rolled, so no movement randomness is drawn.
         s.die = null;
-        s.allowance = STRIDE_ALLOWANCE;
         s.rollInfo = { kind: 'stride' };
-        s.phase = 'choose';
         events.push({ kind: 'itemUsed', piece: pi, item: 'ghostlyStride' });
+        beginMove(s, pi, STRIDE_ALLOWANCE, events);
         break;
       }
-      // Second Roll: a fresh die replaces the old one for good, even if worse.
+      // Second Roll: a fresh die replaces the old one for good, even if lower. Movement hasn't started.
       const oldDie = s.die!;
       let newDie: number;
       [newDie, s.rng] = rollDie(s.rng);
       s.die = newDie;
-      s.allowance = movementAllowance(newDie, false);
       s.rollInfo = { kind: 'die', rerolledFrom: oldDie };
-      s.selection = { dest: null };
       events.push({ kind: 'itemUsed', piece: pi, item: 'secondRoll', detail: { oldDie, newDie } });
-      events.push({ kind: 'roll', piece: pi, die: newDie, allowance: s.allowance });
+      events.push({ kind: 'roll', piece: pi, die: newDie, allowance: movementAllowance(newDie) });
+      beginMove(s, pi, movementAllowance(newDie), events);
       break;
     }
 
-    case 'select': {
-      if (s.phase !== 'choose') return fail(state, 'Nothing to select now');
-      if (action.dest !== null && action.dest !== 'stay' && !legalRoutes(s).has(action.dest)) return fail(state, 'That space is out of reach');
-      s.selection.dest = action.dest;
-      return { state: s, events };
-    }
-
-    case 'confirmMove': {
-      if (s.phase !== 'choose') return fail(state, 'Nothing to confirm');
-      const dest = s.selection.dest;
-      if (dest === null) return fail(state, 'Choose a destination or stay');
-      const me = s.pieces[pi];
-      if (dest === 'stay') {
-        events.push({ kind: 'stay', piece: pi, node: me.node });
-        endOfMovement(s, pi);
-        break;
-      }
-      const route = legalRoutes(s).get(dest);
-      if (!route) return fail(state, 'That space is out of reach');
-      me.facingFrom = route.path[route.path.length - 2];
-      me.node = dest;
-      events.push({ kind: 'move', piece: pi, path: route.path, usesSecret: route.usesSecret, usesWall: route.usesWall });
-      resolveLanding(s, pi, events);
+    case 'step': {
+      const m = s.move;
+      if (s.phase !== 'choose' || !m) return fail(state, 'Not moving now');
+      // A step names where it starts and how many steps were left, so a late or repeated tap can never move twice.
+      if (action.at !== s.pieces[pi].node || action.left !== m.remaining) return fail(state, 'stale');
+      const exit = moveExits(s).find((e) => e.to === action.to);
+      if (!exit) return fail(state, 'That way is closed');
+      continueMove(s, pi, events, exit);
       break;
     }
 

@@ -1,431 +1,564 @@
-// Haunted Jump Rope on the shared screen. Every press is timestamped against
-// the animation the player is watching (performance.now() from the same clock
-// that draws it) and handed to the engine's pure judge; bots feed the same
-// input format. Up to four pieces can share the keyboard, one key each.
+// Haunted Jump Rope, played on the TV (or the one shared screen). The actual
+// character miniatures stand in a small arena; a long spectral rope turns
+// around them and passes under their feet. A press is one visible jump. The
+// arena draws exactly what the judge scores: jumps, stumbles and the rope all
+// come from engine/challenges.ts, so a jump that looks clear is clear.
 //
-// Each lane shows its own jump window — narrower for a cursed living piece —
-// and a lane's tick or cross comes from the same judge that decides the game,
-// so the screen never shows a clearance the judge would call a miss.
+// Phones only send presses (see PhoneApp); in a phone room the room service
+// owns the timeline and this screen draws it from the server clock.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Canvas, useFrame } from '@react-three/fiber';
+import * as THREE from 'three';
 import { CHALLENGE, CHARACTERS } from '../engine/config';
-import { clearanceWindow, judgeRopeSweeps, ropeSchedule, type ChallengeInput, type SweepResult } from '../engine/challenges';
+import { airTime, jumperTimeline, jumpHeight, practiceSchedule, ropeAngle, ropeSchedule, type ChallengeInput, type RopeSchedule } from '../engine/challenges';
 import { judgeChallenge } from '../engine/engine';
-import type { Challenge, GameState } from '../engine/types';
-import { act, botInputsFor, getState, isBotSeat, JUMP_KEYS, useStore } from '../store';
+import type { Challenge, ChallengeOutcome, GameState } from '../engine/types';
+import { act, botInputsFor, getState, isBotSeat, JUMP_KEYS, markRopePracticed, useStore } from '../store';
 import { hostSend, roomClient } from '../net/host';
 import { audio } from '../audio/audio';
-import { challengeHost, challengeHowTo, challengeTitle, curseLine } from '../text';
-import { PlayerBadge } from './Dialog';
-
-type Inputs = Record<number, ChallengeInput[]>;
-type Press = (participant: number) => void;
+import { CharacterModel } from '../scene/Characters';
+import { useSpectral } from '../scene/Reaper';
+import { labelTexture } from '../scene/labels';
+import { cursePhrase, outcomeHeadline } from '../text';
 
 const colorOf = (id: string) => CHARACTERS.find((c) => c.id === id)!.color;
-const now = () => performance.now();
+const PEAK = 0.85; // world height of a full (uncursed) jump
+const ROPE_FEET = CHALLENGE.rope.ropeHeightFrac * PEAK; // the rope skims this high as it passes the feet
+const ROPE_R = 1.15;
+const AXIS_Y = ROPE_FEET + ROPE_R;
+const SPACING = 1.3;
 
-function useClock(running: boolean) {
-  const [t, setT] = useState(0);
-  const start = useRef(0);
+export interface Jumper {
+  piece: number;
+  name: string;
+  character: GameState['pieces'][number]['character'];
+  multiplier: number;
+  living: boolean;
+  ghost: boolean;
+}
+
+/** Live data the arena reads every frame (no React re-render needed). */
+export interface ArenaFeed {
+  /** Timeline ms now (negative before the rope starts). */
+  now: () => number;
+  sched: RopeSchedule;
+  presses: Record<number, number[]>;
+}
+
+export function jumpersOf(game: GameState, ch: Challenge): Jumper[] {
+  return ch.participants.map((p, k) => ({
+    piece: p,
+    name: game.pieces[p].name,
+    character: game.pieces[p].character,
+    multiplier: ch.multipliers[k],
+    living: p === ch.livingAtStart,
+    ghost: !game.pieces[p].alive,
+  }));
+}
+
+// ── the 3D arena ────────────────────────────────────────────────────────
+
+function ArenaJumper({ j, x, feed, sounds }: { j: Jumper; x: number; feed: React.MutableRefObject<ArenaFeed>; sounds: boolean }) {
+  const body = useRef<THREE.Group>(null);
+  const miss = useRef<THREE.Sprite>(null);
+  const ok = useRef<THREE.Sprite>(null);
+  const ring = useRef<THREE.Mesh>(null);
+  const seen = useRef({ jumps: 0, stumbles: 0 });
+  useSpectral(body, j.ghost, colorOf(j.character));
+  const name = useMemo(() => labelTexture([`${j.living ? '❤ ' : ''}${j.name}`], { border: colorOf(j.character), height: 84 }), [j.name, j.character, j.living]);
+  const missTex = useMemo(() => labelTexture(['MISS'], { fg: '#fff', bg: '#e0405a', height: 84 }), []);
+  const okTex = useMemo(() => labelTexture(['✓'], { fg: '#10240f', bg: '#7ee081', height: 84 }), []);
+  useFrame(() => {
+    const f = feed.current;
+    const t = f.now();
+    const tl = jumperTimeline(f.sched, (f.presses[j.piece] ?? []).map((v) => ({ t: v })), j.multiplier);
+    const jump = tl.jumps.find((q) => q.start <= t && t < q.end);
+    const y = jump ? jumpHeight(t - jump.start, j.multiplier) * PEAK : 0;
+    const stumble = tl.stumbles.filter((s) => s <= t).pop();
+    const sinceStumble = stumble === undefined ? Infinity : t - stumble;
+    const passed = f.sched.bottoms.filter((b) => b <= t).length;
+    // Sounds follow what is drawn.
+    const nJumps = tl.jumps.filter((q) => q.start <= t).length;
+    const nStumbles = tl.stumbles.filter((s) => s <= t).length;
+    if (sounds) {
+      if (nJumps > seen.current.jumps) audio.play('jump');
+      if (nStumbles > seen.current.stumbles) audio.play('hit');
+    }
+    seen.current = { jumps: nJumps, stumbles: nStumbles };
+    // For automated checks: what this jumper is doing on screen right now.
+    const dbg = ((globalThis as unknown as { __omrArena?: Record<number, unknown> }).__omrArena ??= {});
+    dbg[j.piece] = { y, jumps: nJumps, stumbles: nStumbles, t, sweeps: f.sched.sweeps, jumpsTotal: tl.jumps.length, stumbleAt: tl.stumbles, landings: tl.jumps.map((q) => q.end), lastPress: (f.presses[j.piece] ?? []).at(-1) ?? null, presses: (f.presses[j.piece] ?? []).length, nextBottom: f.sched.bottoms.find((b) => b > t) ?? null, lastBottom: f.sched.bottoms[passed - 1] ?? null };
+    const g = body.current;
+    if (g) {
+      g.position.set(x, y + (j.ghost ? 0.06 : 0), 0);
+      const st = sinceStumble < 450 ? 1 - sinceStumble / 450 : 0;
+      g.rotation.set(-0.5 * st, 0, Math.sin(t / 30) * 0.15 * st);
+    }
+    const last = tl.results[passed - 1];
+    const sincePass = passed > 0 ? t - f.sched.bottoms[passed - 1] : Infinity;
+    if (miss.current) {
+      miss.current.visible = sinceStumble < 650;
+      miss.current.position.set(x, 1.55 + Math.min(0.3, sinceStumble / 2000), 0);
+    }
+    if (ok.current) {
+      ok.current.visible = !!last?.cleared && sincePass < 420;
+      ok.current.position.set(x, 1.5 + Math.min(0.25, sincePass / 1500), 0);
+    }
+    if (ring.current) (ring.current.material as THREE.MeshBasicMaterial).color.set(sinceStumble < 450 ? '#e0405a' : last?.cleared && sincePass < 300 ? '#7ee081' : colorOf(j.character));
+  });
+  return (
+    <group>
+      <mesh ref={ring} position={[x, 0.012, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.36, 0.46, 32]} />
+        <meshBasicMaterial color={colorOf(j.character)} toneMapped={false} />
+      </mesh>
+      <group ref={body}>
+        <CharacterModel id={j.character} />
+      </group>
+      <sprite position={[x, -0.32, 0.55]} scale={[0.3 * name.aspect, 0.3, 1]} renderOrder={6}>
+        <spriteMaterial map={name.tex} depthTest={false} transparent />
+      </sprite>
+      <sprite ref={miss} scale={[0.3 * missTex.aspect, 0.3, 1]} renderOrder={7} visible={false}>
+        <spriteMaterial map={missTex.tex} depthTest={false} transparent />
+      </sprite>
+      <sprite ref={ok} scale={[0.26 * okTex.aspect, 0.26, 1]} renderOrder={7} visible={false}>
+        <spriteMaterial map={okTex.tex} depthTest={false} transparent />
+      </sprite>
+    </group>
+  );
+}
+
+/** The rope: a flat stretch under everyone's feet, tapering to the two turners' hands; it turns about the line between them. */
+function Rope({ half, feed, sounds }: { half: number; feed: React.MutableRefObject<ArenaFeed>; sounds: boolean }) {
+  const ref = useRef<THREE.Mesh>(null);
+  const lastPass = useRef(0);
+  const reach = half + 1.05;
+  const geom = useMemo(() => {
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i <= 40; i++) {
+      const x = -reach + (2 * reach * i) / 40;
+      const ax = Math.abs(x);
+      const flat = half + 0.35;
+      const r = ax <= flat ? ROPE_R : ROPE_R * Math.max(0, Math.cos(((ax - flat) / (reach - flat)) * (Math.PI / 2)));
+      pts.push(new THREE.Vector3(x, -r, 0));
+    }
+    return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 80, 0.035, 6, false);
+  }, [half, reach]);
+  useFrame(() => {
+    const f = feed.current;
+    const t = f.now();
+    if (ref.current) ref.current.rotation.x = ropeAngle(f.sched, t);
+    const passes = f.sched.bottoms.filter((b) => b <= t).length;
+    if (sounds && passes > lastPass.current) audio.play('whoosh');
+    lastPass.current = passes;
+  });
+  return (
+    <group position={[0, AXIS_Y, 0]}>
+      <mesh ref={ref} geometry={geom}>
+        <meshBasicMaterial color="#d9c8ff" toneMapped={false} />
+      </mesh>
+    </group>
+  );
+}
+
+/** A hooded spectre turning one end of the rope. */
+function Turner({ x }: { x: number }) {
+  return (
+    <group position={[x, 0, 0]}>
+      <mesh position={[0, 0.75, 0]}>
+        <coneGeometry args={[0.38, 1.5, 10]} />
+        <meshStandardMaterial color="#2a1f3d" roughness={0.9} />
+      </mesh>
+      <mesh position={[0, 1.55, 0]}>
+        <sphereGeometry args={[0.22, 14, 10]} />
+        <meshStandardMaterial color="#1a1226" roughness={0.9} />
+      </mesh>
+      {[-0.08, 0.08].map((dx) => (
+        <mesh key={dx} position={[dx, 1.57, 0.19]}>
+          <sphereGeometry args={[0.035, 8, 6]} />
+          <meshBasicMaterial color="#9fe8ff" toneMapped={false} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+export function RopeArena({ jumpers, feed, sounds = true }: { jumpers: Jumper[]; feed: React.MutableRefObject<ArenaFeed>; sounds?: boolean }) {
+  const half = ((jumpers.length - 1) * SPACING) / 2;
+  const width = half * 2 + 3.6;
+  const camZ = Math.max(3.9, width * 0.86);
+  return (
+    <Canvas className="rope-arena" camera={{ fov: 40, position: [0, 1.55, camZ], near: 0.1, far: 60 }} onCreated={({ camera }) => camera.lookAt(0, 0.75, 0)} dpr={[1, 1.75]}>
+      <color attach="background" args={['#120a1f']} />
+      <hemisphereLight args={['#b8a6ff', '#1a1028', 1.1]} />
+      <directionalLight position={[2, 6, 5]} intensity={1.1} />
+      <pointLight position={[0, 2.6, 1.5]} color="#ffb45a" intensity={6} distance={9} />
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <circleGeometry args={[Math.max(4, half + 3), 48]} />
+        <meshStandardMaterial color="#2d2140" roughness={0.95} />
+      </mesh>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.006, 0]}>
+        <planeGeometry args={[half * 2 + 1.6, 0.18]} />
+        <meshBasicMaterial color="#4b3a66" />
+      </mesh>
+      <Turner x={-(half + 1.05)} />
+      <Turner x={half + 1.05} />
+      <Rope half={half} feed={feed} sounds={sounds} />
+      {jumpers.map((j, k) => (
+        <ArenaJumper key={j.piece} j={j} x={-half + k * SPACING} feed={feed} sounds={sounds} />
+      ))}
+    </Canvas>
+  );
+}
+
+// ── the panel around the arena ──────────────────────────────────────────
+
+/** Successful jumps so far, per jumper, as the screen shows them. */
+function useScores(jumpers: Jumper[], feed: React.MutableRefObject<ArenaFeed>) {
+  const [view, setView] = useState({ scores: jumpers.map(() => 0), sweep: 0, count: 0 });
   useEffect(() => {
-    if (!running) return;
-    start.current = now();
     let raf = 0;
     const loop = () => {
-      setT(now() - start.current);
+      const f = feed.current;
+      const t = f.now();
+      const passed = f.sched.bottoms.filter((b) => b <= t).length;
+      const scores = jumpers.map((j) => {
+        const tl = jumperTimeline(f.sched, (f.presses[j.piece] ?? []).map((v) => ({ t: v })), j.multiplier);
+        return tl.results.slice(0, Math.min(passed, f.sched.sweeps)).filter((r) => r.cleared).length;
+      });
+      const count = t < 0 && t > -CHALLENGE.readyMs - 50 ? Math.ceil(-t / 1000) : 0;
+      setView((v) => (v.sweep === passed && v.count === count && v.scores.every((s, i) => s === scores[i]) ? v : { scores, sweep: passed, count }));
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [running]);
-  return t;
+  }, [jumpers, feed]);
+  return view;
+}
+
+function Scoreline({ jumpers, feed, label, keys }: { jumpers: Jumper[]; feed: React.MutableRefObject<ArenaFeed>; label: string; keys?: Record<number, string> }) {
+  const v = useScores(jumpers, feed);
+  const sched = feed.current.sched;
+  const total = sched.sweeps;
+  return (
+    <>
+      <div className="arena-top">
+        <span className="arena-label">{label}</span>
+        <span className="arena-sweep">{v.sweep >= total ? (sched.extraSweeps ? 'Sudden death!' : '') : `Sweep ${Math.min(total, v.sweep + 1)} / ${total}`}</span>
+      </div>
+      {v.count > 0 && v.count <= 3 && (
+        <div className="arena-countdown" aria-live="assertive">
+          {v.count}
+        </div>
+      )}
+      <div className="arena-scores">
+        {jumpers.map((j, k) => (
+          <span key={j.piece} className="arena-score" style={{ borderColor: colorOf(j.character) }}>
+            <b>{j.name}</b> ✓ {v.scores[k]}
+            {keys?.[j.piece] && <kbd>{keys[j.piece]}</kbd>}
+          </span>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function CurseLine({ jumpers }: { jumpers: Jumper[] }) {
+  const cursed = jumpers.filter((j) => j.multiplier < 1);
+  if (!cursed.length) return null;
+  return (
+    <p className="arena-curse">
+      {cursed.map((j) => (
+        <span key={j.piece}>
+          ❤ {j.name} · {cursePhrase(j.multiplier)}
+        </span>
+      ))}
+    </p>
+  );
+}
+
+function titleOf(ch: Challenge) {
+  if (ch.host === 'ghostBattle' || ch.host === 'versus') return 'Ghost battle · winner gets an item';
+  if (ch.kind === 'seance') return 'Séance · everyone jumps';
+  return 'Jump for the life';
+}
+
+/** A short demonstration: the contestants themselves, jumping a slow rope perfectly. */
+function useDemoFeed(jumpers: Jumper[]) {
+  const t0 = useRef(performance.now());
+  const sched = useMemo<RopeSchedule>(() => {
+    const bottoms = Array.from({ length: 4 }, (_, i) => 900 + i * 1500);
+    return { bottoms, sweeps: 4, extraSweeps: 0, mainMs: 0, totalMs: 6000 };
+  }, []);
+  return useRef<ArenaFeed>({
+    now: () => (performance.now() - t0.current) % 6000,
+    sched,
+    presses: Object.fromEntries(jumpers.map((j) => [j.piece, sched.bottoms.map((b) => b - airTime(j.multiplier) / 2)])),
+  });
 }
 
 export function ChallengeStage({ game }: { game: GameState }) {
   const ch = game.challenge!;
   const mode = useStore((s) => s.mode);
-  if (mode === 'room') return <SpectatorStage game={game} />;
-  return <LocalChallenge key={`${ch.id}:${ch.attempt}`} game={game} ch={ch} />;
+  if (mode === 'room') return <RoomStage key={ch.id} game={game} ch={ch} />;
+  return <LocalStage key={`${ch.id}:${ch.attempt}`} game={game} ch={ch} />;
 }
 
-/** Key for each human piece: Space works when only one person is jumping. */
-function keyFor(humans: number[], piece: number): { code: string; label: string } | null {
-  const k = humans.indexOf(piece);
-  if (k < 0) return null;
-  return JUMP_KEYS[k];
-}
+// ── one shared screen ───────────────────────────────────────────────────
 
-function LocalChallenge({ game, ch }: { game: GameState; ch: Challenge }) {
+type LocalStageName = 'ready' | 'practice' | 'countdown' | 'verdict';
+
+function LocalStage({ game, ch }: { game: GameState; ch: Challenge }) {
   const fastBots = useStore((s) => s.settings.fastBots);
-  const humans = ch.participants.filter((p) => !isBotSeat(p));
+  const practiced = useStore((s) => s.ropePracticed);
+  const jumpers = useMemo(() => jumpersOf(game, ch), [game, ch]);
+  const humans = useMemo(() => ch.participants.filter((p) => !isBotSeat(p)), [ch.participants]);
   const bots = useMemo(() => botInputsFor(ch), [ch]);
-  const [stage, setStage] = useState<'intro' | 'countdown' | 'play' | 'verdict'>('intro');
+  const [stage, setStage] = useState<LocalStageName>('ready');
   const [ready, setReady] = useState<Set<number>>(new Set());
-  const [verdict, setVerdict] = useState<{ winner: number; inputs: Inputs; decidedBy: string; finalists: number[] } | null>(null);
-  const pressRef = useRef<Press | null>(null);
+  const [result, setResult] = useState<{ winner: number; inputs: Record<number, ChallengeInput[]> } | null>(null);
+  const [firstTime] = useState(!practiced && humans.length > 0);
+  const keys = useMemo(() => {
+    const out: Record<number, string> = {};
+    humans.forEach((p, k) => (out[p] = humans.length === 1 ? 'Space' : JUMP_KEYS[k].label));
+    return out;
+  }, [humans]);
+  const demo = useDemoFeed(jumpers);
+  const feed = useRef<ArenaFeed>({ now: () => -1e9, sched: ropeSchedule(ch.seed), presses: {} });
+  const zero = useRef(0);
 
-  const keyOwner = useCallback(
-    (e: KeyboardEvent): number | null => {
-      if (humans.length === 1 && (e.code === 'Space' || e.key === 'Enter')) return humans[0];
-      const k = JUMP_KEYS.findIndex((x) => x.code === e.code);
-      return k >= 0 && k < humans.length ? humans[k] : null;
-    },
-    [humans],
-  );
+  const beginPractice = useCallback(() => {
+    zero.current = performance.now() + 900;
+    const sched = practiceSchedule();
+    feed.current = {
+      now: () => performance.now() - zero.current,
+      sched,
+      presses: Object.fromEntries(ch.participants.map((p, k) => [p, isBotSeat(p) ? sched.bottoms.map((b) => b - airTime(ch.multipliers[k]) / 2) : []])),
+    };
+    setStage('practice');
+  }, [ch]);
 
-  const judge = useCallback(
-    (inputs: Inputs) => {
-      // Bots' official inputs are the precomputed ones (the on-screen replay is only for show).
-      const all: Inputs = { ...inputs, ...bots };
-      for (const p of ch.participants) all[p] = all[p] ?? [];
-      return { all, v: judgeChallenge(ch, all) };
-    },
-    [bots, ch],
-  );
+  const beginCountdown = useCallback(() => {
+    markRopePracticed();
+    zero.current = performance.now() + CHALLENGE.readyMs;
+    feed.current = {
+      now: () => performance.now() - zero.current,
+      sched: ropeSchedule(ch.seed),
+      presses: Object.fromEntries(ch.participants.map((p) => [p, (bots[p] ?? []).map((i) => i.t)])),
+    };
+    audio.play('tick');
+    setStage('countdown');
+  }, [ch.seed, ch.participants, bots]);
 
-  const finish = useCallback(
-    (inputs: Inputs) => {
-      const { all, v } = judge(inputs);
-      setVerdict({ winner: v.winner, inputs: all, decidedBy: v.decidedBy, finalists: v.finalists });
-      setStage('verdict');
-      audio.play(v.winner === ch.livingAtStart || ch.host === 'ghostBattle' || ch.host === 'versus' ? 'hit' : 'transform');
-    },
-    [judge, ch.livingAtStart, ch.host],
-  );
-
-  /** After the eight scored sweeps: stop now unless the top is tied. */
-  const needsSuddenDeath = useCallback((inputs: Inputs) => judge(inputs).v.decidedBy !== 'score', [judge]);
-
-  // Bot-only challenges with fast bots resolve straight away.
+  // Everyone ready → practice (first rope of the match) or straight to the countdown.
   useEffect(() => {
-    if (!humans.length && fastBots && stage === 'intro') finish({});
-  }, [humans.length, fastBots, stage, finish]);
-  useEffect(() => {
-    if (stage === 'intro' && humans.length > 0 && ready.size === humans.length) setStage('countdown');
-    if (stage === 'intro' && !humans.length && !fastBots) {
-      const t = window.setTimeout(() => setStage('countdown'), 1400);
+    if (stage !== 'ready') return;
+    if (!humans.length) {
+      const t = window.setTimeout(beginCountdown, fastBots ? 10 : 900);
       return () => clearTimeout(t);
     }
-  }, [ready, stage, humans.length, fastBots]);
+    if (ready.size === humans.length) {
+      if (firstTime) beginPractice();
+      else beginCountdown();
+    }
+  }, [stage, ready, humans.length, firstTime, beginPractice, beginCountdown, fastBots]);
+
+  // Practice ends on its own.
+  useEffect(() => {
+    if (stage !== 'practice') return;
+    const t = window.setTimeout(beginCountdown, 900 + practiceSchedule().totalMs);
+    return () => clearTimeout(t);
+  }, [stage, beginCountdown]);
+
+  // The scored rope: decide as soon as the eight sweeps settle it (or after sudden death).
   useEffect(() => {
     if (stage !== 'countdown') return;
-    audio.play('tick');
-    const t = window.setTimeout(() => {
-      audio.play('go');
-      setStage('play');
-    }, CHALLENGE.readyMs);
-    return () => clearTimeout(t);
-  }, [stage]);
+    const sched = feed.current.sched;
+    const inputsNow = () => Object.fromEntries(ch.participants.map((p) => [p, (feed.current.presses[p] ?? []).map((t) => ({ t }))]));
+    const finish = () => {
+      const inputs = inputsNow();
+      const v = judgeChallenge(ch, inputs);
+      setResult({ winner: v.winner, inputs });
+      audio.play(v.winner === ch.livingAtStart ? 'hit' : 'fanfare');
+      setStage('verdict');
+    };
+    if (!humans.length && fastBots) {
+      finish();
+      return;
+    }
+    const at = (ms: number) => Math.max(0, zero.current + ms - performance.now());
+    const early = window.setTimeout(() => {
+      if (judgeChallenge(ch, inputsNow()).decidedBy === 'score') finish();
+    }, at(sched.mainMs));
+    const late = window.setTimeout(finish, at(sched.totalMs));
+    const go = window.setTimeout(() => audio.play('go'), at(0));
+    return () => [early, late, go].forEach(clearTimeout);
+  }, [stage, ch, humans.length, fastBots]);
+
   useEffect(() => {
-    if (stage !== 'verdict' || !verdict) return;
-    const t = window.setTimeout(() => act({ type: 'challengeResult', id: ch.id, inputs: verdict.inputs }), fastBots && !humans.length ? 600 : 2600);
+    if (stage !== 'verdict' || !result) return;
+    const t = window.setTimeout(() => act({ type: 'challengeResult', id: ch.id, inputs: result.inputs }), fastBots && !humans.length ? 500 : 2400);
     return () => clearTimeout(t);
-  }, [stage, verdict, ch.id, fastBots, humans.length]);
+  }, [stage, result, ch.id, fastBots, humans.length]);
+
+  const press = useCallback(
+    (p: number) => {
+      if (stage === 'ready') setReady((r) => new Set(r).add(p));
+      else if (stage === 'practice' || stage === 'countdown') {
+        const t = Math.round(performance.now() - zero.current);
+        if (stage === 'countdown' && t < -300) return; // still counting down
+        (feed.current.presses[p] ??= []).push(t);
+      }
+    },
+    [stage],
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.repeat) return; // holding a key never counts twice
-      if (getState().modal) return;
-      const owner = keyOwner(e);
-      if (owner === null) return;
+      if (e.repeat || getState().modal) return; // holding a key is one press
+      const k = humans.length === 1 && (e.code === 'Space' || e.code === 'Enter') ? 0 : JUMP_KEYS.findIndex((x) => x.code === e.code);
+      if (k < 0 || k >= humans.length) return;
       e.preventDefault();
-      if (stage === 'intro') setReady((r) => new Set(r).add(owner));
-      else if (stage === 'play') pressRef.current?.(owner);
+      press(humans[k]);
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [stage, keyOwner]);
+  }, [humans, press]);
 
-  const keyLabel = (p: number) => {
-    if (isBotSeat(p)) return 'bot';
-    if (humans.length === 1) return 'Space, or tap Jump';
-    return `key ${keyFor(humans, p)!.label}`;
-  };
-
+  const showDemo = stage === 'ready' && firstTime;
   return (
-    <div className="challenge-stage" role="dialog" aria-modal="true" aria-label={challengeTitle(ch)}>
-      <div className={`challenge-card kind-${ch.kind}`}>
-        <div className="ch-head">
-          <span className="ch-kicker">{ch.kind === 'seance' ? `Séance · ${ch.participants.length} jumpers` : 'For the life'}</span>
-          <h2>{challengeTitle(ch)}</h2>
-          <p className="ch-host">{challengeHost(ch, game)}</p>
-        </div>
-        <div className="ch-participants">
-          {ch.participants.map((p, k) => {
-            const pc = game.pieces[p];
-            const curse = ch.multipliers[k] < 1 ? curseLine(pc.streak) : null;
-            return (
-              <div key={pc.id} className={`ch-player ${ready.has(p) ? 'ready' : ''}`}>
-                <PlayerBadge n={p + 1} color={colorOf(pc.character)} size={26} /> <b>{pc.name}</b>
-                {p === ch.livingAtStart && <span className="status alive"> ❤</span>}
-                <span className="muted small"> — {keyLabel(p)}</span>
-                {curse && <span className="status curse">{curse}</span>}
-                {stage === 'intro' && !isBotSeat(p) && (
-                  <button className="btn tool" onClick={() => setReady((r) => new Set(r).add(p))} disabled={ready.has(p)}>
-                    {ready.has(p) ? 'Ready ✓' : 'Ready'}
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        {stage === 'intro' && (
-          <div className="ch-intro">
-            <p>{challengeHowTo(ch)}</p>
-            {humans.length > 0 && <p className="muted small">Press your key (or Ready) when you are set.</p>}
-          </div>
-        )}
-        {stage === 'countdown' && <Countdown />}
-        {stage === 'play' && <RopeGame ch={ch} game={game} bots={bots} pressRef={pressRef} onDone={finish} humans={humans} needsSuddenDeath={needsSuddenDeath} keyLabel={keyLabel} />}
-        {stage === 'verdict' && verdict && (
-          <div className="ch-verdict">
-            <p className="lives">
-              {game.pieces[verdict.winner].name}{' '}
-              {ch.host === 'ghostBattle' || ch.host === 'versus'
-                ? 'wins the battle — and an item!'
-                : verdict.winner === ch.livingAtStart
-                  ? 'keeps the life!'
-                  : 'steals the life!'}
-            </p>
-            {verdict.decidedBy === 'suddenDeath' && <p className="muted">Decided in sudden death between {verdict.finalists.map((f) => game.pieces[f].name).join(' and ')}.</p>}
-            {verdict.decidedBy === 'timing' && <p className="muted">Tied after sudden death — the steadier timing wins.</p>}
-            {verdict.decidedBy === 'verdict' && <p className="muted">A perfect tie. The Reaper’s verdict (a seeded draw) decides.</p>}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Countdown() {
-  const [n, setN] = useState(3);
-  useEffect(() => {
-    const step = CHALLENGE.readyMs / 3;
-    const a = window.setTimeout(() => setN(2), step);
-    const b = window.setTimeout(() => setN(1), step * 2);
-    return () => {
-      clearTimeout(a);
-      clearTimeout(b);
-    };
-  }, []);
-  return (
-    <div className="ch-countdown" aria-live="assertive">
-      {n}
-    </div>
-  );
-}
-
-// ── Haunted Jump Rope ───────────────────────────────────────────────────
-
-export interface RopeGameProps {
-  ch: Challenge;
-  game: GameState;
-  bots: Inputs;
-  pressRef: React.MutableRefObject<Press | null>;
-  onDone: (inputs: Inputs) => void;
-  /** Pieces pressing on this screen (they get a Jump button). */
-  humans: number[];
-  spectator?: boolean;
-  /** Local play: after eight sweeps, keep going only if the top is tied. Phones always play all twelve. */
-  needsSuddenDeath?: (inputs: Inputs) => boolean;
-  keyLabel?: (p: number) => string;
-  /** Lanes whose presses this screen actually knows (others show no score). Defaults to all. */
-  knownLanes?: number[];
-}
-
-export function RopeGame({ ch, game, bots, pressRef, onDone, humans, spectator = false, needsSuddenDeath, keyLabel, knownLanes }: RopeGameProps) {
-  const sched = useMemo(() => ropeSchedule(ch.seed), [ch.seed]);
-  const t = useClock(true);
-  const tRef = useRef(0);
-  tRef.current = t;
-  const inputs = useRef<Inputs>(Object.fromEntries(ch.participants.map((p) => [p, []])));
-  const lastJump = useRef<Record<number, number>>({});
-  const done = useRef(false);
-  const [suddenDeath, setSuddenDeath] = useState<boolean | null>(needsSuddenDeath ? null : true);
-  const c = CHALLENGE.rope;
-
-  const press = useCallback((who: number) => {
-    if (!(who in inputs.current) || done.current) return;
-    const time = Math.round(tRef.current);
-    inputs.current[who].push({ t: time });
-    lastJump.current[who] = time;
-    audio.play('jump');
-  }, []);
-  pressRef.current = press;
-
-  useEffect(() => {
-    const timers: number[] = [];
-    for (const p of ch.participants) for (const i of bots[p] ?? []) timers.push(window.setTimeout(() => press(p), i.t));
-    return () => timers.forEach(clearTimeout);
-  }, [bots, ch.participants, press]);
-
-  useEffect(() => {
-    if (done.current) return;
-    if (suddenDeath === null && t > sched.mainMs) setSuddenDeath(needsSuddenDeath!(inputs.current));
-    if (suddenDeath === false || t > sched.totalMs) {
-      done.current = true;
-      if (!spectator) onDone(inputs.current);
-    }
-  }, [t, sched, onDone, spectator, suddenDeath, needsSuddenDeath]);
-
-  // Rope phase: 0 at a floor pass, π overhead.
-  const b = sched.bottoms;
-  let i = b.findIndex((x) => x > t);
-  if (i < 0) i = b.length;
-  const prev = i === 0 ? b[0] - c.periodMs : b[i - 1];
-  const next = i < b.length ? b[i] : b[b.length - 1] + c.periodMs;
-  const theta = ((t - prev) / (next - prev)) * Math.PI * 2;
-  const height = (1 - Math.cos(theta)) / 2; // 0 floor, 1 top
-  const passed = b.filter((x) => x + c.lateMs < t).length;
-  const sweepNo = Math.min(b.length, passed + 1);
-  const inSuddenDeath = sweepNo > c.sweeps;
-  const lanes = ch.participants.length;
-  const W = 140 + lanes * 110;
-  const ground = 200;
-  const handleY = 110;
-  const midY = ground - height * 170;
-  const ctrl = 2 * midY - handleY;
-  // Per-lane results from the very judge that decides the game.
-  const results: SweepResult[][] = ch.participants.map((p, k) => judgeRopeSweeps(sched, inputs.current[p], ch.multipliers[k]));
-  const upcoming = i < b.length ? b[i] : null;
-
-  return (
-    <div className="rope-game">
-      <p className="muted">
-        {inSuddenDeath ? `Sudden death ${sweepNo - c.sweeps} of ${c.extraSweeps}${needsSuddenDeath ? '' : ' — counts only for jumpers tied at the top'}` : `Sweep ${sweepNo} of ${c.sweeps}`}
-      </p>
-      <svg viewBox={`0 0 ${W} 240`} className="rope" aria-hidden="true">
-        <rect x={0} y={ground} width={W} height={40} fill="#2a1d3d" />
-        <circle cx={30} cy={handleY} r={10} fill="#6a5580" />
-        <circle cx={W - 30} cy={handleY} r={10} fill="#6a5580" />
-        {ch.participants.map((p, k) => {
-          const pc = game.pieces[p];
-          const x = 70 + (k + 0.5) * ((W - 140) / lanes);
-          const lj = lastJump.current[p];
-          const air = lj !== undefined && t - lj < 450 ? Math.sin(((t - lj) / 450) * Math.PI) : 0;
-          const y = ground - 26 - air * 70;
-          return (
-            <g key={p} transform={`translate(${x},${y})`}>
-              <ellipse cx={0} cy={26 + air * 70} rx={18} ry={5} fill="#000" opacity={0.35} />
-              <circle r={22} fill={colorOf(pc.character)} stroke={p === ch.livingAtStart ? '#ffd36b' : '#fff6e0'} strokeWidth={p === ch.livingAtStart ? 5 : 3} opacity={p === ch.livingAtStart ? 1 : 0.8} />
-              <text y={6} textAnchor="middle" fontWeight={900} fontSize={18} fill="#1a1024">
-                {p + 1}
-              </text>
-            </g>
-          );
-        })}
-        <path d={`M30,${handleY} Q${W / 2},${ctrl} ${W - 30},${handleY}`} fill="none" stroke="#7ff5e6" strokeWidth={6} opacity={height < 0.5 ? 1 : 0.55} />
-      </svg>
-      <div className="rope-lanes">
-        {ch.participants.map((p, k) => {
-          const res = results[k];
-          const main = res.slice(0, Math.min(passed, c.sweeps)).filter((r) => r.cleared).length;
-          const extra = res.slice(c.sweeps, Math.max(c.sweeps, passed)).filter((r) => r.cleared).length;
-          const known = !knownLanes || knownLanes.includes(p);
-          const last = known && passed > 0 ? res[passed - 1] : null;
-          const w = clearanceWindow(ch.multipliers[k]);
-          // Timing meter for the next sweep: left = 700 ms before the floor, right = the floor.
-          const span = c.windowMs;
-          const zoneL = ((span - w.maxLead) / span) * 100;
-          const zoneW = ((w.maxLead - w.minLead) / span) * 100;
-          const marker = upcoming === null ? null : Math.max(0, Math.min(100, ((t - (upcoming - span)) / span) * 100));
-          return (
-            <div key={p} className={`rope-lane ${p === ch.livingAtStart ? 'living' : ''}`}>
-              <div className="rl-head">
-                <PlayerBadge n={p + 1} color={colorOf(game.pieces[p].character)} size={20} /> <b>{game.pieces[p].name}</b>
-                {known ? (
-                  <span className="rl-score">
-                    {main}/{c.sweeps}
-                    {inSuddenDeath ? ` · SD ${extra}` : ''}
-                  </span>
-                ) : (
-                  <span className="rl-score muted">jumping on their phone</span>
-                )}
-                {last && <span className={`rl-last ${last.cleared ? 'ok' : 'miss'}`}>{last.cleared ? '✓' : '✗'}</span>}
-              </div>
-              <div className="meter" title={ch.multipliers[k] < 1 ? `Cursed: window ${Math.round((1 - ch.multipliers[k]) * 100)}% narrower` : 'Normal window'}>
-                <span className="zone" style={{ left: `${zoneL}%`, width: `${zoneW}%` }} />
-                {marker !== null && <span className="marker" style={{ left: `${marker}%` }} />}
-              </div>
-              {humans.includes(p) && !spectator && (
-                <button
-                  className="btn primary press-btn"
-                  onPointerDown={(e) => {
-                    e.preventDefault();
-                    press(p);
-                  }}
-                >
-                  Jump!{keyLabel ? ` (${keyLabel(p)})` : ''}
-                </button>
-              )}
+    <div className="challenge-stage" role="dialog" aria-modal="true" aria-label={titleOf(ch)}>
+      <div className={`arena-card kind-${ch.kind}`}>
+        <h2 className="arena-title">{titleOf(ch)}</h2>
+        <CurseLine jumpers={jumpers} />
+        <div className="arena-view">
+          <RopeArena jumpers={jumpers} feed={showDemo ? demo : feed} sounds={stage !== 'ready'} />
+          {stage === 'ready' && humans.length > 0 && (
+            <div className="arena-overlay">
+              {firstTime && <p className="arena-teach">Jump as the rope reaches your feet</p>}
+              <p className="arena-prompt">Press {humans.length === 1 ? 'Space' : 'your key'} when ready</p>
             </div>
-          );
-        })}
+          )}
+          {stage === 'practice' && <div className="arena-banner">Practice</div>}
+          {stage === 'verdict' && result && <div className="arena-banner result">{outcomeHeadline(ch, result.winner, game)}</div>}
+          {(stage === 'practice' || stage === 'countdown') && <Scoreline jumpers={jumpers} feed={feed} label={stage === 'practice' ? 'Practice · not scored' : 'Jump!'} keys={keys} />}
+        </div>
+        <div className="arena-controls">
+          {stage !== 'verdict' &&
+            humans.map((p) => (
+              <button
+                key={p}
+                className={`btn big jump-btn ${ready.has(p) && stage === 'ready' ? 'ready' : ''}`}
+                style={{ borderColor: colorOf(game.pieces[p].character) }}
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  press(p);
+                }}
+              >
+                {stage === 'ready' ? (ready.has(p) ? `${game.pieces[p].name} ✓` : `${game.pieces[p].name}: Ready`) : `Jump · ${game.pieces[p].name}`} <kbd>{keys[p]}</kbd>
+              </button>
+            ))}
+          {stage === 'practice' && (
+            <button className="btn ghost" onClick={beginCountdown}>
+              Skip practice
+            </button>
+          )}
+        </div>
       </div>
-      <p className="muted small">Press when the marker is inside your green zone — that is when the rope passes under your feet.</p>
     </div>
   );
 }
 
-/** Room mode on the TV: phones play; pieces the host moved to the TV keyboard play here. */
-function SpectatorStage({ game }: { game: GameState }) {
-  const ch = game.challenge!;
-  const room = useStore((s) => s.room);
-  const run = room?.view?.run;
-  const local = ch.participants.filter((p) => room?.view?.pieces[p]?.localControl);
-  const [playing, setPlaying] = useState(false);
-  const pressRef = useRef<Press | null>(null);
-  const sent = useRef('');
-  const key = `${ch.id}:${run?.attempt ?? 0}`;
-  useEffect(() => setPlaying(false), [key]);
+// ── phone rooms: the TV draws the room's timeline ───────────────────────
+
+function RoomStage({ game, ch }: { game: GameState; ch: Challenge }) {
+  const run = useStore((s) => s.room?.view?.run ?? null);
+  const pieces = useStore((s) => s.room?.view?.pieces ?? []);
+  const jumpers = useMemo(() => jumpersOf(game, ch), [game, ch]);
+  const local = ch.participants.filter((p) => pieces[p]?.localControl);
+  const demo = useDemoFeed(jumpers);
+  const feed = useRef<ArenaFeed>({ now: () => -1e9, sched: ropeSchedule(ch.seed), presses: {} });
+  const stage = run?.stage ?? 'ready';
+  const serverNow = () => roomClient()?.serverNow() ?? Date.now();
+  // Point the feed at the room's timeline; presses update as views arrive.
+  if (run && stage === 'practice' && run.practiceAt !== null) {
+    const at = run.practiceAt;
+    feed.current = { now: () => serverNow() - at, sched: practiceSchedule(), presses: run.practicePresses };
+  } else if (run && stage === 'countdown' && run.startAt !== null) {
+    const at = run.startAt;
+    feed.current = { now: () => serverNow() - at, sched: ropeSchedule(ch.seed), presses: run.presses };
+  }
   useEffect(() => {
-    if (!run?.startAt) return;
-    const c = roomClient();
-    const ms = run.startAt - (c ? c.serverNow() : Date.now());
-    const t = window.setTimeout(() => setPlaying(true), Math.max(0, ms));
-    return () => clearTimeout(t);
-  }, [run?.startAt, key]);
+    if (stage === 'countdown') audio.play('tick');
+  }, [stage]);
+  // Pieces the host moved to the TV keyboard press here.
   useEffect(() => {
-    if (!playing || !local.length) return;
+    if (!local.length || !run) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.repeat) return;
       const k = local.length === 1 && e.code === 'Space' ? 0 : JUMP_KEYS.findIndex((x) => x.code === e.code);
-      if (k >= 0 && k < local.length) pressRef.current?.(local[k]);
+      if (k < 0 || k >= local.length) return;
+      e.preventDefault();
+      hostSend({ t: 'press', challengeId: run.id, attempt: run.attempt, at: roomClient()?.serverNow() ?? Date.now(), piece: local[k] });
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [playing, local]);
-  const done = (inputs: Inputs) => {
-    if (sent.current === key) return;
-    sent.current = key;
-    for (const p of local) hostSend({ t: 'challengeInput', challengeId: ch.id, attempt: run?.attempt ?? 0, piece: p, inputs: inputs[p] ?? [] });
-    setPlaying(false);
-  };
-  const phones = ch.participants.filter((p) => !local.includes(p) && room?.view?.pieces[p]?.kind === 'phone');
+  });
+  const showDemo = stage === 'ready' && !!run?.practice;
   return (
-    <div className="challenge-stage spectator" role="status">
-      <div className={`challenge-card kind-${ch.kind}`}>
-        <span className="ch-kicker">{ch.kind === 'seance' ? `Séance · ${ch.participants.length} jumpers` : 'For the life'}</span>
-        <h2>{challengeTitle(ch)}</h2>
-        <p className="ch-host">{challengeHost(ch, game)}</p>
-        {!playing && <p>{challengeHowTo(ch)}</p>}
-        {ch.participants.map((p, k) =>
-          ch.multipliers[k] < 1 ? (
-            <p key={p} className="status curse">
-              {game.pieces[p].name}: {curseLine(game.pieces[p].streak)}
-            </p>
-          ) : null,
+    <div className="challenge-stage" role="status" aria-label={titleOf(ch)}>
+      <div className={`arena-card kind-${ch.kind}`}>
+        <h2 className="arena-title">{titleOf(ch)}</h2>
+        <CurseLine jumpers={jumpers} />
+        <div className="arena-view">
+          <RopeArena jumpers={jumpers} feed={showDemo ? demo : feed} sounds={stage !== 'ready'} />
+          {stage === 'ready' && (
+            <div className="arena-overlay">
+              {run?.practice && <p className="arena-teach">Jump as the rope reaches your feet</p>}
+              <p className="arena-prompt">Press JUMP on your phone</p>
+              <p className="arena-ready">
+                {ch.participants.map((p) => (
+                  <span key={p} className={run?.ready.includes(p) ? 'on' : ''}>
+                    {game.pieces[p].name} {run?.ready.includes(p) ? '✓' : '…'}
+                  </span>
+                ))}
+              </p>
+              {run?.paused && <p className="notice">{run.paused}</p>}
+              {run?.note && <p className="muted small">{run.note}</p>}
+              {local.length > 0 && <p className="muted small">TV keyboard: {local.map((p, k) => `${game.pieces[p].name} = ${local.length === 1 ? 'Space' : JUMP_KEYS[k].label}`).join(' · ')}</p>}
+            </div>
+          )}
+          {stage === 'practice' && <div className="arena-banner">Practice</div>}
+          {stage !== 'ready' && <Scoreline jumpers={jumpers} feed={feed} label={stage === 'practice' ? 'Practice · not scored' : 'Jump!'} />}
+          {run && run.lagging.length > 0 && <p className="arena-lag">{run.lagging.map((p) => game.pieces[p].name).join(', ')}: phone is lagging — host Menu → TV keyboard</p>}
+        </div>
+        {stage === 'practice' && (
+          <div className="arena-controls">
+            <button className="btn ghost" onClick={() => hostSend({ t: 'skipPractice' })}>
+              Skip practice
+            </button>
+          </div>
         )}
-        {run?.paused && <p className="notice">{run.paused}</p>}
-        {run?.note && <p className="muted small">{run.note}</p>}
-        {phones.length > 0 && !playing && <p className="muted">Jumping on {phones.map((p) => `${game.pieces[p].name}’s`).join(', ')} {phones.length > 1 ? 'phones' : 'phone'}…</p>}
-        {local.length > 0 && !playing && !run?.startAt && (
-          <button className="btn primary big" onClick={() => hostSend({ t: 'ready', challengeId: ch.id, attempt: run?.attempt ?? 0 })} disabled={local.every((p) => run?.ready.includes(p))}>
-            {local.every((p) => run?.ready.includes(p)) ? 'Ready ✓ — waiting for the others' : `Ready (TV keyboard: ${local.length > 1 ? local.map((_, k) => JUMP_KEYS[k].label).join(', ') : 'Space'})`}
-          </button>
-        )}
-        {playing && <RopeGame ch={ch} game={game} bots={{}} pressRef={pressRef} onDone={done} humans={local} spectator={!local.length} knownLanes={local} />}
       </div>
+    </div>
+  );
+}
+
+/** After a phone-room rope ends, a short result on the TV before play moves on. */
+export function ResultFlash({ outcome, game }: { outcome: ChallengeOutcome; game: GameState }) {
+  const [show, setShow] = useState(true);
+  useEffect(() => {
+    setShow(true);
+    const t = window.setTimeout(() => setShow(false), 2600);
+    return () => clearTimeout(t);
+  }, [outcome.challengeId]);
+  if (!show) return null;
+  const winner = game.pieces[outcome.winner];
+  const text = outcome.reward ? `${winner.name} wins an item` : outcome.transferred ? `${winner.name} steals life` : `${winner.name} keeps life`;
+  return (
+    <div className="result-flash" role="status" onClick={() => setShow(false)}>
+      <span style={{ borderColor: colorOf(winner.character) }}>{text}</span>
     </div>
   );
 }

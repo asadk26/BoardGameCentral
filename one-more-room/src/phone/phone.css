@@ -263,3 +263,109 @@
 .pscores li.me .pn {
   text-decoration: underline;
 }
+
+/* ── Phone as controller: big arrows and one Jump button ─────────────── */
+.pbig {
+  font-size: 1.35rem;
+  font-weight: 800;
+  margin: 4px 0;
+}
+.pbtn.huge {
+  min-height: 96px;
+  font-size: 1.6rem;
+}
+.parrows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+.parrow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-height: 120px;
+  border-radius: 18px;
+  border: 4px solid var(--fc);
+  background: rgba(30, 18, 48, 0.95);
+  color: var(--ink);
+  font-weight: 800;
+  touch-action: manipulation;
+}
+.parrow-num {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--fc);
+  color: #1a1024;
+  font-size: 1.3rem;
+}
+.parrow-glyph {
+  font-size: 2.4rem;
+  color: var(--fc);
+  line-height: 1;
+}
+.pjump-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding-top: 8px;
+}
+.pjump-name {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 800;
+  color: var(--pc);
+}
+.pjump {
+  width: min(82vw, 380px);
+  height: min(82vw, 380px);
+  border-radius: 50%;
+  border: 8px solid var(--pc);
+  background: radial-gradient(circle at 50% 40%, #ffd98a, #f0a52e);
+  color: #2a1204;
+  font-size: 2.2rem;
+  font-weight: 900;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  animation: pjump-press 0.12s ease-out;
+}
+.pjump.is-ready {
+  background: radial-gradient(circle at 50% 40%, #c8ffc9, #7ee081);
+}
+.pjump:active {
+  transform: scale(0.96);
+}
+@keyframes pjump-press {
+  from {
+    transform: scale(0.94);
+  }
+  to {
+    transform: none;
+  }
+}
+.pjump-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 1.1rem;
+}
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 900;
+}
+.tag.bot {
+  background: #4a3a66;
+  color: #d9c8ff;
+}
+.tag.human {
+  background: #f2b84b;
+  color: #2a1204;
+}

@@ -6,6 +6,8 @@ import type { V3 } from './layout';
 export const camInfo = {
   position: [0, 10, 20] as V3,
   focus: [0, 0, 8] as V3,
+  /** True in the behind-the-piece view: distant labels hide so the route stays readable. */
+  follow: false,
 };
 
 /** Screen space covered by HUD panels, so the overview can frame around them. */

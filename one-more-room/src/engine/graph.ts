@@ -61,61 +61,48 @@ export function inAttackRange(a: number, b: number): boolean {
   return DIST[a][b] <= 1;
 }
 
-export interface PlayerRoute {
-  dest: number;
-  /** Full node sequence including the start node. */
-  path: number[];
-  usesSecret: boolean;
-  usesWall: boolean;
-}
+// ── exact-roll movement ─────────────────────────────────────────────────
 
-function lexLess(a: number[], b: number[]): boolean {
-  for (let i = 0; i < Math.min(a.length, b.length); i++) {
-    if (a[i] !== b[i]) return a[i] < b[i];
-  }
-  return a.length < b.length;
+/** o = ordinary corridor, s = secret passage (one per move), w = ghost-only wall link. */
+export type EdgeKind = 'o' | 's' | 'w';
+
+export interface Exit {
+  to: number;
+  kind: EdgeKind;
 }
 
 /**
- * Every destination reachable in 1..allowance steps, each with its
- * deterministic route: the shortest legal route, lower next-node id first on
- * ties. Routes are simple paths using at most one secret-passage edge; ghosts
- * may also cross the wall links (one step each). Pieces never block one
- * another and the entrance is an ordinary space. Routes are enumerated
- * exhaustively (the graph is tiny).
- *
- * Hidden traps are deliberately not an input: route output can never depend
- * on where they are.
+ * Where a piece standing on `node` may step next. A move never turns straight
+ * back along the edge it just used, unless that is the only way on (a dead
+ * end), so movement can never lock up. Loops are allowed. Hidden traps are
+ * never an input.
  */
-export function pieceRoutes(start: number, allowance: number, ghost: boolean): Map<number, PlayerRoute> {
-  const best = new Map<number, PlayerRoute>();
-  const path = [start];
-  const onPath = new Set([start]);
+export function exitsFrom(node: number, prev: number | null, usedSecret: boolean, ghost: boolean): Exit[] {
+  const all: Exit[] = ORDINARY_ADJ[node].map((to) => ({ to, kind: 'o' as const }));
+  if (ghost) for (const to of WALL_ADJ[node]) all.push({ to, kind: 'w' });
+  if (!usedSecret) for (const to of SECRET_ADJ[node]) all.push({ to, kind: 's' });
+  all.sort((a, b) => a.to - b.to);
+  const onward = all.filter((e) => e.to !== prev);
+  return onward.length ? onward : all;
+}
 
-  const visit = (usedSecret: boolean, usedWall: boolean) => {
-    const here = path[path.length - 1];
-    if (path.length > 1) {
-      const current = best.get(here);
-      const candidate = path.slice();
-      if (!current || candidate.length < current.path.length || (candidate.length === current.path.length && lexLess(candidate, current.path))) {
-        best.set(here, { dest: here, path: candidate, usesSecret: usedSecret, usesWall: usedWall });
-      }
-    }
-    if (path.length - 1 >= allowance) return;
-    const steps: Array<[number, 'o' | 's' | 'w']> = [];
-    for (const m of ORDINARY_ADJ[here]) steps.push([m, 'o']);
-    if (ghost) for (const m of WALL_ADJ[here]) steps.push([m, 'w']);
-    if (!usedSecret) for (const m of SECRET_ADJ[here]) steps.push([m, 's']);
-    steps.sort((a, b) => a[0] - b[0]);
-    for (const [m, kind] of steps) {
-      if (onPath.has(m)) continue;
-      path.push(m);
-      onPath.add(m);
-      visit(usedSecret || kind === 's', usedWall || kind === 'w');
-      path.pop();
-      onPath.delete(m);
-    }
-  };
-  visit(false, false);
-  return best;
+const landCache = new Map<string, number[]>();
+
+/** Every space a move can end on, from `node` with `remaining` steps still to take. */
+export function landingsFrom(node: number, prev: number | null, remaining: number, usedSecret: boolean, ghost: boolean): number[] {
+  if (remaining <= 0) return [node];
+  const key = `${node}:${prev}:${remaining}:${usedSecret ? 1 : 0}:${ghost ? 1 : 0}`;
+  let hit = landCache.get(key);
+  if (!hit) {
+    const out = new Set<number>();
+    for (const e of exitsFrom(node, prev, usedSecret, ghost)) for (const n of landingsFrom(e.to, node, remaining - 1, usedSecret || e.kind === 's', ghost)) out.add(n);
+    hit = [...out].sort((a, b) => a - b);
+    landCache.set(key, hit);
+  }
+  return hit;
+}
+
+/** Spaces a fresh move of exactly `steps` can end on. */
+export function exactReach(start: number, steps: number, ghost: boolean): number[] {
+  return landingsFrom(start, null, steps, false, ghost);
 }
