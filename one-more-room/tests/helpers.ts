@@ -105,7 +105,7 @@ export function jumps(ch: Challenge, clean: number, suddenDeath = 0): ChallengeI
   const sch = ropeSchedule(ch.seed);
   const main = sch.bottoms.slice(0, Math.min(clean, CHALLENGE.rope.sweeps));
   const extra = sch.bottoms.slice(CHALLENGE.rope.sweeps, CHALLENGE.rope.sweeps + suddenDeath);
-  return [...main, ...extra].map((b) => ({ t: b - CHALLENGE.rope.idealMs }));
+  return [...main, ...extra].map((b) => ({ t: b - CHALLENGE.rope.airMs / 2 }));
 }
 
 /** Resolve the current challenge with a number of clean jumps per piece (default 0). */

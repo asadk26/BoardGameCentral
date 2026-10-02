@@ -9,7 +9,6 @@
 
 import type { CharacterId } from '../engine/config';
 import type { BotProfile } from '../engine/bots';
-import type { ChallengeInput } from '../engine/challenges';
 import type { Action, GameState, LogEntry } from '../engine/types';
 
 export type RoomMode = 'ffa' | 'teams';
@@ -37,10 +36,20 @@ export interface PublicPiece {
 export interface ChallengeRunView {
   id: string;
   attempt: number;
+  /** ready: press Jump to be ready · practice: unscored sweeps · countdown: 3–2–1 then the scored rope. */
+  stage: 'ready' | 'practice' | 'countdown';
+  /** This match has not practised yet (the host can skip it). */
+  practice: boolean;
   ready: number[];
-  submitted: number[];
-  /** Server time (ms) when play starts, once everyone is ready. */
+  /** Server time (ms) the practice rope's timeline starts. */
+  practiceAt: number | null;
+  /** Server time (ms) the scored rope's timeline starts. */
   startAt: number | null;
+  /** Presses per piece, ms on the scored timeline: the TV draws these jumps; the judge scores them. */
+  presses: Record<number, number[]>;
+  practicePresses: Record<number, number[]>;
+  /** Pieces whose phones are clearly lagging. */
+  lagging: number[];
   paused: string | null;
   note: string | null;
 }
@@ -96,8 +105,9 @@ export type ClientMsg =
   | { t: 'pause'; on: boolean }
   | { t: 'restart' }
   | { t: 'action'; id: string; rev: number; action: Action }
-  | { t: 'ready'; challengeId: string; attempt: number }
-  | { t: 'challengeInput'; challengeId: string; attempt: number; piece?: number; inputs: ChallengeInput[] }
+  /** The Jump button. Before the rope it means ready; `at` is server time when pressed (phones: estimated). */
+  | { t: 'press'; challengeId: string; attempt: number; at: number; piece?: number }
+  | { t: 'skipPractice' }
   | { t: 'syncPoor'; rttMs: number }
   | { t: 'ping'; c: number };
 

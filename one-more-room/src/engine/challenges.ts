@@ -1,9 +1,11 @@
 // Haunted Jump Rope as pure data. A challenge's seed fixes the whole rope
-// schedule, shared by every participant. Inputs are timestamps measured
-// against the animation the player actually saw; the judge turns them into
-// one winner. Humans and bots go through exactly the same judge, so the
+// schedule, shared by every participant. A press makes the character jump —
+// one whole, visible jump — and a sweep counts only if the character's feet
+// are above the rope at the moment it passes under them. The renderer draws
+// exactly the jumps and stumbles computed here, so what the screen shows is
+// what the judge scores. Humans and bots go through the same judge, the
 // authority never trusts a client-reported score, and nothing depends on the
-// order in which results arrived.
+// order in which presses arrived.
 
 import { CHALLENGE } from './config';
 import { nextFloat } from './rng';
@@ -23,7 +25,7 @@ function stream(seed: number) {
 }
 
 export interface RopeSchedule {
-  /** Time each sweep reaches the floor, ms after the ready countdown. */
+  /** Time each sweep reaches the feet, ms after the ready countdown. */
   bottoms: number[];
   sweeps: number;
   extraSweeps: number;
@@ -48,45 +50,131 @@ export function ropeSchedule(seed: number): RopeSchedule {
   let base = c.firstMs;
   for (let i = 0; i < n; i++) {
     if (i > 0) base += sweepPeriod(i);
-    const wobble = c.jitterMs * (i > 0 ? sweepPeriod(i) / c.periodMs : 1);
-    bottoms.push(Math.round(base + (r() * 2 - 1) * wobble));
+    bottoms.push(Math.round(base + (r() * 2 - 1) * c.jitterMs));
   }
   return { bottoms, sweeps: c.sweeps, extraSweeps: c.extraSweeps, mainMs: bottoms[c.sweeps - 1] + 500, totalMs: bottoms[n - 1] + 500 };
 }
 
+/** The unscored practice rope: a few slow, perfectly regular sweeps. */
+export function practiceSchedule(): RopeSchedule {
+  const p = CHALLENGE.practice;
+  const bottoms = Array.from({ length: p.sweeps }, (_, i) => p.firstMs + i * p.periodMs);
+  return { bottoms, sweeps: p.sweeps, extraSweeps: 0, mainMs: bottoms[p.sweeps - 1] + 500, totalMs: bottoms[p.sweeps - 1] + 700 };
+}
+
+/** How long a jump lasts for a jumper with this curse multiplier (1 = no curse). */
+export function airTime(multiplier = 1): number {
+  return CHALLENGE.rope.airMs * multiplier;
+}
+
 /**
- * A jumper's personal clearance window, as lead times before the rope hits
- * the floor. The curse multiplier narrows it around the ideal moment; the
- * rope itself is the same for everyone.
+ * Height of a jump `since` ms after take-off, as a fraction of a full
+ * (uncursed) jump's peak: a parabola over the jump's air time. A cursed jump
+ * is shorter and lower.
  */
-export function clearanceWindow(multiplier: number): { minLead: number; maxLead: number } {
-  const c = CHALLENGE.rope;
-  const half = c.halfWindowMs * multiplier;
-  return { minLead: c.idealMs - half, maxLead: c.idealMs + half };
+export function jumpHeight(since: number, multiplier = 1): number {
+  const air = airTime(multiplier);
+  if (since <= 0 || since >= air) return 0;
+  const x = since / air;
+  return 4 * x * (1 - x) * multiplier;
+}
+
+/**
+ * The part of a jump during which the feet are above the rope, as ms after
+ * take-off. Same parabola as jumpHeight; the rope skims at ropeHeightFrac.
+ */
+export function clearSpan(multiplier = 1): { from: number; to: number } {
+  const air = airTime(multiplier);
+  const need = Math.min(0.9, CHALLENGE.rope.ropeHeightFrac / multiplier); // as a share of this jump's own peak
+  const x0 = (1 - Math.sqrt(1 - need)) / 2;
+  return { from: x0 * air, to: (1 - x0) * air };
+}
+
+export interface Jump {
+  /** Take-off, ms. */
+  start: number;
+  /** Landing, ms (earlier than start + air if the rope caught the feet mid-air). */
+  end: number;
 }
 
 export interface SweepResult {
   cleared: boolean;
-  /** Absolute timing error in ms (a miss scores the fixed maximum). */
+  /** Absolute timing error from a perfectly centred jump, ms (a miss scores the fixed maximum). */
   error: number;
-  /** Time of the press that counted, if any. */
+  /** Take-off of the jump that met this sweep, if any. */
   press: number | null;
 }
 
+export interface JumperTimeline {
+  jumps: Jump[];
+  /** Times the rope caught this jumper. */
+  stumbles: number[];
+  results: SweepResult[];
+}
+
 /**
- * Judge one jumper. Each sweep has one window; only the first press inside
- * it counts, so holding or mashing never creates extra jumps.
+ * Play one jumper's presses against a rope, in time order. A press starts a
+ * jump only when the character is standing (landed, recovered, not
+ * stumbling); presses in mid-air or mid-stumble do nothing, so holding,
+ * mashing, key-repeat or a duplicate message can never add or heighten jumps.
+ * At each sweep the feet either clear the rope (the middle of a jump) or are
+ * caught: a stumble, and no new jump for a moment.
  */
-export function judgeRopeSweeps(sched: RopeSchedule, inputs: ChallengeInput[], multiplier = 1): SweepResult[] {
+export function jumperTimeline(sched: RopeSchedule, inputs: ChallengeInput[], multiplier = 1): JumperTimeline {
   const c = CHALLENGE.rope;
-  const { minLead, maxLead } = clearanceWindow(multiplier);
+  const air = airTime(multiplier);
+  const span = clearSpan(multiplier);
   const presses = inputs.map((i) => i.t).filter((t) => Number.isFinite(t)).sort((a, b) => a - b);
-  return sched.bottoms.map((b) => {
-    const p = presses.find((t) => t >= b - c.windowMs && t <= b + c.lateMs);
-    if (p === undefined) return { cleared: false, error: c.missErrorMs, press: null };
-    const lead = b - p;
-    return { cleared: lead >= minLead && lead <= maxLead, error: Math.min(c.missErrorMs, Math.abs(lead - c.idealMs)), press: p };
-  });
+  const jumps: Jump[] = [];
+  const stumbles: number[] = [];
+  const results: SweepResult[] = [];
+  let ready = -Infinity;
+  let k = 0;
+  const takeOffs = (until: number) => {
+    for (; k < presses.length && presses[k] <= until; k++) {
+      const p = presses[k];
+      if (p < ready) continue;
+      jumps.push({ start: p, end: p + air });
+      ready = p + air + c.groundMs;
+    }
+  };
+  for (const b of sched.bottoms) {
+    takeOffs(b);
+    const j = jumps.length ? jumps[jumps.length - 1] : null;
+    const since = j && b < j.end ? b - j.start : null;
+    if (since !== null && since >= span.from && since <= span.to) {
+      results.push({ cleared: true, error: Math.round(Math.abs(since - air / 2)), press: j!.start });
+      continue;
+    }
+    results.push({ cleared: false, error: c.missErrorMs, press: since !== null ? j!.start : null });
+    stumbles.push(b);
+    if (since !== null) {
+      j!.end = b; // caught mid-air: down at once, and up again once the stumble passes
+      ready = b + c.stumbleMs;
+    } else ready = Math.max(ready, b + c.stumbleMs);
+  }
+  takeOffs(Infinity);
+  return { jumps, stumbles, results };
+}
+
+/** The scored results for one jumper (see jumperTimeline). */
+export function judgeRopeSweeps(sched: RopeSchedule, inputs: ChallengeInput[], multiplier = 1): SweepResult[] {
+  return jumperTimeline(sched, inputs, multiplier).results;
+}
+
+/**
+ * Where the rope is at time t: 0 when it is at the jumpers' feet, ±π at the
+ * top. It waits at the top, makes one turn down to each floor pass, and
+ * rests at the top again after the last one.
+ */
+export function ropeAngle(sched: RopeSchedule, t: number): number {
+  const b = sched.bottoms;
+  const first = b.length > 1 ? b[1] - b[0] : CHALLENGE.rope.periodMs;
+  if (t <= b[0] - first / 2) return -Math.PI;
+  if (t <= b[0]) return (2 * Math.PI * (t - b[0])) / first;
+  for (let i = 0; i < b.length - 1; i++) if (t <= b[i + 1]) return (2 * Math.PI * (t - b[i])) / (b[i + 1] - b[i]) - (t - b[i] > (b[i + 1] - b[i]) / 2 ? 2 * Math.PI : 0);
+  const last = b.length > 1 ? b[b.length - 1] - b[b.length - 2] : first;
+  return Math.min(Math.PI, (2 * Math.PI * (t - b[b.length - 1])) / last);
 }
 
 export function countCleared(results: SweepResult[], from = 0, to = results.length) {
@@ -163,10 +251,10 @@ export const SKILLS: Record<'shaky' | 'steady' | 'sharp', ReflexSkill> = {
 /**
  * Presses a bot makes, in the same format humans produce. Each piece has its
  * own stream (seed mixed with the piece), so two bots with the same skill do
- * not mirror each other. Bots aim at the ideal moment whatever their curse:
- * the curse only narrows how the judge scores them, exactly as for humans.
+ * not mirror each other. Bots know their own (possibly cursed) jump length,
+ * just as a person sees their own character's shorter hop.
  */
-export function botRopeInputs(seed: number, piece: number, skill: ReflexSkill): ChallengeInput[] {
+export function botRopeInputs(seed: number, piece: number, skill: ReflexSkill, multiplier = 1): ChallengeInput[] {
   const r = stream((seed ^ Math.imul(piece + 1, 0x9e3779b1)) >>> 0);
   const gauss = () => {
     const u = Math.max(1e-9, r());
@@ -175,11 +263,13 @@ export function botRopeInputs(seed: number, piece: number, skill: ReflexSkill): 
   };
   const out: ChallengeInput[] = [];
   const c = CHALLENGE.rope;
+  // A bot jumps so the middle of its own jump meets the rope, as a person learns to.
+  const half = airTime(multiplier) / 2;
   ropeSchedule(seed).bottoms.forEach((b, i) => {
     if (r() < skill.lapse) return;
     // A faster rope is harder to time: error grows with the square root of the speed-up.
     const speedUp = i === 0 ? 1 : c.periodMs / sweepPeriod(i);
-    out.push({ t: Math.round(b - c.idealMs + gauss() * skill.jitterMs * Math.sqrt(speedUp)) });
+    out.push({ t: Math.round(b - half + gauss() * skill.jitterMs * Math.sqrt(speedUp)) });
   });
   return out;
 }

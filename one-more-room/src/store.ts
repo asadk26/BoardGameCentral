@@ -429,7 +429,7 @@ export function botInputsFor(ch: NonNullable<GameState['challenge']>): Record<nu
   const out: Record<number, ChallengeInput[]> = {};
   for (const p of ch.participants) {
     const seat = state.seats[p];
-    if (seat?.kind === 'bot') out[p] = botRopeInputs(ch.seed, p, reflexOf(seat.bot!));
+    if (seat?.kind === 'bot') out[p] = botRopeInputs(ch.seed, p, reflexOf(seat.bot!), ch.multipliers[ch.participants.indexOf(p)]);
   }
   return out;
 }

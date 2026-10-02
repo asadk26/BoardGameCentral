@@ -124,32 +124,36 @@ export const CHALLENGE = {
     /**
      * The shared rope speeds up after every sweep: the gap before sweep k is
      * periodMs × accel^k, never below minPeriodMs. Everyone faces the same
-     * acceleration; sudden death runs at top speed.
+     * acceleration; sudden death runs at top speed. It starts a little slower
+     * than before (1.4 s) so the first sweeps teach the rhythm, and tops out at
+     * 0.85 s — still longer than a full jump plus its landing (0.54 + 0.14 s),
+     * so every sweep can be cleared.
      */
-    periodMs: 1300,
-    accel: 0.935,
-    minPeriodMs: 800,
-    firstMs: 1100,
-    /** Random wobble on each floor pass, scaled with the current period. */
-    jitterMs: 110,
-    /** A press this long before the rope reaches the floor is a perfect jump. */
-    idealMs: 250,
-    /** Normal clearance window: lead time within ±halfWindowMs of ideal. */
-    halfWindowMs: 180,
-    /**
-     * Presses are matched to a sweep within this span before / after the
-     * floor. Small enough that neighbouring sweeps never overlap at top speed.
-     */
-    windowMs: 560,
-    lateMs: 60,
-    /** Timing error charged for a missed sweep. */
+    periodMs: 1400,
+    accel: 0.94,
+    minPeriodMs: 850,
+    firstMs: 1600,
+    /** A small wobble on each floor pass (kept low so the rhythm stays readable). */
+    jitterMs: 30,
+    /** A whole jump, take-off to landing, ms. The curse shortens it (a lower, quicker hop). */
+    airMs: 540,
+    /** The rope skims this high above the floor, as a fraction of a full jump's peak: feet must be higher as it passes. */
+    ropeHeightFrac: 0.25,
+    /** After landing, a moment on the ground before the next take-off. */
+    groundMs: 140,
+    /** Caught by the rope: a stumble, during which presses do nothing. */
+    stumbleMs: 380,
+    /** Timing error charged for a missed sweep (tiebreak only). */
     missErrorMs: 600,
   },
+  /** Unscored practice before a match's first rope: a few slow, regular sweeps. */
+  practice: { sweeps: 3, periodMs: 1500, firstMs: 1800 },
 };
 
 /**
- * The survival curse: the longer a piece has held life, the narrower its
- * jump window. Indexed by consecutive rounds scored alive (capped).
+ * The survival curse: the longer a piece has held life, the shorter (and
+ * lower) its jumps, so the rope must be timed more tightly. The rope itself is
+ * the same for everyone. Indexed by consecutive rounds scored alive (capped).
  */
 export const CURSE_MULTIPLIERS: readonly number[] = [1, 1, 0.9, 0.8, 0.7];
 

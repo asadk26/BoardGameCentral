@@ -18,7 +18,7 @@ import {
   undo,
   undoInfo,
 } from '../src/engine/engine';
-import { judgeRope, ropeSchedule } from '../src/engine/challenges';
+import { airTime, judgeRope, ropeSchedule } from '../src/engine/challenges';
 import { publicView, seatView } from '../src/engine/view';
 import { defaultPersonalization, deserialize, serialize } from '../src/engine/save';
 import { simulateGame } from '../src/engine/sim';
@@ -189,17 +189,15 @@ describe('survival streak and the curse', () => {
     expect(s.pieces[1].streak).toBe(0);
   });
 
-  it('a narrower window changes only how presses are judged, identically for anyone', () => {
+  it('the curse means shorter, lower jumps: a jump timed for a full hop lands too soon when cursed', () => {
     const seed = 424242;
     const sch = ropeSchedule(seed);
     const at = (lead: number) => sch.bottoms.slice(0, 8).map((b) => ({ t: b - lead }));
-    // Lead 400 ms: clean at the normal window (±180 around 250), a miss at 0.7 (±126).
-    const v1 = judgeRope(seed, [0, 1], [at(400), at(400)], [1, 0.7]);
-    expect(v1.scores).toEqual([8, 0]);
-    const v2 = judgeRope(seed, [0, 1], [at(400), at(400)], [0.7, 1]);
-    expect(v2.scores).toEqual([0, 8]);
-    // Perfect timing clears at every tier.
-    expect(judgeRope(seed, [0, 1], [at(250), at(250)], [0.7, 0.7]).scores).toEqual([8, 8]);
+    // Take-off 440 ms before the rope: a full jump (540 ms) is still high; a 0.7 jump (378 ms) has already landed.
+    expect(judgeRope(seed, [0, 1], [at(440), at(440)], [1, 0.7]).scores).toEqual([8, 0]);
+    expect(judgeRope(seed, [0, 1], [at(440), at(440)], [0.7, 1]).scores).toEqual([0, 8]);
+    // A jump centred on the rope clears at every tier.
+    for (const m of [1, 0.9, 0.8, 0.7]) expect(judgeRope(seed, [0], [at(airTime(m) / 2)], [m]).scores).toEqual([8]);
   });
 
   it('streak increments at the bell for the holder only', () => {
@@ -474,17 +472,17 @@ describe('challenges: judging, tiebreaks and idempotence', () => {
     expect(aliveCount(same)).toBe(1);
     // Timing error breaks a tie that sudden death could not.
     const sch = ropeSchedule(ch.seed);
-    const sloppy = sch.bottoms.map((b) => ({ t: b - CHALLENGE.rope.idealMs - 60 }));
+    const sloppy = sch.bottoms.map((b) => ({ t: b - CHALLENGE.rope.airMs / 2 - 60 })); // every sweep cleared, 60 ms off centre
     const timed = act(s, { type: 'challengeResult', id: ch.id, inputs: { 0: jumps(ch, 8, 4), 1: sloppy, 2: [], 3: [] } });
     expect(timed.lastOutcome).toMatchObject({ winner: 0, decidedBy: 'timing' });
   });
 
-  it('the shared rope speeds up every sweep, and no two sweeps’ press windows ever overlap', () => {
+  it('the shared rope speeds up every sweep, but every gap leaves time to land and jump again', () => {
     const c = CHALLENGE.rope;
     for (let seed = 1; seed < 400; seed++) {
       const b = ropeSchedule(seed).bottoms;
       expect(b.length).toBe(c.sweeps + c.extraSweeps);
-      for (let i = 1; i < b.length; i++) expect(b[i] - b[i - 1]).toBeGreaterThan(c.windowMs + c.lateMs);
+      for (let i = 1; i < b.length; i++) expect(b[i] - b[i - 1]).toBeGreaterThan(c.airMs + c.groundMs);
     }
     // Averaged over seeds, each gap in the scored sweeps is shorter than the one before.
     const avgGap = (i: number) => {
@@ -497,14 +495,6 @@ describe('challenges: judging, tiebreaks and idempotence', () => {
     };
     for (let i = 2; i < c.sweeps; i++) expect(avgGap(i)).toBeLessThan(avgGap(i - 1));
     expect(avgGap(c.sweeps)).toBeLessThan(avgGap(1) * 0.7);
-  });
-
-  it('holding or mashing never creates extra jumps', () => {
-    const seed = 99;
-    const sch = ropeSchedule(seed);
-    const mash = sch.bottoms.flatMap((b) => [0, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400].map((d) => ({ t: b - 700 + d })));
-    const v = judgeRope(seed, [0, 1], [mash, []], [1, 1]);
-    expect(v.scores[0]).toBe(0); // only the first press in each window counts, and it is far too early
   });
 
   it('a result for a finished challenge is rejected, so nothing resolves twice', () => {

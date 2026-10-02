@@ -126,7 +126,7 @@ export function simulateGame(opts: { seed: number; profiles: BotProfile[]; strat
     if (g.phase === 'challenge') {
       const ch = g.challenge!;
       const inputs: Record<number, ChallengeInput[]> = {};
-      for (const p of ch.participants) inputs[p] = botRopeInputs(ch.seed, p, reflexOf(opts.profiles[p]));
+      for (const p of ch.participants) inputs[p] = botRopeInputs(ch.seed, p, reflexOf(opts.profiles[p]), ch.multipliers[ch.participants.indexOf(p)]);
       action = { type: 'challengeResult', id: ch.id, inputs };
       est += 22;
     } else if (g.phase === 'lifeRoll') {
