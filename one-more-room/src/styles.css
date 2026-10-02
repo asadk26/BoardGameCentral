@@ -1577,7 +1577,7 @@ kbd {
 }
 .arena-view .rope-arena {
   position: absolute !important;
-  inset: 0;
+  inset: 0 0 52px 0; /* the score chips get their own strip under the names */
 }
 .arena-overlay {
   position: absolute;
@@ -1656,7 +1656,9 @@ kbd {
 }
 .arena-countdown {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: 6%;
   display: grid;
   place-items: center;
   font-size: clamp(4rem, 14vw, 9rem);

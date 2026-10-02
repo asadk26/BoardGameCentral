@@ -5,7 +5,8 @@
 // Starts the room service (which also serves dist/) unless URL is set. Uses
 // Playwright's Chromium (or CHROME=/path/to/chrome) with SwiftShader, so WebGL
 // works without a GPU — slowly. Run one part with ONLY=1,3 etc.
-// Screenshots land in test-results/ for a human to look over.
+// Screenshots land in test-results/ for a human to look over: a green run is
+// not a substitute for looking at them, or for playing on real hardware.
 
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
@@ -21,27 +22,20 @@ const ARGS = ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignor
 const SAVE_KEY = 'one-more-room/save';
 const ONLY = process.env.ONLY ? process.env.ONLY.split(',').map(Number) : null;
 const run = (n) => !ONLY || ONLY.includes(n);
-const TRAPS = [
-  { node: 9, effect: 'reaper', revealed: false, spent: false },
-  { node: 14, effect: 'seance', revealed: false, spent: false },
-  { node: 19, effect: 'poltergeist', revealed: false, spent: false },
-  { node: 21, effect: 'reaper', revealed: false, spent: false },
-  { node: 26, effect: 'seance', revealed: false, spent: false },
-  { node: 30, effect: 'poltergeist', revealed: false, spent: false },
-];
+
+const results = [];
+function check(name, ok, detail = '') {
+  results.push({ name, ok: !!ok });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
 
 let server = null;
 let URL = process.env.URL;
 if (!URL) {
-  URL = 'http://localhost:8795/';
-  server = spawn('node', ['dist-server/main.js'], { cwd: ROOT, stdio: 'ignore', env: { ...process.env, PORT: '8795' } });
+  const port = process.env.PORT || '8795';
+  URL = `http://localhost:${port}/`;
+  server = spawn('node', ['dist-server/main.js'], { cwd: ROOT, stdio: 'ignore', env: { ...process.env, PORT: port } });
   await new Promise((r) => setTimeout(r, 1500));
-}
-
-const results = [];
-function check(name, ok, detail = '') {
-  results.push({ name, ok: !!ok, detail });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
 const browser = await chromium.launch({ executablePath: CHROME, args: ARGS });
@@ -56,668 +50,386 @@ async function newPage(viewport = { width: 1440, height: 900 }, opts = {}) {
 const S = (page) =>
   page.evaluate(() => {
     const s = window.__omr.getState();
-    return { screen: s.screen, busy: s.busy, cameraMode: s.cameraMode, settings: s.settings, game: s.session?.game ?? null, known: s.session?.known ?? [], modal: s.modal, seats: s.seats };
+    return { busy: s.busy, cameraMode: s.cameraMode, settings: s.settings, game: s.session?.game ?? null, seats: s.seats, modal: s.modal, ropePracticed: s.ropePracticed };
   });
-const living = (g) => g.pieces.findIndex((p) => p.alive);
 const acting = (g) => g.schedule[g.slot];
-async function settle(page) {
-  for (let i = 0; i < 80; i++) {
+const living = (g) => g.pieces.findIndex((p) => p.alive);
+const arena = (page) => page.evaluate(() => JSON.parse(JSON.stringify(window.__omrArena ?? {})));
+async function settle(page, ms = 12000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
     if (!(await S(page)).busy) return;
-    const skip = page.getByRole('button', { name: /Skip animation/ });
-    if (i > 2 && (await skip.count())) await skip.click().catch(() => {});
     await page.waitForTimeout(100);
   }
 }
-async function clearStorage(page, query = '') {
+async function clearStorage(page, query = '', settings = null) {
   await page.goto(URL + query);
-  await page.evaluate(() => {
+  await page.evaluate((settings) => {
     for (const k of Object.keys(localStorage)) if (k.startsWith('one-more-room/')) localStorage.removeItem(k);
-  });
+    if (settings) localStorage.setItem('one-more-room/settings', JSON.stringify(settings));
+  }, settings);
   await page.reload();
 }
-
-/** Set up pieces on the setup screen: kinds like ['human','bot'], optional costumes. */
-async function setupPieces(page, kinds, costumes = []) {
+/** Local game from the title screen with the default lineup (1 human + 3 bots), through traps and the life roll. */
+async function startLocal(page) {
   await page.getByRole('button', { name: /Play on this screen|New game/ }).first().click();
-  const count = async () => Number((await page.locator('.stepper span').innerText()).split(' ')[0]);
-  while ((await count()) > kinds.length) await page.getByRole('button', { name: 'Fewer pieces' }).click();
-  while ((await count()) < kinds.length) await page.getByRole('button', { name: 'More pieces' }).click();
-  for (let i = 0; i < kinds.length; i++) {
-    const group = page.getByRole('group', { name: `Piece ${i + 1} is played by` });
-    await group.getByRole('button', { name: kinds[i] === 'human' ? /^(Person|People)$/ : /greedy/ }).click();
-    if (costumes[i]) await page.getByRole('radiogroup', { name: `Piece ${i + 1} costume` }).getByRole('radio', { name: new RegExp(`^${costumes[i]}`) }).click();
-  }
-}
-
-/** Pass-and-play secret placement for every human piece. */
-async function placeAll(page) {
-  for (let k = 0; k < 4; k++) {
-    const show = page.getByRole('button', { name: /show the map/ });
-    if (!(await show.count())) break;
+  await page.getByRole('button', { name: /^Start/ }).click();
+  await page.waitForTimeout(600);
+  const show = page.getByRole('button', { name: /show the map/ });
+  if (await show.count()) {
     await show.click();
-    const node = [18, 26, 2, 30][k];
-    await page.getByRole('button', { name: `Space ${node}`, exact: true }).click();
+    await page.getByRole('button', { name: 'Space 18', exact: true }).click();
     await page.getByRole('button', { name: /Set a trap/ }).click();
     await page.getByRole('button', { name: /Hide it/ }).click();
   }
+  await page.waitForTimeout(500);
+  await page.getByRole('button', { name: /Roll for life/ }).click();
+  await settle(page);
+  await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
+}
+/** Show a crafted position (local games only, via the test hook). */
+async function craft(page, fn, arg) {
+  await page.evaluate(
+    ([src, arg]) => {
+      const g = JSON.parse(JSON.stringify(window.__omr.getState().session.game));
+      new Function('g', 'arg', src)(g, arg);
+      window.__omr.setGame(g);
+    },
+    [fn, arg],
+  );
   await page.waitForTimeout(400);
 }
-
-/**
- * Plays Haunted Jump Rope like a person watching the screen: presses a lane's
- * Jump button when its marker reaches the middle of that lane's green zone.
- * `lanes` limits which lanes (by position) are played; the others never jump.
- */
-async function autoplay(page, lanes = null) {
-  await page.evaluate((lanes) => {
-    const stop = { v: false };
-    window.__autoplayStop = stop;
-    const state = new Map();
-    const loop = () => {
-      if (stop.v) return;
-      document.querySelectorAll('.rope-lane').forEach((lane, k) => {
-        if (lanes && !lanes.includes(k)) return;
-        const zone = lane.querySelector('.meter .zone');
-        const marker = lane.querySelector('.meter .marker');
-        const btn = lane.querySelector('.press-btn');
-        if (!zone || !marker || !btn) return;
-        const zl = parseFloat(zone.style.left);
-        const zw = parseFloat(zone.style.width);
-        const m = parseFloat(marker.style.left);
-        const st = state.get(k) ?? { armed: true, last: 0 };
-        if (m < st.last - 20) st.armed = true; // a new sweep
-        if (st.armed && m >= zl + zw * 0.45 && m <= zl + zw) {
-          btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-          st.armed = false;
-        }
-        st.last = m;
-        state.set(k, st);
-      });
-      requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
-  }, lanes);
-}
-async function stopAutoplay(page) {
-  await page.evaluate(() => window.__autoplayStop && (window.__autoplayStop.v = true)).catch(() => {});
-}
-
-/** Local challenge: press every Ready, play the given lanes, wait until it is over. */
-async function playLocalChallenge(page, lanes = null, ms = 90000) {
-  await autoplay(page, lanes);
+/** Keep pressing Jump (Space) like a person watching the rope, until the challenge is over. */
+async function jumpThrough(page, ms = 60000) {
   const t0 = Date.now();
-  let st = await S(page);
   while (Date.now() - t0 < ms) {
-    st = await S(page);
+    const st = await S(page);
     if (st.game?.phase !== 'challenge') break;
-    const ready = page.locator('.ch-participants button', { hasText: /^Ready$/ });
-    for (let i = (await ready.count()) - 1; i >= 0; i--) await ready.nth(i).click().catch(() => {});
-    await page.waitForTimeout(300);
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(600 + Math.floor(Math.random() * 150));
   }
-  await stopAutoplay(page);
-  await settle(page);
-  return S(page);
-}
-
-/**
- * Rewrite the saved game into a crafted position and resume it through the
- * real UI. `set` gives pieces (alive/node/streak/score), schedule, acting
- * piece, and optionally a die (to start in 'choose').
- */
-async function scenario(page, set) {
-  const save = JSON.parse(await page.evaluate((k) => localStorage.getItem(k), SAVE_KEY));
-  const g = save.session.game;
-  g.pieces.forEach((p, i) =>
-    Object.assign(p, { alive: i === set.living, node: set.nodes[i], streak: set.streaks?.[i] ?? 0, score: set.scores?.[i] ?? 0, facingFrom: null, item: set.items?.[i] ?? null, itemAwardedAt: set.items?.[i] ? -1 : null }),
-  );
-  const n = g.pieces.length;
-  g.round = set.round ?? 2;
-  g.schedule = set.schedule ?? [set.living, ...Array.from({ length: n }, (_, k) => k).filter((k) => k !== set.living)];
-  g.slot = g.schedule.indexOf(set.acting ?? set.living);
-  g.traps = (set.traps ?? TRAPS).map((t) => ({ ...t }));
-  g.seancesUsed = set.seancesUsed ?? 0;
-  Object.assign(g, { challenge: null, pick: null, lastOutcome: null, minigameUsed: false, log: [], turnDirty: false, origin: set.nodes[set.acting ?? set.living], selection: { dest: null } });
-  Object.assign(g, { rollInfo: null, itemUsed: null, options: null, battlesThisRound: [], pendingReward: null });
-  if (set.rewardRng !== undefined) g.rewardRng = set.rewardRng;
-  if (set.die) {
-    const me = g.pieces[g.schedule[g.slot]];
-    Object.assign(g, { phase: 'choose', die: set.die, allowance: me.alive ? set.die : Math.max(3, set.die), rollInfo: { kind: 'die' } });
-  } else Object.assign(g, { phase: set.phase ?? 'turnStart', die: null, allowance: 0 });
-  save.session.game = g;
-  save.session.turnStart = { ...g, phase: 'turnStart', die: null, allowance: 0 };
-  save.session.previousTurnStart = null;
-  save.session.known = g.traps.filter((t) => t.revealed).map((t) => ({ node: t.node, effect: t.effect }));
-  await page.evaluate(([k, v]) => localStorage.setItem(k, v), [SAVE_KEY, JSON.stringify(save)]);
-  await page.reload();
-  await page.getByRole('button', { name: 'Resume game' }).click();
-  await page.waitForTimeout(600);
-  await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
-  await settle(page);
-}
-
-/** The engine's seeded generator (mulberry32), to predict a reward or a reroll from a crafted save. */
-function nextFloat(state) {
-  const s = (state + 0x6d2b79f5) >>> 0;
-  let t = s;
-  t = Math.imul(t ^ (t >>> 15), t | 1);
-  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-  return [((t ^ (t >>> 14)) >>> 0) / 4294967296, s];
-}
-const itemFromDraw = (u) => (u < 0.4 ? 'secondRoll' : u < 0.8 ? 'ghostSwitch' : 'ghostlyStride');
-
-async function confirmMove(page, dest) {
-  if (dest === 'stay') await page.getByRole('option', { name: /Stay here/ }).click();
-  else await page.getByRole('option', { name: new RegExp(`#${dest} `) }).click();
-  await page.locator('.bottom .btn.primary.big').click();
   await settle(page);
 }
 
 try {
-  // ── 1. Local: setup, placement, life roll, a full two-piece game ─────
+  // ── 1. One screen: four pieces by default, a whole match through the UI ─────
   if (run(1)) {
     const page = await newPage();
-    await clearStorage(page);
-    await page.evaluate(() => localStorage.setItem('unrelated-key', 'keep-me'));
-    await page.waitForTimeout(800);
+    await clearStorage(page, '?quality=low', { fastBots: true, musicVolume: 0, sfxVolume: 0, muted: true });
+    await page.waitForTimeout(600);
     await page.screenshot({ path: `${OUT}/01-title.png` });
-    check('title pitches One Life and offers local play, a phone room and the rules', /One life in the mansion/.test(await page.locator('.title-card').innerText()) && (await page.getByRole('button', { name: /Host a phone room/ }).count()) === 1);
-    await page.getByRole('button', { name: 'How to play' }).click();
-    const rules = await page.locator('.rules').innerText();
-    check('rules explain one life, rounds, curse, traps and teams', /one life/i.test(rules) && /curse/i.test(rules) && /Séance/.test(rules) && /Poltergeist/.test(rules) && /Team Battle/.test(rules));
-    check('rules contain no candy-game leftovers', !/candy|bank|bounty|decoy|protected|Trick or Treat/i.test(rules));
-    await page.keyboard.press('Escape');
-    await setupPieces(page, ['human', 'bot'], ['Vampire', 'Skeleton']);
+    await page.getByRole('button', { name: /Play on this screen/ }).click();
+    await page.waitForTimeout(400);
+    check('setup defaults to four pieces: one human and three bots, labelled', (await page.locator('.lineup li').count()) === 4 && (await page.locator('.lineup li.is-bot').count()) === 3 && /1 human \+ 3 bots/.test(await page.getByRole('button', { name: /^Start/ }).innerText()));
+    await page.getByRole('group', { name: 'Piece 2 is played by' }).getByRole('button', { name: 'HUMAN' }).click();
+    check('a second person replaces a bot seat — still four pieces', (await page.locator('.lineup li').count()) === 4 && /2 humans \+ 2 bots/.test(await page.getByRole('button', { name: /^Start/ }).innerText()));
+    await page.getByRole('group', { name: 'Piece 2 is played by' }).getByRole('button', { name: 'BOT' }).click();
     await page.screenshot({ path: `${OUT}/02-setup.png` });
-    await page.getByRole('button', { name: /Start game/ }).click();
-    await page.waitForTimeout(800);
-    check('the placement curtain asks others to look away', /look away/.test(await page.locator('.curtain-card').innerText()));
-    await page.screenshot({ path: `${OUT}/03-placement-curtain.png` });
-    await page.getByRole('button', { name: /show the map/ }).click();
-    await page.getByRole('button', { name: 'Space 18', exact: true }).click();
-    await page.screenshot({ path: `${OUT}/04-placement-map.png` });
-    await page.getByRole('button', { name: /Set a trap/ }).click();
-    check('the private confirmation names the space but not an effect', /space 18/.test(await page.locator('.curtain-card').innerText()) && !/Poltergeist|Séance|Reaper’s/.test(await page.locator('.curtain-card').innerText()));
-    await page.getByRole('button', { name: /Hide it/ }).click();
-    await page.waitForTimeout(800);
+    await page.getByRole('button', { name: /^Back/ }).click();
+    await startLocal(page);
     let st = await S(page);
-    check('placement ends with six hidden traps; nobody is alive before the roll', st.game.phase === 'lifeRoll' && st.game.traps.length === 6 && st.game.pieces.every((p) => !p.alive));
-    await page.screenshot({ path: `${OUT}/05-life-roll.png` });
-    await page.getByRole('button', { name: /Roll for life/ }).click();
-    await settle(page);
-    await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
-    st = await S(page);
-    // A bot that wins the roll may already have moved: judge the first action's starting snapshot.
-    const first = await page.evaluate((k) => {
-      const ses = JSON.parse(localStorage.getItem(k)).session;
-      return [ses.turnStart, ses.previousTurnStart].find((g) => g && g.round === 1 && g.slot === 0) ?? null;
-    }, SAVE_KEY);
-    check('the life roll leaves exactly one living piece at the entrance, ghosts elsewhere', !!first && first.pieces.filter((p) => p.alive).length === 1 && first.pieces[living(first)].node === 0 && first.pieces.filter((p) => !p.alive).every((p) => [8, 16, 24].includes(p.node)));
-    check('the living piece acts first and the order is shown', !!first && acting(first) === living(first) && (await page.locator('.topbar .order .ord').count()) === 2);
-    await page.screenshot({ path: `${OUT}/06-first-action.png` });
-    await page.keyboard.press('v');
-    await page.waitForTimeout(1500);
-    const off = await page.evaluate(() => Array.from({ length: 32 }, (_, i) => [i, window.__omr.project(i)]).filter(([, p]) => !p.visible).map(([i]) => i));
-    check('the overview frames all 32 spaces', off.length === 0, off.join(','));
-    await page.screenshot({ path: `${OUT}/07-overview.png` });
-    // Play the whole game: the person through the real UI, the bot by itself.
-    let transfers = 0;
-    let challenges = 0;
-    let shotDest = false;
+    check('the match starts with four pieces, three of them bots', st.game.pieces.length === 4 && st.seats.filter((x) => x.kind === 'bot').length === 3);
+    const stats = { forks: 0, boardClicks: 0, keyPicks: 0, exact: 0, inexact: 0, challenges: 0, humanJumps: 0, autoNext: 0, rolls: 0 };
     const t0 = Date.now();
-    while (Date.now() - t0 < 900000) {
+    let lastAction = -1;
+    let shots = 0;
+    while (Date.now() - t0 < 1500000) {
       st = await S(page);
       const g = st.game;
-      if (g.phase === 'gameOver') break;
-      if (st.busy) {
+      if (!g || g.phase === 'gameOver') break;
+      if (g.phase === 'challenge') {
+        if (g.challenge.participants.includes(0)) {
+          stats.challenges++;
+          if (stats.challenges === 1) await page.waitForTimeout(1200), await page.screenshot({ path: `${OUT}/10-rope-ready.png` });
+          const before = await arena(page);
+          await jumpThrough(page);
+          const after = await arena(page);
+          if ((after[0]?.jumps ?? 0) > 0 || (before[0]?.jumps ?? 0) > 0) stats.humanJumps++;
+        } else await page.waitForTimeout(300);
+        continue;
+      }
+      // After an action of ours, check the move took exactly the roll.
+      if (g.actionNumber !== lastAction && lastAction >= 0) lastAction = -1;
+      const me = acting(g) === 0 && g.phase !== 'reward' ? 0 : -1;
+      if (me !== 0 || st.busy) {
         await page.waitForTimeout(150);
         continue;
       }
-      const me = acting(g);
-      const human = st.seats[me]?.kind === 'human';
-      if (g.phase === 'challenge') {
-        challenges++;
-        const before = living(g);
-        const lane = g.challenge.participants.indexOf(g.pieces.findIndex((_, i) => st.seats[i]?.kind === 'human'));
-        if (challenges === 1) await page.waitForTimeout(400), await page.screenshot({ path: `${OUT}/08-challenge-intro.png` });
-        const after = await playLocalChallenge(page, lane >= 0 ? [lane] : []);
-        if (living(after.game) !== before) transfers++;
+      if (g.phase === 'turnStart') {
+        stats.rolls++;
+        if (stats.rolls === 1) await page.screenshot({ path: `${OUT}/03-my-turn.png` });
+        await page.getByRole('button', { name: /^Roll/ }).click();
+        await settle(page);
         continue;
       }
-      if (!human) {
-        await page.waitForTimeout(250);
-        continue;
-      }
-      if (g.phase === 'turnStart') await page.getByRole('button', { name: /Roll the die/ }).click();
-      else if (g.phase === 'choose') {
-        const opts = page.locator('.dest-list [role=option]');
-        const hunt = page.locator('.dest-list [role=option].haunt');
-        const pickIdx = (await hunt.count()) ? -1 : Math.min(2, (await opts.count()) - 1);
-        if (pickIdx < 0) await hunt.first().click();
-        else await opts.nth(pickIdx).click();
-        if (!shotDest) {
-          shotDest = true;
-          await page.screenshot({ path: `${OUT}/09-choose.png` });
+      if (g.phase === 'choose') {
+        const remaining = g.move.remaining;
+        const prompt = await page.locator('.bottom').innerText();
+        const buttons = await page.locator('.fork-btn').count();
+        if (!new RegExp(`${remaining} left`).test(prompt) || buttons < 1) check('a fork shows “N left · Choose a path” with numbered ways', false, prompt.slice(0, 80));
+        stats.forks++;
+        if (shots < 2) await page.screenshot({ path: `${OUT}/0${4 + shots++}-fork.png` });
+        if (stats.boardClicks === 0) {
+          // Pick a way by clicking its arrow on the board itself.
+          const before = g.move.remaining;
+          const arrows = await page.evaluate(() => window.__omr.forkArrows?.() ?? []);
+          let advanced = false;
+          if (arrows.length) {
+            await page.mouse.click(arrows[0].x, arrows[0].y);
+            await settle(page);
+            const now = (await S(page)).game;
+            advanced = now.phase !== 'choose' || now.move?.remaining !== before || now.pieces[0].node !== g.pieces[0].node;
+          }
+          if (advanced) stats.boardClicks++;
+          else {
+            await page.keyboard.press('1');
+            stats.keyPicks++;
+          }
+        } else if (Math.random() < 0.5) {
+          await page.keyboard.press(String(1 + Math.floor(Math.random() * buttons)));
+          stats.keyPicks++;
+        } else await page.locator('.fork-btn').nth(Math.floor(Math.random() * buttons)).click();
+        await settle(page);
+        const after = (await S(page)).game;
+        if (after.phase !== 'choose' && after.actionNumber === g.actionNumber) {
+          const walked = after.log.filter((e) => e.kind === 'move' && e.piece === 0).reduce((n, e) => n + e.path.length - 1, 0);
+          if (walked === after.allowance) stats.exact++;
+          else stats.inexact++;
         }
-        await page.locator('.bottom .btn.primary.big').click();
-      } else if (g.phase === 'hunt') await page.getByRole('button', { name: /Challenge for the life/ }).click();
-      else if (g.phase === 'pick') await page.locator('.choices .btn').first().click();
-      else if (g.phase === 'summary') await page.locator('.bottom .btn.primary.big').click();
-      await settle(page);
-      if ((await S(page)).cameraMode !== 'overview') {
-        check('the chosen camera survives life changing hands', false, `round ${g.round}`);
-        await page.keyboard.press('v');
+        continue;
       }
+      if (g.phase === 'hunt') {
+        const ch = page.locator('.encounter .btn.risky');
+        if (await ch.count()) await ch.click();
+        else await page.getByRole('button', { name: 'End turn' }).click();
+        continue;
+      }
+      if (g.phase === 'pick') {
+        await page.locator('.choices .btn').first().click();
+        continue;
+      }
+      if (g.phase === 'reward') {
+        await page.getByRole('button', { name: /^Take/ }).click();
+        continue;
+      }
+      if (g.phase === 'summary') {
+        // Routine turns move on by themselves.
+        const n = g.actionNumber;
+        await page.waitForTimeout(4200);
+        const later = (await S(page)).game;
+        if (later.actionNumber !== n || later.round !== g.round || later.phase === 'gameOver') stats.autoNext++;
+        continue;
+      }
+      await page.waitForTimeout(150);
     }
     st = await S(page);
-    check('a full two-piece game reaches the results', st.game.phase === 'gameOver', `${Math.round((Date.now() - t0) / 1000)}s, ${challenges} challenges, ${transfers} transfers`);
-    check('exactly ten points were handed out, and one piece is alive at the end', st.game.pieces.reduce((a, p) => a + p.score, 0) === 10 && st.game.pieces.filter((p) => p.alive).length === 1);
-    await page.waitForTimeout(1500);
-    await page.screenshot({ path: `${OUT}/10-results-2p.png` });
-    const rows = await page.locator('.results tbody tr').allInnerTexts();
-    check('the results table lists rounds held for every piece', rows.length === 2 && rows.every((r) => /\d/.test(r)), rows.join(' / '));
-    check('the chosen camera stayed on the overview all game', st.cameraMode === 'overview');
-    check('saving never touched unrelated storage', (await page.evaluate(() => localStorage.getItem('unrelated-key'))) === 'keep-me');
-    check('no console errors (two-piece game)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
+    check('a whole four-piece match reached the results through the UI', st.game?.phase === 'gameOver', `${Math.round((Date.now() - t0) / 1000)} s, ${JSON.stringify(stats)}`);
+    check('exactly ten points were handed out', st.game.pieces.reduce((a, p) => a + p.score, 0) === 10);
+    check('every move of ours walked exactly the number rolled', stats.exact > 0 && stats.inexact === 0, `${stats.exact} exact, ${stats.inexact} not`);
+    check('forks were chosen on screen (board, keys and buttons)', stats.forks > 0 && stats.keyPicks + stats.boardClicks > 0);
+    check('finished turns move on without a click', stats.autoNext > 0);
+    await page.screenshot({ path: `${OUT}/09-results.png` });
+    check('no console errors (local match)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
     await page.context().close();
   }
 
-  // ── 2. Four bots, fast-forwarded, to the end ─────────────────────────
+  // ── 2. The rope on one screen: practice, real jumps, curse, four jumpers ─────
   if (run(2)) {
-    const page = await newPage({ width: 1280, height: 800 }, { reducedMotion: 'reduce' });
-    await clearStorage(page, '?quality=low');
-    await page.evaluate(() => localStorage.setItem('one-more-room/settings', JSON.stringify({ fastBots: true, reducedMotion: true, muted: true })));
-    await page.reload();
-    await setupPieces(page, ['bot', 'bot', 'bot', 'bot']);
-    await page.getByRole('button', { name: /Start game/ }).click();
-    const t0 = Date.now();
-    let sawSeance = false;
-    let maxAlive = 0;
-    let st;
-    while (Date.now() - t0 < 900000) {
-      st = await S(page);
-      if (st.game?.challenge?.kind === 'seance') sawSeance = true;
-      if (st.game) maxAlive = Math.max(maxAlive, st.game.pieces.filter((p) => p.alive).length);
-      if (st.game?.phase === 'gameOver') break;
-      await page.waitForTimeout(400);
+    const page = await newPage();
+    await clearStorage(page, '?quality=low', { muted: true });
+    await startLocal(page);
+    // Piece 0 (the person) a ghost right next to the living bot.
+    await craft(
+      page,
+      `g.pieces.forEach((p, i) => Object.assign(p, { alive: i === 1, node: [2, 1, 16, 24][i], streak: i === 1 ? 3 : 0, item: null, itemAwardedAt: null }));
+       g.round = 2; g.schedule = [1, 0, 2, 3]; g.slot = 1;
+       Object.assign(g, { phase: 'hunt', options: { living: true, sameSpace: [], versus: [], versusInactive: null }, challenge: null, lastOutcome: null, minigameUsed: false, log: [], move: null, die: 1, rollInfo: { kind: 'die' } });`,
+    );
+    await page.screenshot({ path: `${OUT}/11-challenge-offer.png` });
+    check('a ghost next to the living piece is offered “Challenge … steal life”', /Challenge living • steal life/.test(await page.locator('.bottom').innerText()));
+    await page.locator('.encounter .btn.risky').click();
+    await page.waitForTimeout(1500);
+    const ready = await page.locator('.arena-card').innerText();
+    check('the first rope teaches in one line, and names the curse briefly', /Jump as the rope reaches your feet/.test(ready) && /Curse II: shorter jumps/.test(ready));
+    check('the rope shows the real characters (one canvas arena) with their names', (await page.locator('.arena-view canvas').count()) === 1);
+    await page.screenshot({ path: `${OUT}/12-rope-teach.png` });
+    await page.keyboard.press('Space'); // ready
+    await page.waitForTimeout(900);
+    check('practice comes first, labelled and not scored', /Practice/.test(await page.locator('.arena-card').innerText()));
+    // Press only in a calm moment of the rope cycle (feet on the floor, not stumbling,
+    // well before the next pass) so slow software rendering can't shift the test.
+    const calm = async () => {
+      for (let i = 0; i < 80; i++) {
+        const a = (await arena(page))[0];
+        const sinceLast = a?.lastBottom == null ? Infinity : a.t - a.lastBottom;
+        if (a && a.t > 0 && a.y === 0 && sinceLast > 450 && a.nextBottom != null && a.nextBottom - a.t > 700) return a;
+        await page.waitForTimeout(40);
+      }
+      return (await arena(page))[0];
+    };
+    const a0 = await calm();
+    await page.keyboard.press('Space');
+    let a1 = a0;
+    // Software WebGL draws a frame every few hundred ms; wait for the next drawn frame.
+    for (const t0 = Date.now(); Date.now() - t0 < 2000 && (a1.t === a0.t || (a1.jumps === a0.jumps && a1.presses === a0.presses)); ) {
+      await page.waitForTimeout(30);
+      a1 = (await arena(page))[0];
     }
-    check('four bots play a full game to the results', st.game?.phase === 'gameOver', `${Math.round((Date.now() - t0) / 1000)}s`);
-    check('four-piece totals: ten points, never more than one living piece', st.game.pieces.reduce((a, p) => a + p.score, 0) === 10 && maxAlive === 1);
-    check('the four-piece game included at least one Séance', sawSeance);
-    await page.waitForTimeout(1200);
-    await page.screenshot({ path: `${OUT}/20-results-4p.png` });
-    const fit = await page.locator('.results').evaluate((el) => el.scrollWidth - el.clientWidth);
-    check('the results panel fits without sideways scrolling', fit <= 1, `${fit}px`);
-    check('no console errors (bots)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
+    // (Mid-air height is checked by the unit tests: software WebGL draws too rarely to sample it.)
+    check('a press makes the character jump', a1.jumps === a0.jumps + 1 && a1.presses === a0.presses + 1, `frame gap ${Math.round(a1.t - a0.t)} ms`);
+    await page.screenshot({ path: `${OUT}/13-rope-practice-jump.png` });
+    // Holding the key (auto-repeat) and tapping mid-air add nothing.
+    await page.waitForTimeout(700);
+    const h0 = (await calm()).jumps;
+    await page.keyboard.down('Space');
+    for (let i = 0; i < 6; i++) await page.keyboard.down('Space'); // repeats while held
+    await page.keyboard.up('Space');
+    await page.keyboard.press('Space');
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(100);
+    let h = (await arena(page))[0];
+    for (const t0 = Date.now(); Date.now() - t0 < 2000 && h.jumps === h0; ) {
+      await page.waitForTimeout(30);
+      h = (await arena(page))[0];
+    }
+    await page.waitForTimeout(400);
+    const h1 = (await arena(page))[0].jumps;
+    check('holding, key-repeat and mid-air taps make exactly one jump', h1 === h0 + 1, `${h0} → ${h1}`);
+    await page.getByRole('button', { name: 'Skip practice' }).click().catch(() => {});
+    await page.waitForTimeout(600);
+    await page.screenshot({ path: `${OUT}/14-rope-countdown.png` });
+    const before = (await S(page)).game.challengeCount;
+    await jumpThrough(page);
+    const st = await S(page);
+    check('the rope resolves and play goes on', st.game.phase !== 'challenge' && st.game.challengeCount === before && !st.game.challenge, `phase ${st.game.phase}`);
+    // A second rope in the same match: no lesson, no practice.
+    await craft(
+      page,
+      `g.pieces.forEach((p, i) => Object.assign(p, { alive: i === 1, node: [2, 1, 16, 24][i] }));
+       g.schedule = [1, 0, 2, 3]; g.slot = 1;
+       Object.assign(g, { phase: 'hunt', options: { living: true, sameSpace: [], versus: [], versusInactive: null }, challenge: null, lastOutcome: null, minigameUsed: false, log: [], move: null });`,
+    );
+    await page.locator('.encounter .btn.risky').click();
+    await page.waitForTimeout(800);
+    const second = await page.locator('.arena-card').innerText();
+    check('later ropes skip the lesson', !/Jump as the rope reaches your feet/.test(second) && /when ready/.test(second));
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(700);
+    check('…and the practice: straight to the countdown', !/Practice/.test(await page.locator('.arena-card').innerText()));
+    await jumpThrough(page);
+    // Four jumpers: walk onto the Super Reaper's Séance.
+    await craft(
+      page,
+      `g.pieces.forEach((p, i) => Object.assign(p, { alive: i === 1, node: [11, 1, 16, 24][i] }));
+       g.schedule = [1, 0, 2, 3]; g.slot = 1; g.seancesUsed = 0;
+       Object.assign(g, { phase: 'choose', options: null, challenge: null, lastOutcome: null, minigameUsed: false, log: [], die: 1, allowance: 1, rollInfo: { kind: 'die' }, move: { remaining: 1, prev: null, path: [11], usedSecret: false, usedWall: false } });`,
+    );
+    await page.evaluate(() => (window.__omrArena = {}));
+    await page.locator('.fork-btn', { hasText: 'Super Reaper' }).click();
+    await page.waitForTimeout(3500);
+    check('a Séance puts all four characters in the arena', /Séance/.test(await page.locator('.arena-card').innerText()) && Object.keys(await arena(page)).length === 4);
+    await page.screenshot({ path: `${OUT}/15-rope-seance.png` });
+    await jumpThrough(page);
+    check('no console errors (rope)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
     await page.context().close();
   }
 
-  // ── 3. Crafted positions: transfers, traps, curse, reload, undo ──────
+  // ── 3. Items and ghost battles on one screen ────────────────────────────────
   if (run(3)) {
     const page = await newPage();
-    await clearStorage(page, '?quality=low');
-    await setupPieces(page, ['human', 'human', 'human', 'human'], ['Knight', 'Goblin', 'Witch', 'Zombie']);
-    await page.getByRole('button', { name: /Start game/ }).click();
-    await placeAll(page);
-    await page.getByRole('button', { name: /Roll for life/ }).click();
+    await clearStorage(page, '?quality=low', { muted: true });
+    await startLocal(page);
+    const base = `g.pieces.forEach((p, i) => Object.assign(p, { alive: i === 1, node: arg.nodes[i], streak: 0, item: (arg.items ?? [])[i] ?? null, itemAwardedAt: (arg.items ?? [])[i] ? -1 : null }));
+       g.round = 2; g.schedule = [1, 0, 2, 3]; g.slot = 1;
+       Object.assign(g, { phase: 'turnStart', options: null, challenge: null, lastOutcome: null, minigameUsed: false, log: [], move: null, die: null, rollInfo: null, itemUsed: null, battlesThisRound: [], pendingReward: null });`;
+    // Ghostly Stride: exactly six, no die.
+    await craft(page, base, { nodes: [2, 16, 28, 24], items: ['ghostlyStride'] });
+    await page.getByRole('button', { name: /Use Ghostly Stride/ }).click();
     await settle(page);
-
-    // Several transfers in one round: B steals from A, then C steals from B.
-    await scenario(page, { living: 0, nodes: [6, 5, 4, 20], acting: 1, die: 3 });
-    await confirmMove(page, 'stay');
-    check('a ghost in range is offered the challenge', /within reach/.test(await page.locator('.bottom').innerText()));
-    await page.getByRole('button', { name: /Challenge for the life/ }).click();
-    await page.waitForTimeout(500);
-    await page.screenshot({ path: `${OUT}/30-duel-intro.png` });
-    let st = await playLocalChallenge(page, [1]);
-    check('the challenger who jumps better steals the life and the space', living(st.game) === 1 && st.game.pieces[1].node === 6);
-    check('the loser retreats two ordinary steps to a free space', st.game.pieces[0].node === 8, `node ${st.game.pieces[0].node}`);
-    await page.screenshot({ path: `${OUT}/31-after-steal.png` });
-    await page.locator('.bottom .btn.primary.big').click();
+    let g = (await S(page)).game;
+    check('Ghostly Stride moves exactly six with no die shown', g.rollInfo?.kind === 'stride' && g.allowance === 6 && /Ghostly Stride · 6 spaces/.test(await page.locator('.bottom').innerText()) && (await page.locator('.bottom .die').count()) === 0);
+    await page.screenshot({ path: `${OUT}/20-stride.png` });
+    // Second Roll: replaces the die before the first step.
+    await craft(page, base + `Object.assign(g, { phase: 'choose', die: 2, allowance: 2, rollInfo: { kind: 'die' }, move: { remaining: 2, prev: null, path: [2], usedSecret: false, usedWall: false } });`, { nodes: [2, 16, 28, 24], items: ['secondRoll'] });
+    await page.getByRole('button', { name: /Use Second Roll/ }).click();
     await settle(page);
-    st = await S(page);
-    check('the next scheduled piece acts; the old holder gets no bonus action', acting(st.game) === 2);
-    await page.getByRole('button', { name: /Roll the die/ }).click();
+    g = (await S(page)).game;
+    check('Second Roll replaces the die and the move is exactly the new number', g.rollInfo?.rerolledFrom === 2 && g.move?.remaining === g.die && /Second Roll 2 →/.test(await page.locator('.bottom').innerText()));
+    // Ghost Switch: swap onto a trap space, nothing triggers.
+    await craft(page, base, { nodes: [2, 16, 21, 24], items: ['ghostSwitch'] });
+    await page.locator('.item-use').first().click();
     await settle(page);
-    await confirmMove(page, 5);
-    await page.getByRole('button', { name: /Challenge for the life/ }).click();
-    st = await playLocalChallenge(page, [1]);
-    check('a second transfer in the same round', living(st.game) === 2 && st.game.round === 2, `living ${living(st.game)}`);
-    await page.screenshot({ path: `${OUT}/32-second-steal.png` });
-
-    // A four-piece Séance from a hidden tile.
-    await scenario(page, { living: 0, nodes: [0, 13, 25, 20], acting: 1, die: 1 });
-    await confirmMove(page, 14);
-    st = await S(page);
-    check('landing on a hidden Séance reveals it and calls all four pieces', st.game.phase === 'challenge' && st.game.challenge.kind === 'seance' && st.game.challenge.participants.length === 4 && st.game.traps.find((t) => t.node === 14).revealed);
-    await page.waitForTimeout(500);
-    await page.screenshot({ path: `${OUT}/33-seance-intro.png` });
-    st = await playLocalChallenge(page, [3]);
-    check('the Séance winner holds the life and nobody moves', living(st.game) === 3 && st.game.pieces.map((p) => p.node).join() === '0,14,25,20');
-    check('the Séance tile is spent and one of two Séances is used', st.game.traps.find((t) => t.node === 14).spent && st.game.seancesUsed === 1);
-    await page.screenshot({ path: `${OUT}/34-after-seance.png` });
-
-    // A ghost on a hidden Reaper: a remote duel. Reload mid-challenge, then undo.
-    await scenario(page, { living: 0, nodes: [30, 6, 16, 20], acting: 1, die: 3 });
-    await confirmMove(page, 9);
-    st = await S(page);
-    const id = st.game.challenge?.id;
-    check('a ghost landing on a Reaper challenges the living piece from anywhere', st.game.phase === 'challenge' && st.game.challenge.host === 'reaper' && !st.game.challenge.contact);
-    await page.reload();
-    await page.getByRole('button', { name: 'Resume game' }).click();
-    await page.waitForTimeout(800);
-    st = await S(page);
-    check('reload during a challenge resumes the same challenge', st.game.phase === 'challenge' && st.game.challenge.id === id);
-    st = await playLocalChallenge(page, [0]);
-    check('after a remote duel both pieces keep their spaces', st.game.pieces[0].node === 30 && st.game.pieces[1].node === 9 && living(st.game) === 0);
-    await page.getByRole('button', { name: /^Undo/ }).click();
-    await page.getByRole('button', { name: /^Undo to/ }).click();
-    await page.waitForTimeout(800);
-    st = await S(page);
-    check('undo restores the action but the table keeps the reveal', !st.game.traps.find((t) => t.node === 9).revealed && st.known.some((k) => k.node === 9 && k.effect === 'reaper'));
-    await page.screenshot({ path: `${OUT}/35-undo-keeps-reveal.png` });
-
-    // The living piece on a revealed Reaper picks its opponent.
-    await scenario(page, { living: 0, nodes: [8, 6, 16, 20], acting: 0, die: 1, traps: TRAPS.map((t) => (t.node === 9 ? { ...t, revealed: true } : t)) });
-    await page.getByRole('option', { name: /#9 / }).click();
-    check('the forecast warns about a known Reaper before confirming', /Reaper/.test(await page.locator('.forecast').innerText()));
-    await page.locator('.bottom .btn.primary.big').click();
-    await settle(page);
-    check('the living piece chooses which ghost to duel', (await page.locator('.choices .btn').count()) === 3);
-    await page.locator('.choices .btn').nth(1).click();
-    st = await S(page);
-    check('the chosen ghost is the opponent', st.game.challenge?.participants.join() === '0,2');
-    st = await playLocalChallenge(page, [0]);
-
-    // A Poltergeist throws a ghost away; nothing triggers where it lands.
-    await scenario(page, { living: 0, nodes: [0, 18, 16, 24], acting: 1, die: 1 });
-    await confirmMove(page, 19);
-    st = await S(page);
-    check('a Poltergeist throws the piece far away without a minigame', st.game.traps.find((t) => t.node === 19).revealed && st.game.pieces[1].node !== 19 && st.game.pieces[1].node !== 0 && st.game.phase !== 'challenge');
-    await page.screenshot({ path: `${OUT}/36-poltergeist.png` });
-
-    // With both Séances used: a dormant Séance tile and a Reaper-mode Super Reaper.
-    await scenario(page, { living: 0, nodes: [0, 23, 16, 4], acting: 1, die: 3, seancesUsed: 2 });
-    await confirmMove(page, 26);
-    st = await S(page);
-    check('a Séance tile found after both Séances are used is revealed cold', st.game.traps.find((t) => t.node === 26).spent && st.game.phase !== 'challenge' && /cold/.test(await page.locator('.bottom').innerText()));
-    await scenario(page, { living: 0, nodes: [0, 16, 13, 4], acting: 3, die: 1, seancesUsed: 2 });
-    await page.getByRole('option', { name: /#12 / }).click();
-    check('the Super Reaper forecast shows its current effect', /Super Reaper: Reaper’s Challenge/.test(await page.locator('.forecast').innerText()));
-    await page.screenshot({ path: `${OUT}/37-super-reaper-forecast.png` });
-
-    // The curse: shown before play, and each lane shows its own window.
-    await scenario(page, { living: 0, nodes: [6, 5, 16, 20], acting: 1, die: 3, streaks: [3, 0, 0, 0], scores: [3, 0, 0, 0], round: 5 });
-    await confirmMove(page, 'stay');
-    await page.getByRole('button', { name: /Challenge for the life/ }).click();
-    await page.waitForTimeout(400);
-    check('the curse is announced before play', /Alive for 3 rounds • Jump window 20% narrower/.test(await page.locator('.challenge-card').innerText()));
-    await autoplay(page, []);
-    for (let k = 0; k < 4 && (await page.locator('.ch-participants button', { hasText: /^Ready$/ }).count()); k++) await page.locator('.ch-participants button', { hasText: /^Ready$/ }).first().click().catch(() => {});
-    await page.waitForTimeout(4500);
-    const widths = await page.locator('.rope-lane .meter .zone').evaluateAll((els) => els.map((e) => parseFloat(e.style.width)));
-    check('the living lane’s jump window is visibly narrower', widths.length === 2 && widths[0] < widths[1] * 0.85, widths.map((w) => w.toFixed(1)).join(' vs '));
-    await page.screenshot({ path: `${OUT}/38-curse-rope.png` });
-    st = await playLocalChallenge(page, [1]);
-
-    // The last bell with a three-way tie: shared win, ten points in all.
-    await scenario(page, { living: 2, nodes: [0, 16, 8, 24], acting: 3, round: 10, scores: [3, 3, 2, 1], schedule: [2, 0, 1, 3], phase: 'summary' });
-    await page.locator('.bottom .btn.primary.big').click();
-    await settle(page);
+    g = (await S(page)).game;
+    check('Ghost Switch swaps two ghosts and nothing triggers', g.phase === 'turnStart' && g.pieces[0].node !== 2 && g.traps.every((t) => !t.revealed));
+    // Ghost battle won by the ghost called out; then keep or replace.
+    await craft(page, base + `Object.assign(g, { phase: 'hunt', die: 1, rollInfo: { kind: 'die' }, options: { living: false, sameSpace: [2], versus: [], versusInactive: null } });`, { nodes: [3, 16, 3, 24] });
+    check('landing on a ghost offers “Battle ghost • win an item”', /Battle ghost • win an item/.test(await page.locator('.bottom').innerText()));
+    await page.locator('button.battle').first().click();
     await page.waitForTimeout(1200);
-    st = await S(page);
-    const title = await page.locator('.results h1').innerText();
-    check('tied top scores share the win; exactly ten points in total', /share the win/.test(title) && st.game.pieces.reduce((a, p) => a + p.score, 0) === 10, title);
-    await page.screenshot({ path: `${OUT}/39-shared-win.png` });
-    check('no console errors (scenarios)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
+    check('the battle is shown as one on the TV arena', /Ghost battle/.test(await page.locator('.arena-card').innerText()));
+    await page.keyboard.press('Space');
+    await page.getByRole('button', { name: 'Skip practice' }).click().catch(() => {});
+    await settle(page, 60000);
+    for (let i = 0; i < 80 && (await S(page)).game.phase === 'challenge'; i++) await page.waitForTimeout(500); // the person never jumps: the bot wins
+    g = (await S(page)).game;
+    check('the defender won the battle and an item; nobody moved; life stayed put', g.lastOutcome?.winner === 2 && !!g.pieces[2].item && living(g) === 1 && g.pieces[0].node === 3);
+    await craft(page, base + `Object.assign(g, { phase: 'reward', minigameUsed: true, pendingReward: { piece: 0, current: 'secondRoll', offered: 'ghostSwitch' } });`, { nodes: [3, 16, 3, 24], items: ['secondRoll'] });
+    check('a different item asks “Keep or replace?”', /Keep or replace\?/.test(await page.locator('.bottom').innerText()));
+    await page.getByRole('button', { name: /^Take/ }).click();
+    await settle(page);
+    check('taking the new item replaces the old one', (await S(page)).game.pieces[0].item === 'ghostSwitch');
+    await page.getByRole('button', { name: 'Help' }).click();
+    const rules = await page.locator('.rules').innerText();
+    check('Help explains exact moves, forks, the jump rope, the curse and items', /exactly/.test(rules) && /fork/.test(rules) && /Curse/.test(rules) && /Second Roll 40%/.test(rules) && !/stay where/.test(rules));
+    await page.keyboard.press('Escape');
+    check('no console errors (items)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
     await page.context().close();
   }
 
-  // ── 4. Phone rooms with the real room service ────────────────────────
+  // ── 4. Phones: lineup fills with bots; phones choose paths and press Jump ──
   if (run(4) && server) {
-    const tv = await newPage({ width: 1280, height: 800 });
+    const tv = await newPage({ width: 1440, height: 900 });
     await tv.goto(URL + '?quality=low');
+    await tv.evaluate(() => localStorage.setItem('one-more-room/settings', JSON.stringify({ muted: true })));
     await tv.getByRole('button', { name: 'Host a phone room' }).click();
     await tv.locator('.room-code').waitFor({ timeout: 15000 });
     const code = (await tv.locator('.room-code').innerText()).trim();
     const joinUrl = await tv.locator('.join-url').innerText();
     check('the TV shows a room code, a QR code and a LAN join link (not localhost)', /^[A-Z]{4}$/.test(code) && (await tv.locator('img.qr').count()) === 1 && !/localhost|127\.0\.0\.1/.test(joinUrl), joinUrl);
-    await tv.getByRole('radio', { name: 'Team Battle' }).click();
+    check('an empty room already shows four pieces, all bots', (await tv.locator('.lineup li.is-bot').count()) === 4);
     const phones = {};
     for (const name of ['Ana', 'Ben', 'Cy']) {
-      const p = await newPage({ width: 390, height: 844 });
+      const p = await newPage({ width: 390, height: 844 }, { hasTouch: true, isMobile: true });
       await p.goto(URL + '#/join?room=' + code);
       await p.getByLabel('Your name').fill(name);
       await p.getByRole('button', { name: 'Join' }).click();
       await p.locator('.pchars').waitFor();
       phones[name] = p;
     }
+    await tv.getByRole('button', { name: /Advanced/ }).click();
+    await tv.getByRole('radio', { name: 'Teams of two' }).click();
     await phones.Ana.getByRole('button', { name: /^Witch/ }).click();
     await phones.Cy.getByRole('button', { name: /^Knight/ }).click();
     await phones.Ben.getByRole('button', { name: /Join Ana’s Witch/ }).click();
-    await tv.locator('select[aria-label="Bot costume"]').selectOption('goblin');
-    await tv.getByRole('button', { name: 'Add bot' }).click();
-    await tv.waitForTimeout(500);
-    await tv.screenshot({ path: `${OUT}/40-tv-lobby.png` });
-    await phones.Ben.screenshot({ path: `${OUT}/41-phone-lobby.png` });
-    check('phones chose characters and Ben joined Ana’s team', /Ana & Ben/.test(await tv.locator('.setup-players').innerText()) && /Knight/.test(await tv.locator('.setup-players').innerText()));
-    await tv.getByRole('button', { name: /Start: 3 pieces, 3 phones/ }).click();
-    await phones.Ben.waitForTimeout(800);
-    check('only the first teammate confirms the team’s trap', /Ana confirms your team’s trap/.test(await phones.Ben.locator('body').innerText()));
-    await phones.Ana.getByRole('button', { name: 'Space 26', exact: true }).click();
-    await phones.Ana.getByRole('button', { name: /Set the trap/ }).click();
-    await phones.Cy.getByRole('button', { name: 'Space 18', exact: true }).click();
-    await phones.Cy.getByRole('button', { name: /Set the trap/ }).click();
-    await phones.Ben.waitForTimeout(800);
-    check('both teammates see their team’s pick; the other phone never does', /space 26/.test(await phones.Ben.locator('body').innerText()) && /space 26/.test(await phones.Ana.locator('body').innerText()) && !/space 26/.test(await phones.Cy.locator('body').innerText()));
-    await phones.Ana.screenshot({ path: `${OUT}/42-phone-trap-set.png` });
-    for (const p of Object.values(phones)) await p.getByRole('button', { name: 'Hide it' }).click().catch(() => {});
-    await tv.waitForTimeout(3000);
-    const tvGame = (await S(tv)).game;
-    check('the TV never receives hidden traps, nominations or the seed', tvGame.traps.every((t) => t.revealed) && tvGame.rng === 0 && tvGame.nominations.every((n) => n === -1));
-    const controller = (g, piece) => (piece === 0 ? (g.round % 2 === 1 ? phones.Ana : phones.Ben) : piece === 1 ? phones.Cy : null);
-    const other = (g) => (g.round % 2 === 1 ? phones.Ben : phones.Ana);
-    let challenges = 0;
-    let reloaded = false;
-    let checkedInactive = new Set();
-    let droppedMid = false;
-    const t0 = Date.now();
-    while (Date.now() - t0 < 900000) {
-      const st = await S(tv);
-      const g = st.game;
-      if (!g || g.phase === 'placement' || g.phase === 'lifeRoll') {
-        await tv.waitForTimeout(400);
-        continue;
-      }
-      if (g.phase === 'gameOver' || g.round > 4) break;
-      if (g.phase === 'challenge') {
-        for (const piece of g.challenge.participants) {
-          const p = controller(g, piece);
-          if (!p) continue;
-          if (!droppedMid && piece === 0 && (await p.getByRole('button', { name: /I’m ready/ }).count())) {
-            // Drop mid-challenge: the room freezes it and restarts on return.
-            droppedMid = true;
-            await p.getByRole('button', { name: /I’m ready/ }).click();
-            await p.reload();
-            await p.waitForTimeout(2000);
-            check('a controller reconnecting mid-challenge gets the challenge back', /I’m ready|Haunted Jump Rope/.test(await p.locator('body').innerText()));
-          }
-          const ready = p.getByRole('button', { name: /I’m ready/ });
-          if (await ready.count()) {
-            await ready.click().catch(() => {});
-            challenges++;
-            await autoplay(p);
-          }
-          if (challenges === 1) await p.screenshot({ path: `${OUT}/43-phone-challenge.png` }).catch(() => {});
-        }
-        if (challenges === 1) await tv.screenshot({ path: `${OUT}/44-tv-challenge.png` });
-        await tv.waitForTimeout(400);
-        continue;
-      }
-      const piece = g.phase === 'reward' ? g.pendingReward.piece : acting(g);
-      const p = controller(g, piece);
-      if (p) {
-        if (piece === 0 && g.phase !== 'reward' && !checkedInactive.has(g.round)) {
-          checkedInactive.add(g.round);
-          await tv.waitForTimeout(600);
-          const idle = other(g);
-          const idleText = await idle.locator('body').innerText();
-          check(`round ${g.round}: the inactive teammate sees the turn but has no controls`, /controls it this round/.test(idleText) && (await idle.locator('.pbtn.primary').count()) === 0);
-        }
-        if (!reloaded && g.round === 2 && piece === 1) {
-          reloaded = true;
-          const before = await p.locator('.phead b').first().innerText();
-          await p.reload();
-          await p.waitForTimeout(1800);
-          const after = await p.locator('.phead b').first().innerText().catch(() => '');
-          check('a refreshed phone rejoins its own piece', before === after, `${before} → ${after}`);
-        }
-        if (g.phase === 'choose') {
-          const opts = p.locator('.pdest');
-          const hunt = p.locator('.pdest', { hasText: '👻' });
-          if (!(await p.locator('.pdest.on').count())) await ((await hunt.count()) ? hunt.first() : opts.nth(Math.min(2, (await opts.count()) - 1))).click().catch(() => {});
-        }
-        const btn = p.locator('.pbtn.primary').first();
-        if ((await btn.count()) && (await btn.isEnabled().catch(() => false))) await btn.click().catch(() => {});
-        else {
-          const any = p.locator('.pbtn').first();
-          if (await any.count()) await any.click().catch(() => {});
-        }
-      }
-      await tv.waitForTimeout(350);
+    await tv.waitForTimeout(600);
+    await tv.screenshot({ path: `${OUT}/30-tv-lobby.png` });
+    await phones.Ben.screenshot({ path: `${OUT}/31-phone-lobby.png` });
+    check('three phones (a pair and a solo) leave two bot seats: still four pieces', (await tv.locator('.lineup li').count()) === 4 && (await tv.locator('.lineup li.is-bot').count()) === 2 && /2 humans \+ 2 bots/.test(await tv.getByRole('button', { name: /^Start/ }).innerText()));
+    await tv.getByRole('button', { name: /^Start/ }).click();
+    await phones.Ana.waitForTimeout(800);
+    for (const [p, n] of [[phones.Ana, 26], [phones.Cy, 18]]) {
+      await p.getByRole('button', { name: `Space ${n}`, exact: true }).click();
+      await p.getByRole('button', { name: /Hide it on/ }).click();
     }
-    const fin = (await S(tv)).game;
-    check('a pair, a solo phone and a bot played several rounds through the service', fin.round >= 4 || fin.phase === 'gameOver', `round ${fin.round}, ${challenges} phone challenges`);
-    check('room scores equal completed rounds; one living piece', fin.pieces.reduce((a, q) => a + q.score, 0) === (fin.phase === 'gameOver' ? 10 : fin.round - 1) && fin.pieces.filter((q) => q.alive).length === 1);
-    check('both teammates controlled the pair in their rounds', checkedInactive.size >= 2, [...checkedInactive].join(','));
-    await tv.screenshot({ path: `${OUT}/45-tv-room-game.png` });
-    await phones.Ana.screenshot({ path: `${OUT}/46-phone-watch.png` });
-    check('the phone controller has no horizontal overflow', await phones.Ana.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    const all = [tv, ...Object.values(phones)];
-    check('no console errors (rooms)', all.every((q) => q.errors.filter((e) => !/WebSocket/.test(e)).length === 0), all.flatMap((q) => q.errors).slice(0, 3).join(' | '));
-    for (const q of all) await q.context().close();
-  }
-
-  // ── 6. Ghost battles and items on one screen ─────────────────────────
-  if (run(6)) {
-    const page = await newPage();
-    await clearStorage(page, '?quality=low');
-    await setupPieces(page, ['human', 'human', 'human'], ['Knight', 'Goblin', 'Witch']);
-    await page.getByRole('button', { name: /Start game/ }).click();
-    await placeAll(page);
-    await page.getByRole('button', { name: /Roll for life/ }).click();
-    await settle(page);
-    const saved = () => page.evaluate((k) => JSON.parse(localStorage.getItem(k)).session.game, SAVE_KEY);
-
-    // Same-space battle, won by the ghost that was called out.
-    await scenario(page, { living: 0, nodes: [16, 1, 3], acting: 1, die: 4 });
-    const pv = await page.locator('.dest-list').innerText();
-    check('the destination list marks a ghost-occupied space and a Versus space', /⚔ ghost here/.test(pv) && /⚔ Versus/.test(pv));
-    await confirmMove(page, 3);
-    const enc = await page.locator('.bottom').innerText();
-    check('landing on a ghost offers “Battle ghost • win an item” and ending the action', /Battle ghost • win an item/.test(enc) && /End the action/.test(enc) && !/steal life/.test(enc));
-    await page.screenshot({ path: `${OUT}/60-battle-offer.png` });
-    await page.locator('button.battle').first().click();
-    await page.waitForTimeout(500);
-    check('a ghost battle is titled as one, with neutral lanes (no curse, no life lane)', /Ghost Battle/.test(await page.locator('body').innerText()) && (await page.locator('.rope-lane.living').count()) === 0);
-    await page.screenshot({ path: `${OUT}/61-battle-rope.png` });
-    let st = await playLocalChallenge(page, [1]);
-    const o = st.game.lastOutcome;
-    check('the defender wins the battle and one item; nobody moves; the life stays put', o?.winner === 2 && !!o.reward && st.game.pieces[2].item === o.reward && st.game.pieces[1].item === null && living(st.game) === 0 && st.game.pieces[1].node === 3 && st.game.pieces[2].node === 3 && st.game.pieces.every((p) => p.score === 0));
-    check('the reward is revealed with a card', (await page.locator('.reward-reveal .item-card').count()) === 1);
-    check('the held item is shown on the piece card', (await page.locator('.pcard .item-badge').count()) === 1);
-    await page.screenshot({ path: `${OUT}/62-battle-reward.png` });
-
-    // Versus: call out a ghost anywhere; a different item asks keep or replace.
-    const g0 = await saved();
-    const offered = itemFromDraw(nextFloat(g0.rewardRng)[0]);
-    const current = offered === 'secondRoll' ? 'ghostlyStride' : 'secondRoll';
-    await scenario(page, { living: 0, nodes: [16, 2, 28], acting: 1, die: 3, items: [null, current, null], rewardRng: g0.rewardRng });
-    await confirmMove(page, 5);
-    check('a Versus space invites any ghost, wherever it is', /anywhere/.test(await page.locator('.bottom').innerText()));
-    await page.locator('button.battle').first().click();
-    st = await playLocalChallenge(page, [0]);
-    check('a winner holding a different item gets the keep-or-replace choice', st.game.phase === 'reward' && (await page.locator('.reward-cards .item-card').count()) === 2);
-    await page.screenshot({ path: `${OUT}/63-keep-or-replace.png` });
-    await page.getByRole('button', { name: /^Take / }).click();
-    await settle(page);
-    st = await S(page);
-    check('taking the new item replaces the old one; exactly one item is held', st.game.pieces[1].item === offered && st.game.phase === 'summary');
-
-    // Second Roll: after the die, before moving; the new result stands.
-    await scenario(page, { living: 0, nodes: [16, 1, 28], acting: 1, die: 2, items: [null, 'secondRoll', null] });
-    const g1 = await saved();
-    const newDie = 1 + Math.floor(nextFloat(g1.rng)[0] * 6);
-    await page.getByRole('button', { name: /Use Second Roll/ }).click();
-    await settle(page);
-    st = await S(page);
-    check('Second Roll replaces the die with one fresh roll and shows old and new', st.game.die === newDie && st.game.rollInfo?.rerolledFrom === 2 && st.game.allowance === Math.max(3, newDie) && st.game.pieces[1].item === null && new RegExp(`Second Roll: 2 → ${newDie}`).test(await page.locator('.bottom').innerText()));
-    check('no second item use in the same action', (await page.locator('.item-use').count()) === 0);
-    await page.screenshot({ path: `${OUT}/64-second-roll.png` });
-
-    // Ghost Switch: before rolling; swap with a ghost on a hidden trap — nothing triggers.
-    await scenario(page, { living: 0, nodes: [16, 1, 21], acting: 1, items: [null, 'ghostSwitch', null] });
-    check('Ghost Switch never offers the living piece', !(await page.locator('.item-use').allInnerTexts()).some((t) => t.includes(st.game.pieces[0].name)));
-    await page.locator('.item-use').first().click();
-    await settle(page);
-    st = await S(page);
-    check('Ghost Switch swaps two ghosts and triggers nothing; the ghost then rolls', st.game.pieces[1].node === 21 && st.game.pieces[2].node === 1 && st.game.phase === 'turnStart' && !st.game.traps.find((t) => t.node === 21).revealed && (await page.getByRole('button', { name: /Roll the die/ }).count()) === 1);
-    await page.screenshot({ path: `${OUT}/65-ghost-switch.png` });
-
-    // Ghostly Stride: instead of rolling; no die.
-    await scenario(page, { living: 0, nodes: [16, 1, 28], acting: 1, items: [null, 'ghostlyStride', null] });
-    const rngBefore = (await saved()).rng;
-    await page.getByRole('button', { name: /Use Ghostly Stride/ }).click();
-    await settle(page);
-    st = await S(page);
-    const bottom = await page.locator('.bottom').innerText();
-    check('Ghostly Stride moves up to 6 without rolling and shows no fake die', st.game.rollInfo?.kind === 'stride' && st.game.die === null && st.game.allowance === 6 && st.game.rng === rngBefore && /Ghostly Stride • 6 spaces/.test(bottom) && (await page.locator('.bottom .die').count()) === 0);
-    await page.screenshot({ path: `${OUT}/66-ghostly-stride.png` });
-    await confirmMove(page, 7);
-    st = await S(page);
-    check('a Stride move of six lands normally', st.game.pieces[1].node === 7);
-
-    // Rules describe it all.
-    await page.getByRole('button', { name: 'Rules' }).click();
-    const rules = await page.locator('.rules').innerText();
-    check('rules explain ghost battles, Versus spaces, weights and all three items', /Ghost battles and items/.test(rules) && /Versus/.test(rules) && /Second Roll 40%/.test(rules) && /Ghost Switch 40%/.test(rules) && /Ghostly Stride 20%/.test(rules));
-    await page.keyboard.press('Escape');
-    check('no console errors (battles and items)', page.errors.length === 0, page.errors.slice(0, 3).join(' | '));
-    await page.context().close();
-  }
-
-  // ── 7. Ghost battles and items through phones (a pair, a solo phone, a bot) ──
-  if (run(7) && server) {
-    const tv = await newPage({ width: 1280, height: 800 });
-    await tv.goto(URL + '?quality=low');
-    await tv.getByRole('button', { name: 'Host a phone room' }).click();
-    await tv.locator('.room-code').waitFor({ timeout: 15000 });
-    const code = (await tv.locator('.room-code').innerText()).trim();
-    await tv.getByRole('radio', { name: 'Team Battle' }).click();
-    const phones = {};
-    for (const name of ['Ana', 'Ben', 'Cy']) {
-      const p = await newPage({ width: 390, height: 844 });
-      await p.goto(URL + '#/join?room=' + code);
-      await p.getByLabel('Your name').fill(name);
-      await p.getByRole('button', { name: 'Join' }).click();
-      await p.locator('.pchars').waitFor();
-      phones[name] = p;
-    }
-    await phones.Ana.getByRole('button', { name: /^Witch/ }).click();
-    await phones.Cy.getByRole('button', { name: /^Knight/ }).click();
-    await phones.Ben.getByRole('button', { name: /Join Ana’s Witch/ }).click();
-    await tv.locator('select[aria-label="Bot costume"]').selectOption('goblin');
-    await tv.getByRole('button', { name: 'Add bot' }).click();
-    await tv.waitForTimeout(500);
-    await tv.getByRole('button', { name: /Start: 3 pieces, 3 phones/ }).click();
-    await phones.Ana.getByRole('button', { name: 'Space 26', exact: true }).click();
-    await phones.Ana.getByRole('button', { name: /Set the trap/ }).click();
-    await phones.Cy.getByRole('button', { name: 'Space 18', exact: true }).click();
-    await phones.Cy.getByRole('button', { name: /Set the trap/ }).click();
-    await phones.Ben.waitForTimeout(800);
-    for (const p of Object.values(phones)) await p.getByRole('button', { name: 'Hide it' }).click().catch(() => {});
-    const controller = (g, piece) => (piece === 0 ? (g.round % 2 === 1 ? phones.Ana : phones.Ben) : piece === 1 ? phones.Cy : null);
-    const other = (g) => (g.round % 2 === 1 ? phones.Ben : phones.Ana);
-    const seen = { battle: false, phoneReward: false, phoneUse: false, choice: false, idleChecked: false };
+    for (const p of Object.values(phones)) await p.getByRole('button', { name: 'Got it' }).click().catch(() => {});
+    const pieceOf = (g, name) => (name === 'Cy' ? g.pieces.findIndex((x) => x.name === 'Cy') : g.pieces.findIndex((x) => x.name.startsWith('Ana')));
+    const controller = (g, piece) => {
+      const ana = pieceOf(g, 'Ana');
+      if (piece === ana) return g.round % 2 === 1 ? phones.Ana : phones.Ben;
+      if (piece === pieceOf(g, 'Cy')) return phones.Cy;
+      return null;
+    };
+    const seen = { forkPhone: false, jumpPhone: false, tvJump: false, reload: false, teammate: false, delays: [] };
     const t0 = Date.now();
     while (Date.now() - t0 < 900000) {
       const g = (await S(tv)).game;
@@ -725,93 +437,99 @@ try {
         await tv.waitForTimeout(400);
         continue;
       }
-      if (g.phase === 'gameOver' || (seen.battle && seen.phoneReward && seen.phoneUse) || g.round > 9) break;
-      if (g.pieces.some((p, i) => i < 2 && p.item)) seen.phoneReward = true;
-      if (g.log.some((e) => e.kind === 'itemUsed' && e.piece < 2)) seen.phoneUse = true;
+      if (g.phase === 'gameOver' || (g.round > 3 && seen.jumpPhone && seen.forkPhone)) break;
       if (g.phase === 'challenge') {
-        if (g.challenge.host === 'ghostBattle' || g.challenge.host === 'versus') {
-          if (!seen.battle) await tv.screenshot({ path: `${OUT}/70-tv-ghost-battle.png` });
-          seen.battle = true;
-        }
         for (const piece of g.challenge.participants) {
           const p = controller(g, piece);
-          const ready = p?.getByRole('button', { name: /I’m ready/ });
-          if (ready && (await ready.count())) {
-            await ready.click().catch(() => {});
-            await autoplay(p);
+          if (!p) continue;
+          const btn = p.locator('.pjump');
+          if (!(await btn.count())) continue;
+          if (!seen.jumpPhone) {
+            seen.jumpPhone = true;
+            const body = await p.locator('body').innerText();
+            check('during a rope the phone shows only a name and one Jump button — no rope', (await p.locator('canvas').count()) === 0 && (await p.locator('button').count()) === 1 && body.length < 120, body.replace(/\s+/g, ' '));
+            await p.screenshot({ path: `${OUT}/33-phone-jump.png` });
+          }
+          if (!seen.reload) {
+            seen.reload = true;
+            await p.reload();
+            await p.locator('.pjump').waitFor({ timeout: 15000 }).catch(() => {});
+            check('a phone reloaded mid-rope gets its Jump button back', (await p.locator('.pjump').count()) === 1);
+          }
+          // Press, and time how soon the TV shows the jump.
+          const before = (await arena(tv))[piece]?.jumps ?? 0;
+          const t = Date.now();
+          await p.locator('.pjump').dispatchEvent('pointerdown');
+          for (let i = 0; i < 40; i++) {
+            const a = (await arena(tv))[piece];
+            if (a && a.jumps > before) {
+              seen.tvJump = true;
+              seen.delays.push(Date.now() - t);
+              break;
+            }
+            await tv.waitForTimeout(25);
           }
         }
-        await tv.waitForTimeout(400);
+        if (seen.tvJump && !seen.tvShot) {
+          seen.tvShot = true;
+          await tv.screenshot({ path: `${OUT}/34-tv-rope-from-phones.png` });
+        }
+        await tv.waitForTimeout(500);
         continue;
       }
       const piece = g.phase === 'reward' ? g.pendingReward.piece : acting(g);
       const p = controller(g, piece);
       if (p) {
-        await p.waitForTimeout(300);
-        if (g.phase === 'reward') {
-          seen.choice = true;
-          await p.screenshot({ path: `${OUT}/71-phone-keep-or-replace.png` });
-          await p.getByRole('button', { name: /^Take / }).click().catch(() => {});
-        } else if (g.phase === 'turnStart' || (g.phase === 'choose' && !(await p.locator('.pdest.on').count()))) {
-          const use = p.locator('.item-use:enabled');
-          if (await use.count()) {
-            if (piece === 0 && !seen.idleChecked) {
-              seen.idleChecked = true;
-              const idle = other(g);
-              check('the inactive teammate sees the team’s item but has no item controls', (await idle.locator('.item-badge').count()) > 0 && (await idle.locator('.item-use').count()) === 0);
-            }
-            await p.screenshot({ path: `${OUT}/72-phone-item.png` });
-            await use.first().click().catch(() => {});
-            await tv.waitForTimeout(500);
-            continue;
+        if (piece === pieceOf(g, 'Ana') && !seen.teammate) {
+          const idle = g.round % 2 === 1 ? phones.Ben : phones.Ana;
+          await tv.waitForTimeout(500);
+          const txt = await idle.locator('body').innerText();
+          if (/teammate’s turn/.test(txt)) {
+            seen.teammate = true;
+            check('the inactive teammate sees “Your teammate’s turn” and no controls', (await idle.locator('.pbtn.primary').count()) === 0);
           }
         }
-        if (g.phase === 'choose' && !(await p.locator('.pdest.on').count())) {
-          const opts = p.locator('.pdest');
-          const battle = p.locator('.pdest', { hasText: '⚔' });
-          const hunt = p.locator('.pdest', { hasText: '👻' });
-          const pick = (await battle.count()) ? battle.first() : (await hunt.count()) ? hunt.first() : opts.nth(Math.min(2, (await opts.count()) - 1));
-          await pick.click().catch(() => {});
-        } else if (g.phase === 'hunt') {
-          const battle = p.locator('button.battle');
-          await ((await battle.count()) ? battle.first() : p.locator('.pbtn').first()).click().catch(() => {});
-          await tv.waitForTimeout(350);
-          continue;
+        const roll = p.getByRole('button', { name: /^Roll/ });
+        const arrows = p.locator('.parrow');
+        if (await arrows.count()) {
+          if (!seen.forkPhone) {
+            seen.forkPhone = true;
+            const tvWays = await tv.locator('.fork-btn').count();
+            check('the phone shows the same numbered ways as the TV', (await arrows.count()) === tvWays && tvWays > 0, `${await arrows.count()} vs ${tvWays}`);
+            await p.screenshot({ path: `${OUT}/32-phone-fork.png` });
+          }
+          await arrows.nth(Math.floor(Math.random() * (await arrows.count()))).click().catch(() => {});
+        } else if (await roll.count()) await roll.click().catch(() => {});
+        else {
+          const any = p.locator('.encounter .pbtn, .pbtn.primary').first();
+          if (await any.count()) await any.click().catch(() => {});
         }
-        const btn = p.locator('.pbtn.primary').first();
-        if ((await btn.count()) && (await btn.isEnabled().catch(() => false))) await btn.click().catch(() => {});
       }
-      await tv.waitForTimeout(350);
+      await tv.waitForTimeout(400);
     }
     const fin = (await S(tv)).game;
-    check('phones started a ghost battle through the room service', seen.battle);
-    check('a phone piece won an item, visible to the table', seen.phoneReward);
-    check('a phone controller used an item', seen.phoneUse);
-    check('the TV never receives the reward stream', fin.rewardRng === 0);
-    check('room scores still equal completed rounds', fin.pieces.reduce((a, q) => a + q.score, 0) === (fin.phase === 'gameOver' ? 10 : fin.round - 1));
-    await tv.screenshot({ path: `${OUT}/73-tv-items.png` });
-    await phones.Cy.screenshot({ path: `${OUT}/74-phone-items.png` });
+    check('phones chose paths at forks', seen.forkPhone);
+    check('a phone’s Jump press made its character jump on the TV', seen.tvJump, `press → TV ${seen.delays.length ? Math.min(...seen.delays) + '–' + Math.max(...seen.delays) : '?'} ms (browser polling on one machine; not real Wi-Fi)`);
+    check('room scores equal completed rounds; one living piece', fin.pieces.reduce((a, q) => a + q.score, 0) === (fin.phase === 'gameOver' ? 10 : fin.round - 1) && fin.pieces.filter((q) => q.alive).length === 1);
+    await tv.screenshot({ path: `${OUT}/35-tv-room-game.png` });
+    await phones.Cy.screenshot({ path: `${OUT}/36-phone-watch.png` });
+    check('the phone controller has no horizontal overflow', await phones.Ana.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     const all = [tv, ...Object.values(phones)];
-    check('no console errors (phone battles)', all.every((q) => q.errors.filter((e) => !/WebSocket/.test(e)).length === 0), all.flatMap((q) => q.errors).slice(0, 3).join(' | '));
+    check('no console errors (rooms)', all.every((q) => q.errors.filter((e) => !/WebSocket/.test(e)).length === 0), all.flatMap((q) => q.errors).slice(0, 3).join(' | '));
     for (const q of all) await q.context().close();
   }
 
   // ── 5. Screen sizes and failure states ───────────────────────────────
   if (run(5)) {
     for (const vp of [
+      { width: 1920, height: 1080, name: 'tv' },
       { width: 1440, height: 900, name: 'laptop' },
       { width: 1024, height: 768, name: 'tablet' },
-      { width: 800, height: 600, name: 'small' },
       { width: 390, height: 844, name: 'mobile' },
     ]) {
       const page = await newPage({ width: vp.width, height: vp.height }, { reducedMotion: vp.name === 'tablet' ? 'reduce' : 'no-preference' });
       await clearStorage(page, '?quality=low');
-      await setupPieces(page, ['human', 'bot', 'bot', 'bot']);
-      await page.getByRole('button', { name: /Start game/ }).click();
-      await placeAll(page);
-      await page.getByRole('button', { name: /Roll for life/ }).click();
-      await settle(page);
-      await page.getByRole('button', { name: 'Got it' }).click().catch(() => {});
+      await startLocal(page);
       await page.waitForTimeout(1500);
       await page.screenshot({ path: `${OUT}/50-${vp.name}.png` });
       const overflow = await page.evaluate(() => {
@@ -825,7 +543,8 @@ try {
       check(`${vp.name}: no horizontal clipping`, !overflow.scroll && overflow.bad.length === 0, overflow.bad.slice(0, 4).join(','));
       if (vp.name === 'tablet') check('reduced motion is honoured by default', (await S(page)).settings.reducedMotion === true);
       if (vp.name === 'laptop') {
-        await page.getByRole('button', { name: 'Sound and motion settings' }).click();
+        await page.getByRole('button', { name: 'Menu' }).click();
+        await page.getByRole('button', { name: /Sound & motion/ }).click();
         await page.getByLabel('Mute all sound').check();
         await page.keyboard.press('Escape');
         check('mute persists', (await page.evaluate(() => JSON.parse(localStorage.getItem('one-more-room/settings')).muted)) === true);
@@ -840,7 +559,6 @@ try {
     await page.getByRole('button', { name: 'Details' }).click();
     check('a candy-rules save is refused with a clear fresh-start explanation', /old candy rules/.test(await page.locator('.dialog').innerText()));
     await page.getByRole('button', { name: 'Clear saved game' }).click();
-    // A One Life save from before ghost battles, with a trap on a new Versus space.
     await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ schema: 3, session: { game: { schema: 3, traps: [{ node: 5 }] }, turnStart: { schema: 3, traps: [{ node: 5 }] }, previousTurnStart: null, known: [] } })), SAVE_KEY);
     await page.reload();
     await page.waitForTimeout(600);
@@ -852,7 +570,6 @@ try {
     await pg.goto(URL + '#/join');
     await pg.waitForTimeout(800);
     check('the Join page loads directly (hash route) and finds the service', /Join One More Room/.test(await pg.locator('body').innerText()));
-    await pg.screenshot({ path: `${OUT}/55-phone-join.png` });
     await pg.context().close();
     // A static host like GitHub Pages: same files under a sub-path, no room service.
     const { mkdtempSync, symlinkSync } = await import('node:fs');
@@ -869,17 +586,17 @@ try {
       await sp.getByRole('button', { name: /Host a phone room/ }).click();
       await sp.waitForTimeout(1500);
       const lobby = await sp.locator('.room-lobby').innerText();
-      check('static hosting: hosting a room explains the missing service and shows no join code or QR', /no room service/.test(lobby) && (await sp.locator('.room-lobby img.qr, .room-code').count()) === 0, lobby.replace(/\s+/g, ' ').slice(0, 160));
-      await sp.screenshot({ path: `${OUT}/56-static-no-service.png` });
+      check('static hosting: hosting a room explains the missing service and shows no join code or QR', /no room service/.test(lobby) && (await sp.locator('.room-lobby img.qr, .room-code').count()) === 0);
       await sp.context().close();
+      const sl = await newPage();
+      await sl.goto(PAGES + '?quality=low');
+      await startLocal(sl);
+      check('static hosting: one-screen play with bots starts a four-piece game', (await S(sl)).game?.pieces.length === 4);
+      await sl.context().close();
       const sj = await newPage({ width: 390, height: 844 });
       await sj.goto(PAGES + '#/join');
       await sj.waitForTimeout(1500);
       check('static hosting: the Join page says phone rooms need the service', /not connected to one/.test(await sj.locator('body').innerText()));
-      await sj.screenshot({ path: `${OUT}/57-static-join.png` });
-      await sj.getByRole('link', { name: 'Play on this screen' }).click();
-      await sj.waitForTimeout(1500);
-      check('static hosting: the Join page links back to one-screen play', (await sj.getByRole('button', { name: /Host a phone room/ }).count()) === 1);
       await sj.context().close();
     } finally {
       staticServer.kill();
@@ -891,16 +608,44 @@ try {
     check('clear message when WebGL is unavailable', (await p2.locator('.nowebgl').count()) === 1);
     await noGl.close();
   }
+
+  // ── 6. Every space, both cameras: the active piece stays in view ────────────
+  if (run(6)) {
+    const page = await newPage({ width: 1280, height: 800 });
+    await clearStorage(page, '?quality=low', { muted: true });
+    await startLocal(page);
+    await page.evaluate(() => window.__omr.getState().seats.forEach((s) => (s.kind = 'human')));
+    const off = [];
+    for (const mode of ['follow', 'overview']) {
+      if ((await S(page)).cameraMode !== mode) {
+        await page.keyboard.press('v');
+        await page.waitForTimeout(900);
+      }
+      for (let n = 0; n < 32; n++) {
+        await craft(
+          page,
+          `const n = arg.n; const others = [n === 16 ? 0 : 16, n === 8 ? 24 : 8, n === 24 ? 8 : 24].map((x) => (x === n ? (n + 10) % 32 : x));
+           g.pieces.forEach((p, i) => Object.assign(p, { alive: i === 1, node: i === 0 ? n : others[i - 1], facingFrom: n === 0 ? null : (n + 31) % 32 }));
+           if ([4, 12, 16, 20, 28].includes(n)) g.pieces[2].node = n;
+           g.schedule = [1, 0, 2, 3]; g.slot = 1;
+           Object.assign(g, { phase: 'turnStart', move: null, die: null, rollInfo: null, options: null, challenge: null, log: [], lastOutcome: null });`,
+          { n },
+        );
+        await page.waitForTimeout(mode === 'follow' ? 1700 : 500);
+        const p = await page.evaluate((n) => window.__omr.project(n), n);
+        if (!p.visible) off.push(`${mode}:${n}`);
+        await page.screenshot({ path: `${OUT}/60-${mode}-${String(n).padStart(2, '0')}.png` });
+      }
+    }
+    check('the active piece’s space is on screen at all 32 spaces in both cameras (look at test-results/60-*.png too)', off.length === 0, off.join(','));
+    await page.context().close();
+  }
 } catch (e) {
   check('suite ran to completion', false, e.message.split('\n')[0] + ' @ ' + (e.stack.split('\n').find((l) => l.includes('e2e.mjs')) ?? '').trim());
-  try {
-    for (const ctx of browser.contexts()) for (const pg of ctx.pages()) await pg.screenshot({ path: `${OUT}/zz-crash-${Date.now()}.png` });
-  } catch {}
 } finally {
   await browser.close();
   server?.kill();
 }
-
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} browser checks passed`);
 process.exit(failed.length ? 1 : 0);

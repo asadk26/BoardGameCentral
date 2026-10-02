@@ -512,6 +512,21 @@ function CameraRig({ mode }: { mode: SceneMode }) {
       const v = new THREE.Vector3(...nodePos(id, 0.2)).project(c);
       return { x: ((v.x + 1) / 2) * sz.width, y: ((1 - v.y) / 2) * sz.height, visible: v.z < 1 && Math.abs(v.x) < 1 && Math.abs(v.y) < 1 };
     };
+    // The clickable fork arrows on screen: way target → canvas pixel of its arrow.
+    handle.forkArrows = () => {
+      const g = getState().session?.game;
+      if (!g) return [];
+      const { camera: c, size: sz } = get();
+      const from = g.pieces[actingPiece(g)]?.node ?? 0;
+      const [fx, , fz] = nodePos(from, 0);
+      return forkChoices(g).map((ch) => {
+        const [tx, , tz] = nodePos(ch.to, 0);
+        const len = Math.hypot(tx - fx, tz - fz);
+        const along = Math.min(1.05, len * 0.5);
+        const v = new THREE.Vector3(fx + ((tx - fx) / len) * along, NODE_TOP + 0.38, fz + ((tz - fz) / len) * along).project(c);
+        return { to: ch.to, num: ch.num, x: ((v.x + 1) / 2) * sz.width, y: ((1 - v.y) / 2) * sz.height };
+      });
+    };
   }, [get]);
 
   useFrame(({ clock }, dt) => {
